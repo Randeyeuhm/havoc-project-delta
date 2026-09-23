@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v6-offset-scale"
+ESPUI.VERSION = "v7-line-boxes"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -259,8 +259,10 @@ end
 -- RENDERER
 -- ============================================================
 local HIDE_FIELDS = {
-    "boxFill", "boxOutline", "name", "dist",
-    "healthBg", "healthFill", "healthBorder", "healthText",
+    "boxFill", "name", "dist",
+    "boxEdge1", "boxEdge2", "boxEdge3", "boxEdge4",
+    "healthBg", "healthFill", "healthText",
+    "healthEdge1", "healthEdge2", "healthEdge3", "healthEdge4",
     "headDot", "tracer", "lookLine", "arrow",
     "corner1", "corner2", "corner3", "corner4",
     "corner5", "corner6", "corner7", "corner8",
@@ -465,17 +467,27 @@ function ESPUI.newRenderer(getCfg)
                     and math.clamp(t.health / t.maxHealth, 0, 1) or 1
 
                 -- Box: hide every variant first, then draw what the style needs.
-                hideDrawing(e.boxFill); hideDrawing(e.boxOutline)
+                -- Outlines are LINE objects: outline-mode Squares don't render on
+                -- every client, while lines always do (the same approach Project
+                -- Delta's own boxes use). Fills stay as filled Squares.
+                hideDrawing(e.boxFill)
+                for i = 1, 4 do hideDrawing(e["boxEdge" .. i]) end
                 for c = 1, 8 do hideDrawing(e["corner" .. c]) end
 
                 if cfg.Box then
                     if style == "Corners" then
                         local cl, th = cfg.BoxCornerLength, cfg.BoxThickness
                         local specs = cornerSpecs(rect, cl, th)
+                        local edgeT = tex(cfg.BoxTransparency)
                         for c = 1, 8 do
                             local s = specs[c]
-                            applySquare(e, "corner" .. c, s[1], s[2], s[3], s[4],
-                                boxColor, tex(cfg.BoxTransparency), true, 1)
+                            if s[3] >= s[4] then
+                                applyLine(e, "corner" .. c, s[1], s[2] + s[4] / 2, s[1] + s[3], s[2] + s[4] / 2,
+                                    boxColor, th, edgeT)
+                            else
+                                applyLine(e, "corner" .. c, s[1] + s[3] / 2, s[2], s[1] + s[3] / 2, s[2] + s[4],
+                                    boxColor, th, edgeT)
+                            end
                         end
                     else
                         local wantFill = (style == "Fill") or (style == "Full" and cfg.BoxFill)
@@ -484,8 +496,13 @@ function ESPUI.newRenderer(getCfg)
                                 boxColor, tex(cfg.BoxFillTransparency), true, 1)
                         end
                         if cfg.BoxOutline then
-                            applySquare(e, "boxOutline", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, tex(cfg.BoxTransparency), false, cfg.BoxThickness)
+                            local th = cfg.BoxThickness
+                            local edgeT = tex(cfg.BoxTransparency)
+                            local x0, y0, x1, y1 = rect.x, rect.y, rect.x + rect.w, rect.y + rect.h
+                            applyLine(e, "boxEdge1", x0, y0, x1, y0, boxColor, th, edgeT)
+                            applyLine(e, "boxEdge2", x0, y1, x1, y1, boxColor, th, edgeT)
+                            applyLine(e, "boxEdge3", x0, y0, x0, y1, boxColor, th, edgeT)
+                            applyLine(e, "boxEdge4", x1, y0, x1, y1, boxColor, th, edgeT)
                         end
                     end
                 end
@@ -517,13 +534,18 @@ function ESPUI.newRenderer(getCfg)
                     applySquare(e, "healthFill", fill.x, fill.y, fill.w, fill.h,
                         barColor, tex(cfg.HealthBarTransparency), true, 1)
                     if cfg.HealthBarOutline then
-                        applySquare(e, "healthBorder", bg.x, bg.y, bg.w, bg.h,
-                            Color3.new(0, 0, 0), 1 - 0.7 * barOpacity, false, 1)
+                        local bt = 1 - 0.7 * barOpacity
+                        local bx, by, bx1, by1 = bg.x, bg.y, bg.x + bg.w, bg.y + bg.h
+                        applyLine(e, "healthEdge1", bx, by, bx1, by, Color3.new(0, 0, 0), 1, bt)
+                        applyLine(e, "healthEdge2", bx, by1, bx1, by1, Color3.new(0, 0, 0), 1, bt)
+                        applyLine(e, "healthEdge3", bx, by, bx, by1, Color3.new(0, 0, 0), 1, bt)
+                        applyLine(e, "healthEdge4", bx1, by, bx1, by1, Color3.new(0, 0, 0), 1, bt)
                     else
-                        hideDrawing(e.healthBorder)
+                        for i = 1, 4 do hideDrawing(e["healthEdge" .. i]) end
                     end
                 else
-                    hideDrawing(e.healthBg); hideDrawing(e.healthFill); hideDrawing(e.healthBorder)
+                    hideDrawing(e.healthBg); hideDrawing(e.healthFill)
+                    for i = 1, 4 do hideDrawing(e["healthEdge" .. i]) end
                 end
 
                 if cfg.Health and (cfg.HealthStyle == "Text" or cfg.HealthStyle == "Both") then
