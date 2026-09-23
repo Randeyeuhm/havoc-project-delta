@@ -840,16 +840,25 @@ local function buildMenu()
         if v == "Always" then Config.Aimbot.Enabled = true end
         saveConfig(); refreshGUI()
     end
-    if ESPUI and ESPUI.makeSelector then
-        addControl(ESPUI.makeSelector(UILib, p1, "Activation",
-            function() return { "Hold RMB", "Always" } end,
-            function() return Config.Aimbot.Mode end,
-            onAimMode))
-    else
+    local function fallbackDropdown()
         dropdown(p1, "Activation",
             function() return { "Hold RMB", "Always" } end,
             function() return Config.Aimbot.Mode end,
             onAimMode)
+    end
+    if ESPUI and ESPUI.makeSelector then
+        local ok, sel = pcall(ESPUI.makeSelector, UILib, p1, "Activation",
+            function() return { "Hold RMB", "Always" } end,
+            function() return Config.Aimbot.Mode end,
+            onAimMode)
+        if ok and type(sel) == "table" then
+            addControl(sel)
+        else
+            warn("[Havoc Hub] Activation selector failed: " .. tostring(sel))
+            fallbackDropdown()
+        end
+    else
+        fallbackDropdown()
     end
     slider(p1, "FOV Radius",
         function() return Config.Aimbot.FOV end,

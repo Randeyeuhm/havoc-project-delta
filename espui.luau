@@ -655,20 +655,9 @@ function ESPUI.makeSelector(uilib, parent, label, getItems, getSelected, onSelec
     local THEME, FONTS = uilib.THEME, uilib.FONTS
     local ITEM_H, GAP = 24, 2
 
-    -- Take the next layout order from uilib's counter (probe + destroy) so
-    -- the selector sits in sequence with the other rows on the page.
-    local probe = uilib.makeRow(parent, 0)
-    local order = probe.LayoutOrder
-    probe:Destroy()
-
-    local row = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 30),
-        BackgroundColor3 = THEME.PANEL,
-        BorderSizePixel = 0,
-        LayoutOrder = order,
-        Parent = parent,
-    })
-    corner(row, 6); stroke(row, THEME.STROKE)
+    -- Build on uilib's own row: correct styling and page layout order for
+    -- free, with no probe/destroy tricks in between.
+    local row = uilib.makeRow(parent, 30)
 
     create("TextLabel", {
         Size = UDim2.new(1, -164, 1, 0),
@@ -815,13 +804,7 @@ function ESPUI.makeSelector(uilib, parent, label, getItems, getSelected, onSelec
     headHit.MouseEnter:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end)
     headHit.MouseLeave:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL }) end)
 
-    -- Never leave a dangling registry entry (e.g. if a page is rebuilt).
-    row.Destroying:Connect(function()
-        if openSelector and openSelector.close == collapse then openSelector = nil end
-        open = false
-    end)
-
-    update()
+    pcall(update)
     return { update = update, row = row, searchText = label }
 end
 
@@ -1365,30 +1348,53 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         end
     end
     local function reg(e) table.insert(controls, e); return e end
-    local function section(page, text) reg(UILib.makeSectionHeader(page, text)) end
+    -- Every widget goes through a labelled pcall: one bad row must never
+    -- empty a whole tab, and the console names exactly what failed.
+    local function guard(what, fn)
+        local ok, e = pcall(fn)
+        if ok and type(e) == "table" then
+            reg(e)
+            return e
+        end
+        warn(("[espui] widget '%s' failed: %s"):format(what, tostring(e)))
+        return nil
+    end
+    local function section(page, text)
+        guard("section " .. text, function() return UILib.makeSectionHeader(page, text) end)
+    end
     local function toggle(page, text, key)
-        reg(UILib.makeToggle(page, text,
-            function() return cfg[key] end,
-            function(v) cfg[key] = v end))
+        guard("toggle " .. text, function()
+            return UILib.makeToggle(page, text,
+                function() return cfg[key] end,
+                function(v) cfg[key] = v end)
+        end)
     end
     local function slider(page, text, key, step, min, max)
-        reg(UILib.makeSlider(page, text,
-            function() return cfg[key] end,
-            function(v) cfg[key] = v end, step, min, max))
+        guard("slider " .. text, function()
+            return UILib.makeSlider(page, text,
+                function() return cfg[key] end,
+                function(v) cfg[key] = v end, step, min, max)
+        end)
     end
     local function dropdown(page, text, key, items)
         -- Inline selector instead of uilib's floating dropdown: the list
         -- expands inside the row, so its clicks can never fall through to
         -- the window underneath.
-        reg(makeSelector(UILib, page, text,
-            function() return items end,
-            function() return cfg[key] end,
-            function(v) cfg[key] = v end))
+        guard("selector " .. text, function()
+            return makeSelector(UILib, page, text,
+                function() return items end,
+                function() return cfg[key] end,
+                function(v) cfg[key] = v end)
+        end)
     end
     local function colorpicker(page, text, prefix)
-        reg(UILib.makeColorPicker(page, text, cfg, prefix))
+        guard("colour picker " .. text, function()
+            return UILib.makeColorPicker(page, text, cfg, prefix)
+        end)
     end
-    local function note(page, text) UILib.makeNote(page, text, "auto") end
+    local function note(page, text)
+        pcall(function() UILib.makeNote(page, text, "auto") end)
+    end
 
     local ANCHORS = { "Above", "Below", "Inside", "Left", "Right" }
     local MODES3 = { "Static", "Team", "Rainbow" }
@@ -1520,17 +1526,20 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p6, "Update rate (frame skip)", "UpdateRate", 1, 1, 4)
     slider(p6, "Rainbow speed", "RainbowSpeed", 0.1, 0.1, 3)
     section(p6, "Reset")
-    reg(UILib.makeButton(p6, "Reset ESP settings to defaults", function()
-        for k, v in pairs(DEFAULTS) do
-            if k ~= "Enabled" then cfg[k] = v end
-        end
-        refresh()
-        if ctx.save then pcall(ctx.save) end
-        if ctx.notify then pcall(ctx.notify, "ESP settings reset to defaults") end
-    end, { confirm = true, confirmText = "Click again to reset" }))
+    guard("reset button", function()
+        return UILib.makeButton(p6, "Reset ESP settings to defaults", function()
+            for k, v in pairs(DEFAULTS) do
+                if k ~= "Enabled" then cfg[k] = v end
+            end
+            refresh()
+            if ctx.save then pcall(ctx.save) end
+            if ctx.notify then pcall(ctx.notify, "ESP settings reset to defaults") end
+        end, { confirm = true, confirmText = "Click again to reset" })
+    end)
     note(p6, "Every change applies live and is saved with the script's config.")
 
     setTab(1)
+    print("[espui] settings built (" .. tostring(#controls) .. " controls)")
 
     return options, refresh
 end
@@ -1547,21 +1556,29 @@ function ESPUI.open(ctx)
         if not showing then ui.refresh() end
         return true
     end
-    local ok, options, preview, refresh = pcall(function()
-        local THEME, FONTS = ctx.uilib.THEME, ctx.uilib.FONTS
-        local previewFrame = buildPreviewWindow(ctx, THEME, FONTS)
-        local optionsFrame, refreshFn = buildOptionsWindow(ctx, THEME, FONTS)
-        return optionsFrame, previewFrame, refreshFn
-    end)
-    if not ok then
-        warn("[espui] customizer build failed: " .. tostring(options))
-        return false, options
+    local THEME, FONTS = ctx.uilib.THEME, ctx.uilib.FONTS
+    -- Build independently: a failure in one window must not stop the other,
+    -- and both failures are reported with their real error text.
+    local okP, previewFrame = pcall(buildPreviewWindow, ctx, THEME, FONTS)
+    if not okP then
+        warn("[espui] preview build failed: " .. tostring(previewFrame))
+        previewFrame = nil
+    end
+    local okO, optionsFrame, refreshFn = pcall(buildOptionsWindow, ctx, THEME, FONTS)
+    if not okO then
+        warn("[espui] options build failed: " .. tostring(optionsFrame))
+        optionsFrame, refreshFn = nil, nil
+    end
+    if not (previewFrame and optionsFrame) then
+        if previewFrame then pcall(function() previewFrame:Destroy() end) end
+        if optionsFrame then pcall(function() optionsFrame:Destroy() end) end
+        return false, "customizer build failed"
     end
     OPEN.ui = {
         screenGui = ctx.screenGui,
-        options = options,
-        preview = preview,
-        refresh = refresh,
+        options = optionsFrame,
+        preview = previewFrame,
+        refresh = refreshFn,
     }
     return true
 end
