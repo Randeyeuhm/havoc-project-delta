@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v7-line-boxes"
+ESPUI.VERSION = "v8-primitive-test"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -862,6 +862,147 @@ end
 ESPUI.makeSelector = makeSelector
 
 -- ============================================================
+-- DRAWING PRIMITIVE TEST  (diagnostics)
+-- ============================================================
+-- Draws one of each Drawing primitive with a number label for ~12 seconds.
+-- Whatever is missing from the screen is exactly what this client cannot
+-- render - the preview window uses GUI frames so it can look fine while an
+-- in-game Drawing shape silently draws nothing (this bit us with box
+-- outlines: the fix is to build outlines from Lines, which always render).
+function ESPUI.primitiveTest()
+    print(("[espui] primitive test drawn (build %s) - screenshot the numbered shapes"):format(ESPUI.VERSION))
+    local objs = {}
+    local function keep(o)
+        table.insert(objs, o)
+        return o
+    end
+    local function item(n, fn)
+        local ok, err = pcall(fn)
+        if not ok then
+            warn(("[espui] primitive test #%d failed: %s"):format(n, tostring(err)))
+        end
+    end
+    local function label(n, text, x, y)
+        item(n, function()
+            local t = keep(Drawing.new("Text"))
+            t.Text = tostring(n) .. " " .. text
+            t.Size = 14
+            t.Center = false
+            t.Outline = true
+            t.Color = Color3.new(1, 1, 1)
+            t.Position = Vector2.new(x, y)
+            t.Visible = true
+        end)
+    end
+
+    local x0, y0, w, h, gap = 70, 60, 84, 44, 62
+    local lx = x0 + w + 14
+
+    item(1, function()
+        label(1, "filled Square", lx, y0 + h / 2 - 9)
+        local s = keep(Drawing.new("Square"))
+        s.Position = Vector2.new(x0, y0)
+        s.Size = Vector2.new(w, h)
+        s.Filled = true
+        s.Color = Color3.fromRGB(255, 60, 60)
+        s.Transparency = 0
+        s.Visible = true
+    end)
+
+    item(2, function()
+        label(2, "outline Square", lx, y0 + gap + h / 2 - 9)
+        local s = keep(Drawing.new("Square"))
+        s.Position = Vector2.new(x0, y0 + gap)
+        s.Size = Vector2.new(w, h)
+        s.Filled = false
+        s.Thickness = 2
+        s.Color = Color3.fromRGB(60, 255, 60)
+        s.Transparency = 0
+        s.Visible = true
+    end)
+
+    item(3, function()
+        label(3, "Line rectangle", lx, y0 + gap * 2 + h / 2 - 9)
+        local ly = y0 + gap * 2
+        local edges = {
+            { x0, ly, x0 + w, ly },
+            { x0 + w, ly, x0 + w, ly + h },
+            { x0 + w, ly + h, x0, ly + h },
+            { x0, ly + h, x0, ly },
+        }
+        for _, e in ipairs(edges) do
+            local ln = keep(Drawing.new("Line"))
+            ln.From = Vector2.new(e[1], e[2])
+            ln.To = Vector2.new(e[3], e[4])
+            ln.Thickness = 2
+            ln.Color = Color3.fromRGB(80, 140, 255)
+            ln.Transparency = 0
+            ln.Visible = true
+        end
+    end)
+
+    item(4, function()
+        label(4, "filled Quad", lx, y0 + gap * 3 + h / 2 - 9)
+        local q = keep(Drawing.new("Quad"))
+        local qy = y0 + gap * 3
+        q.PointA = Vector2.new(x0, qy)
+        q.PointB = Vector2.new(x0 + w, qy)
+        q.PointC = Vector2.new(x0 + w, qy + h)
+        q.PointD = Vector2.new(x0, qy + h)
+        q.Filled = true
+        q.Color = Color3.fromRGB(255, 220, 60)
+        q.Transparency = 0
+        q.Visible = true
+    end)
+
+    item(5, function()
+        label(5, "outline Quad", lx, y0 + gap * 4 + h / 2 - 9)
+        local q = keep(Drawing.new("Quad"))
+        local qy = y0 + gap * 4
+        q.PointA = Vector2.new(x0, qy)
+        q.PointB = Vector2.new(x0 + w, qy)
+        q.PointC = Vector2.new(x0 + w, qy + h)
+        q.PointD = Vector2.new(x0, qy + h)
+        q.Filled = false
+        q.Thickness = 2
+        q.Color = Color3.fromRGB(255, 130, 60)
+        q.Transparency = 0
+        q.Visible = true
+    end)
+
+    item(6, function()
+        label(6, "filled Circle", lx, y0 + gap * 5 + h / 2 - 9)
+        local c = keep(Drawing.new("Circle"))
+        c.Position = Vector2.new(x0 + w / 2, y0 + gap * 5 + h / 2)
+        c.Radius = h / 2
+        c.NumSides = 24
+        c.Filled = true
+        c.Color = Color3.fromRGB(80, 220, 220)
+        c.Transparency = 0
+        c.Visible = true
+    end)
+
+    item(7, function()
+        label(7, "filled Triangle", lx, y0 + gap * 6 + h / 2 - 9)
+        local t = keep(Drawing.new("Triangle"))
+        local ty = y0 + gap * 6
+        t.PointA = Vector2.new(x0 + w / 2, ty)
+        t.PointB = Vector2.new(x0 + w, ty + h)
+        t.PointC = Vector2.new(x0, ty + h)
+        t.Filled = true
+        t.Color = Color3.fromRGB(255, 80, 220)
+        t.Transparency = 0
+        t.Visible = true
+    end)
+
+    task.delay(12, function()
+        for _, o in ipairs(objs) do
+            pcall(function() o:Remove() end)
+        end
+    end)
+end
+
+-- ============================================================
 -- CUSTOMIZER UI  (preview window + settings window)
 -- ============================================================
 local OPEN = { ui = nil }
@@ -1433,6 +1574,14 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         end, { confirm = true, confirmText = "Click again to reset" })
     end)
     note(p6, "Every change applies live and is saved with the script's config.")
+    section(p6, "Diagnostics")
+    guard("primitive test button", function()
+        return UILib.makeButton(p6, "Drawing primitive test (12s)", function()
+            ESPUI.primitiveTest()
+            if ctx.notify then pcall(ctx.notify, "Primitive test drawn - screenshot the numbered shapes") end
+        end)
+    end)
+    note(p6, "Draws one of each Drawing shape with numbers. Whatever is missing from the screenshot is what this client cannot render.")
 
     win.setTab(1)
     print("[espui] settings built (" .. tostring(#controls) .. " controls)")
