@@ -17,7 +17,7 @@ Adding support for a new game is just dropping a `<PlaceId>.luau` file into `gam
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"))()
 ```
 
-The loader downloads the matching script plus the shared modules (`uilib.luau` and `espui.luau`) into your executor's workspace folder (only rewriting files when they changed), then runs it. Your existing configs keep working since they live in the same folder.
+Everything runs through `loadstring` — the loader fetches the matching script plus the shared modules (`uilib.luau` and `espui.luau`) and loads them straight into memory. Nothing is copied into your executor's workspace; only your config files are written there.
 
 ## Games
 
@@ -41,13 +41,13 @@ Generic toolkit for games without a dedicated script:
 
 ## Manual setup (without the loader)
 
-Copy `games/7336302630.luau` (or `games/universal.luau`) plus `uilib.luau` into your executor's workspace folder (same place the config files are written), then execute the script. If `uilib.luau` is missing, everything except the settings menu still runs — you'll just see a warning.
+Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's workspace folder and execute it. The shared modules (`uilib.luau`, and `espui.luau` for the universal script) are only needed if nothing fetched them for you — without them the affected menu / ESP features are skipped with a warning.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `loader.luau` | Hub loader — picks by PlaceId, syncs files, runs |
+| `loader.luau` | Hub loader — picks by PlaceId, fetches modules, runs everything via loadstring |
 | `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
 | `uilib.luau` | Shared UI toolkit — widgets, toasts, rebind capture, popup management |
@@ -57,7 +57,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) plus `uilib.luau` into 
 
 ## Configuration
 
-- Havoc saves to `havoc_delta_config.json`, the universal script to `universal_hub_config.json` — both in the executor workspace next to the scripts
+- Havoc saves to `havoc_delta_config.json`, the universal script to `universal_hub_config.json` — the only files the hub writes to the executor workspace
 - Persists keybinds (including enabled/disabled state), feature toggles and values
 - To reset a script: delete its config file from the workspace folder and re-execute
 

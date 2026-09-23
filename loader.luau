@@ -17,9 +17,9 @@
     Adding support for a new game = drop a "<PlaceId>.luau" file into the
     repo's games/ folder and push. No loader changes needed.
 
-    It also syncs uilib.luau + espui.luau (shared UI toolkit and ESP
-    customizer) into the executor's workspace folder, since the scripts read
-    them from disk. Files are only rewritten when the content changed.
+    It also fetches uilib.luau + espui.luau (shared UI toolkit and ESP
+    customizer) and hands their sources to the game script, which loads them
+    with loadstring - nothing is ever written to the executor's workspace.
 ]]
 
 local USER   = "Randeyeuhm"
@@ -55,19 +55,6 @@ local function fetch(path)
     return nil, tostring(res)
 end
 
--- Write to the executor workspace only when the content changed, so a file
--- that is already current is left untouched.
-local function syncToDisk(name, src)
-    if type(writefile) ~= "function" then return false, "no filesystem API" end
-    if type(readfile) == "function" then
-        local ok, cur = pcall(readfile, name)
-        if ok and cur == src then return true, "up to date" end
-    end
-    local ok, err = pcall(writefile, name, src)
-    if ok then return true, "updated" end
-    return false, tostring(err)
-end
-
 local function baseName(path)
     return (path:match("([^/]+)$")) or path
 end
@@ -90,28 +77,28 @@ if not gameSrc then
 end
 log(("fetched %s (%.1f KB)"):format(baseName(gamePath), #gameSrc / 1024))
 
--- 2) Shared modules - non-fatal, local copies still work if a fetch fails.
+-- 2) Shared modules - fetched here and handed to the game script as SOURCES
+--    (it loadstring()s them). Nothing is written to the workspace.
+local moduleSources = {}
 for _, name in ipairs({ UILIB_FILE, ESPUI_FILE }) do
     local src = fetch(name)
     if src then
-        local ok, status = syncToDisk(name, src)
-        if ok then
-            log(("%s: %s (%.1f KB)"):format(name, status, #src / 1024))
-            if name == ESPUI_FILE then
-                -- Echo the build string so a stale local copy is obvious.
-                local ver = src:match("ESPUI%.VERSION%s*=%s*\"([^\"]+)\"")
-                log("espui build: " .. (ver or "unknown"))
-            end
-        else
-            warn("[Havoc Hub] could not save " .. name .. " (" .. tostring(status) .. ")")
+        moduleSources[name] = src
+        log(("%s: %.1f KB"):format(name, #src / 1024))
+        if name == ESPUI_FILE then
+            -- Echo the build string so a stale module is obvious.
+            local ver = src:match("ESPUI%.VERSION%s*=%s*\"([^\"]+)\"")
+            log("espui build: " .. (ver or "unknown"))
         end
     else
-        warn("[Havoc Hub] could not update " .. name .. " - using the local copy if present")
+        warn("[Havoc Hub] could not fetch " .. name .. " - the script will fall back to a local copy if present")
     end
 end
-
--- Keep a local copy of the loaded script, for manual runs.
-syncToDisk(baseName(gamePath), gameSrc)
+if type(getgenv) == "function" then
+    getgenv().HAVOC_HUB_SOURCES = moduleSources
+else
+    warn("[Havoc Hub] getgenv unavailable - the script needs local module files")
+end
 
 -- 3) Run it.
 local chunk, compileErr = loadstring(gameSrc, "@" .. gamePath)

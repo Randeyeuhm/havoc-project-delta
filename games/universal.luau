@@ -105,12 +105,29 @@ end
 -- ============================================================
 -- UI LIBRARY (uilib.luau, shared with the game scripts)
 -- ============================================================
+-- Sources arrive from the hub loader (it fetches them and stashes them at
+-- getgenv().HAVOC_HUB_SOURCES) - pure loadstring, nothing is written to the
+-- executor workspace. Running this script manually falls back to local
+-- copies when present.
+local function moduleSource(name)
+    local genv = type(getgenv) == "function" and getgenv() or nil
+    local stash = genv and genv.HAVOC_HUB_SOURCES
+    if type(stash) == "table" and type(stash[name]) == "string" and stash[name] ~= "" then
+        return stash[name]
+    end
+    if type(readfile) == "function" then
+        local ok, src = pcall(readfile, name)
+        if ok and type(src) == "string" and src ~= "" then return src end
+    end
+    return nil
+end
+
 local UILIB_FILE = "uilib.luau"
 local UILib
 do
     local ok, res = pcall(function()
-        local src = readfile(UILIB_FILE)
-        if type(src) ~= "string" or src == "" then error("empty file") end
+        local src = moduleSource(UILIB_FILE)
+        if not src then error("no source (loader stash empty, no local file)") end
         local chunk, compileErr = loadstring(src, "@" .. UILIB_FILE)
         if not chunk then error("compile error: " .. tostring(compileErr)) end
         return chunk()
@@ -129,8 +146,8 @@ local ESPUI_FILE = "espui.luau"
 local ESPUI
 do
     local ok, res = pcall(function()
-        local src = readfile(ESPUI_FILE)
-        if type(src) ~= "string" or src == "" then error("empty file") end
+        local src = moduleSource(ESPUI_FILE)
+        if not src then error("no source (loader stash empty, no local file)") end
         local chunk, compileErr = loadstring(src, "@" .. ESPUI_FILE)
         if not chunk then error("compile error: " .. tostring(compileErr)) end
         return chunk()
