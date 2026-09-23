@@ -1239,6 +1239,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
                     -- uilib dropdowns don't auto-save (host-owned, unlike
                     -- toggles and sliders) - persist the pick here.
                     if ctx.save then pcall(ctx.save) end
+                    print(("[espui] %s = %s"):format(text, tostring(v)))
                 end,
                 popupLayer)
         end)

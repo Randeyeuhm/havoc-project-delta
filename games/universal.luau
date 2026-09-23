@@ -646,7 +646,10 @@ local function buildMenu()
     end
     local function dropdown(page, label, getItems, getSelected, onSelect)
         guard("dropdown " .. label, function()
-            return UILib.makeDropdown(page, label, getItems, getSelected, onSelect, win.popupLayer)
+            return UILib.makeDropdown(page, label, getItems, getSelected, function(v)
+                print(("[universal] %s = %s"):format(label, tostring(v)))
+                onSelect(v)
+            end, win.popupLayer)
         end)
     end
     local function button(page, text, onClick, opts)

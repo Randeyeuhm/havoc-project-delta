@@ -67,7 +67,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w2-toaster"
+UILib.VERSION = "w3-select"
 
 -- ============================================================
 -- UI THEME
@@ -406,9 +406,26 @@ end
 
 local function isOver(gui, pos)
     if not gui or not gui.Parent then return false end
-    local p = toGuiSpace(gui, pos)
     local a, s = gui.AbsolutePosition, gui.AbsoluteSize
-    return p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y
+    local function inside(p)
+        return p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y
+    end
+    local base = Vector2.new(pos.X, pos.Y)
+    if inside(base) then return true end
+    -- Client input coordinates and AbsolutePosition can differ by the
+    -- top-bar inset, and which side of the inset the input sits on has
+    -- changed between client builds. Treat either side of that band as
+    -- "inside", so click-away can never steal a deliberate press on a
+    -- widget (this was closing dropdown lists between mouse-down and
+    -- mouse-up, making item selection impossible).
+    local ok, inset = pcall(function() return GuiService:GetGuiInset() end)
+    local iy = (ok and inset and inset.Y) or 0
+    if iy > 0 then
+        if inside(base + Vector2.new(0, iy)) or inside(base - Vector2.new(0, iy)) then
+            return true
+        end
+    end
+    return false
 end
 
 local drag = nil          -- { gui, move, finish } while a pointer drag runs
@@ -1199,7 +1216,12 @@ local function makeDropdown(parent, label, getItems, getSelected, onSelect, over
         isOpen = state
         if moveConn then moveConn:Disconnect(); moveConn = nil end
         if not state then
-            list.Visible = false
+            -- Hide a frame later, not right now: if this close came from the
+            -- same press that is picking an item, the item must survive its
+            -- own release or the selection could never commit.
+            task.defer(function()
+                if not isOpen then list.Visible = false end
+            end)
             row.ZIndex = 1
             tween(arrow, 0.12, { Rotation = 0 })
             releasePopup(popup)
@@ -1254,7 +1276,10 @@ local function makeDropdown(parent, label, getItems, getSelected, onSelect, over
             else
                 hoverTint(b, b, "PANEL", "PANEL_HI")
             end
-            b.MouseButton1Click:Connect(function()
+            -- Commit on press, not release: the click-away handler may close
+            -- this list on the same input, and a release-time click would
+            -- then never fire. (Dropdown lists here never scroll - 5 items.)
+            b.MouseButton1Down:Connect(function()
                 setOpen(false)
                 onSelect(name)
                 update()
