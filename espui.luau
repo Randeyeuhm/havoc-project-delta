@@ -38,6 +38,9 @@ local ESPUI = {}
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
 -- makeColorPicker can edit them directly via prefix)
 -- ============================================================
+-- NOTE: every "*Transparency" field below is actually OPACITY (1 = fully
+-- visible, 0 = invisible) - the renderer maps them with 1 - value. Sliders
+-- are labelled "Opacity" to match.
 local DEFAULTS = {
     -- master + filters
     Enabled = false, TeamCheck = false, VisibleOnly = false,
@@ -70,24 +73,24 @@ local DEFAULTS = {
 
     -- tracers
     Tracers = false, TracerOrigin = "Bottom", TracerOffsetX = 0, TracerOffsetY = 0,
-    TracerThickness = 1, TracerTransparency = 0.35,
+    TracerThickness = 1, TracerTransparency = 0.65,
     TracerColorMode = "Static", TracerR = 255, TracerG = 80, TracerB = 80,
 
     -- extras
     HeadDot = false, HeadDotSize = 4,
     HeadDotColorMode = "Static", HeadDotR = 255, HeadDotG = 255, HeadDotB = 255,
 
-    Skeleton = false, SkeletonThickness = 1, SkeletonTransparency = 0.2,
+    Skeleton = false, SkeletonThickness = 1, SkeletonTransparency = 0.8,
     SkeletonColorMode = "Static", SkeletonR = 255, SkeletonG = 255, SkeletonB = 255,
 
     LookLine = false, LookLineLength = 60, LookLineThickness = 1, LookLineTransparency = 0.5,
     LookLineColorMode = "Static", LookLineR = 96, LookLineG = 132, LookLineB = 218,
 
-    Arrow = false, ArrowSize = 10, ArrowRadius = 170, ArrowThickness = 1, ArrowTransparency = 0.3,
+    Arrow = false, ArrowSize = 10, ArrowRadius = 170, ArrowThickness = 1, ArrowTransparency = 0.7,
     ArrowColorMode = "Static", ArrowR = 255, ArrowG = 80, ArrowB = 80,
 
     Chams = false, ChamsAlwaysOnTop = true,
-    ChamsFillTransparency = 0.6, ChamsOutlineTransparency = 0.3,
+    ChamsFillTransparency = 0.4, ChamsOutlineTransparency = 0.7,
     ChamsFillR = 255, ChamsFillG = 80, ChamsFillB = 80,
     ChamsOutlineR = 255, ChamsOutlineG = 120, ChamsOutlineB = 120,
 }
@@ -182,8 +185,8 @@ end
 local function textCenter(anchor, r, offX, offY)
     local cx, cy = r.x + r.w / 2, r.y + r.h / 2
     offX, offY = offX or 0, offY or 0
-    if anchor == "Above" then return cx + offX, r.y - 9 + offY end
-    if anchor == "Below" then return cx + offX, r.y + r.h + 13 + offY end
+    if anchor == "Above" then return cx + offX, r.y - 13 + offY end
+    if anchor == "Below" then return cx + offX, r.y + r.h + 5 + offY end
     if anchor == "Inside" then return cx + offX, r.y + 9 + offY end
     if anchor == "Left" then return r.x - 40 + offX, cy + offY end
     if anchor == "Right" then return r.x + r.w + 40 + offX, cy + offY end
@@ -345,9 +348,9 @@ function ESPUI.newRenderer(getCfg)
             hl.Adornee = model
             if hl.Parent ~= model then hl.Parent = model end
             hl.FillColor = Color3.fromRGB(cfg.ChamsFillR, cfg.ChamsFillG, cfg.ChamsFillB)
-            hl.FillTransparency = cfg.ChamsFillTransparency
+            hl.FillTransparency = 1 - cfg.ChamsFillTransparency
             hl.OutlineColor = Color3.fromRGB(cfg.ChamsOutlineR, cfg.ChamsOutlineG, cfg.ChamsOutlineB)
-            hl.OutlineTransparency = cfg.ChamsOutlineTransparency
+            hl.OutlineTransparency = 1 - cfg.ChamsOutlineTransparency
             hl.DepthMode = cfg.ChamsAlwaysOnTop
                 and Enum.HighlightDepthMode.AlwaysOnTop
                 or Enum.HighlightDepthMode.Occluded
@@ -642,6 +645,187 @@ function ESPUI.newRenderer(getCfg)
 end
 
 -- ============================================================
+-- INLINE SELECTOR  (replaces floating dropdowns: the option list expands
+-- INSIDE the row, so its clicks can never fall through to the window below)
+-- ============================================================
+local openSelector = nil  -- { close = fn } of the currently expanded one
+
+function ESPUI.makeSelector(uilib, parent, label, getItems, getSelected, onSelect)
+    local create, corner, stroke, tween = uilib.create, uilib.corner, uilib.stroke, uilib.tween
+    local THEME, FONTS = uilib.THEME, uilib.FONTS
+    local ITEM_H, GAP = 24, 2
+
+    -- Take the next layout order from uilib's counter (probe + destroy) so
+    -- the selector sits in sequence with the other rows on the page.
+    local probe = uilib.makeRow(parent, 0)
+    local order = probe.LayoutOrder
+    probe:Destroy()
+
+    local row = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = THEME.PANEL,
+        BorderSizePixel = 0,
+        LayoutOrder = order,
+        Parent = parent,
+    })
+    corner(row, 6); stroke(row, THEME.STROKE)
+
+    create("TextLabel", {
+        Size = UDim2.new(1, -164, 1, 0),
+        Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1,
+        Text = label,
+        TextColor3 = THEME.TEXT,
+        TextSize = 12,
+        Font = FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = row,
+    })
+
+    local valueChip = create("Frame", {
+        Size = UDim2.fromOffset(128, 22),
+        Position = UDim2.new(1, -140, 0.5, -11),
+        BackgroundColor3 = THEME.PANEL_HI,
+        BorderSizePixel = 0,
+        Parent = row,
+    })
+    corner(valueChip, 4); stroke(valueChip, THEME.STROKE)
+    local valueLbl = create("TextLabel", {
+        Size = UDim2.new(1, -26, 1, 0),
+        Position = UDim2.fromOffset(8, 0),
+        BackgroundTransparency = 1,
+        Text = "—",
+        TextColor3 = THEME.TEXT,
+        TextSize = 11,
+        Font = FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = valueChip,
+    })
+    local arrow = create("TextLabel", {
+        Size = UDim2.fromOffset(12, 22),
+        Position = UDim2.new(1, -18, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "▼",
+        TextColor3 = THEME.TEXT_DIM,
+        TextSize = 8,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = valueChip,
+    })
+
+    -- The expanding list, clipped by this body while the row tweens open.
+    local body = create("Frame", {
+        Size = UDim2.new(1, -16, 0, 0),
+        Position = UDim2.fromOffset(8, 34),
+        BackgroundTransparency = 1,
+        ClipsDescendants = true,
+        Visible = false,
+        Parent = row,
+    })
+    create("UIListLayout", {
+        Padding = UDim.new(0, GAP),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = body,
+    })
+
+    local headHit = create("TextButton", {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundTransparency = 1,
+        AutoButtonColor = false,
+        Text = "",
+        Parent = row,
+    })
+
+    local itemButtons, itemNames = {}, {}
+    local open = false
+    local collapse
+
+    local function update()
+        local sel = getSelected()
+        local text = (sel ~= nil and sel ~= "") and tostring(sel) or "—"
+        if valueLbl.Text ~= text then valueLbl.Text = text end
+        if open then
+            for i, b in ipairs(itemButtons) do
+                b.BackgroundColor3 = (itemNames[i] == sel) and THEME.ACCENT or THEME.PANEL_HI
+            end
+        end
+    end
+
+    local function buildItems()
+        for _, b in ipairs(itemButtons) do b:Destroy() end
+        itemButtons, itemNames = {}, {}
+        local items = getItems() or {}
+        for i, name in ipairs(items) do
+            local isSel = (name == getSelected())
+            local b = create("TextButton", {
+                Size = UDim2.new(1, 0, 0, ITEM_H),
+                LayoutOrder = i,
+                BackgroundColor3 = isSel and THEME.ACCENT or THEME.PANEL_HI,
+                BorderSizePixel = 0,
+                AutoButtonColor = false,
+                Text = tostring(name),
+                TextColor3 = THEME.TEXT,
+                TextSize = 11,
+                Font = FONTS.MEDIUM,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = body,
+            })
+            corner(b, 4)
+            create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 6), Parent = b })
+            b.MouseButton1Click:Connect(function()
+                onSelect(name)
+                collapse()
+                update()
+            end)
+            itemButtons[i] = b
+            itemNames[i] = name
+        end
+        return #items
+    end
+
+    collapse = function()
+        if not open then return end
+        open = false
+        body.Visible = false
+        tween(row, 0.15, { Size = UDim2.new(1, 0, 0, 30) })
+        tween(arrow, 0.12, { Rotation = 0 })
+        if openSelector and openSelector.close == collapse then openSelector = nil end
+    end
+
+    local function expand()
+        if openSelector and openSelector.close ~= collapse then
+            openSelector.close()
+        end
+        local n = buildItems()
+        if n == 0 then return end
+        local h = n * ITEM_H + math.max(n - 1, 0) * GAP + 8
+        body.Size = UDim2.new(1, -16, 0, h)
+        body.Visible = true
+        open = true
+        openSelector = { close = collapse }
+        tween(row, 0.15, { Size = UDim2.new(1, 0, 0, 40 + h) })
+        tween(arrow, 0.12, { Rotation = 180 })
+    end
+
+    headHit.MouseButton1Click:Connect(function()
+        if open then collapse() else expand() end
+    end)
+    headHit.MouseEnter:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end)
+    headHit.MouseLeave:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL }) end)
+
+    -- Never leave a dangling registry entry (e.g. if a page is rebuilt).
+    row.Destroying:Connect(function()
+        if openSelector and openSelector.close == collapse then openSelector = nil end
+        open = false
+    end)
+
+    update()
+    return { update = update, row = row, searchText = label }
+end
+
+-- ============================================================
 -- CUSTOMIZER UI  (preview window + settings window)
 -- ============================================================
 local OPEN = { ui = nil }
@@ -659,6 +843,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         BorderSizePixel = 0,
         Active = true,
         Draggable = true,
+        ZIndex = 20,
         Parent = ctx.screenGui,
     })
     corner(preview, 10); stroke(preview, THEME.STROKE)
@@ -719,8 +904,6 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
     corner(vp, 8); stroke(vp, THEME.STROKE)
 
     local vpCam = create("Camera", {})
-    vpCam.CFrame = CFrame.lookAt(Vector3.new(0, 3.2, -12), Vector3.new(0, 3, 0))
-    vp.CurrentCamera = vpCam
 
     -- Overlay: every ESP element, drawn over the viewport like it would be
     -- over the game.
@@ -773,6 +956,38 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         end
         pcall(function() model:PivotTo(CFrame.new(0, 0, 0)) end)
         model.Parent = vp
+    end
+
+    -- Frame the dummy: measure it once, then aim a pinhole camera at its
+    -- centre from the front. ViewportFrame cameras do not map their
+    -- WorldToViewportPoint to frame pixels, so the overlay projection below
+    -- is done manually with this camera instead.
+    local modelCF, modelSize
+    do
+        local ok, cf, sz = pcall(function()
+            local a, b = model:GetBoundingBox()
+            return a, b
+        end)
+        if ok and cf then
+            modelCF, modelSize = cf, sz
+            local center = cf.Position
+            local dist = sz.Y * 1.35 + 1.5
+            vpCam.CFrame = CFrame.lookAt(center + Vector3.new(0, sz.Y * 0.12, -dist), center)
+        end
+    end
+    vp.CurrentCamera = vpCam
+
+    local function projectPoint(world)
+        if not modelCF then return nil end
+        local szp = vp.AbsoluteSize
+        if szp.Y < 10 then return nil end
+        local rel = vpCam.CFrame:PointToObjectSpace(world)
+        if rel.Z >= -0.05 then return nil end
+        local focal = (szp.Y / 2) / math.tan(math.rad(vpCam.FieldOfView / 2))
+        return Vector2.new(
+            szp.X / 2 + (rel.X / -rel.Z) * focal,
+            szp.Y / 2 - (rel.Y / -rel.Z) * focal
+        )
     end
 
     -- Element frames (positioned every update from the shared layout math).
@@ -833,21 +1048,17 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         local demoTeam = (lp.Team and lp.Team.TeamColor.Color) or Color3.fromRGB(255, 80, 80)
         local now = os.clock() * 0.18 * (cfg.RainbowSpeed or 1)
 
-        -- Box rect: project the dummy's bounding box through the viewport
-        -- camera; fall back to a sensible fixed rect if that fails.
+        -- Box rect: project the dummy's bounding box through the preview
+        -- camera (manual pinhole projection - ViewportFrame cameras don't
+        -- map WorldToViewportPoint to frame pixels).
         local rect
-        local ok, cf, sz = pcall(function()
-            local a, b = model:GetBoundingBox()
-            return a, b
-        end)
-        if ok and cf then
-            local tp = vpCam:WorldToViewportPoint(cf.Position + Vector3.new(0, sz.Y / 2, 0))
-            local bp = vpCam:WorldToViewportPoint(cf.Position - Vector3.new(0, sz.Y / 2, 0))
-            if tp.Z > 0 and bp.Z > 0 then
-                local topY, botY = math.min(tp.Y, bp.Y), math.max(tp.Y, bp.Y)
-                local h = math.max(botY - topY, 40)
-                local w = h * 0.55
-                rect = { x = (tp.X + bp.X) / 2 - w / 2, y = topY, w = w, h = h }
+        if modelCF and modelSize then
+            local top = projectPoint(modelCF.Position + Vector3.new(0, modelSize.Y / 2, 0))
+            local bot = projectPoint(modelCF.Position - Vector3.new(0, modelSize.Y / 2, 0))
+            if top and bot then
+                local h = math.max(bot.Y - top.Y, 40)
+                local w = h * (modelSize.X / math.max(modelSize.Y, 0.01))
+                rect = { x = (top.X + bot.X) / 2 - w / 2, y = top.Y, w = w, h = h }
             end
         end
         if not rect then
@@ -1021,6 +1232,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         BorderSizePixel = 0,
         Active = true,
         Draggable = true,
+        ZIndex = 20,
         Parent = ctx.screenGui,
     })
     corner(options, 10); stroke(options, THEME.STROKE)
@@ -1165,10 +1377,13 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
             function(v) cfg[key] = v end, step, min, max))
     end
     local function dropdown(page, text, key, items)
-        reg(UILib.makeDropdown(page, text,
+        -- Inline selector instead of uilib's floating dropdown: the list
+        -- expands inside the row, so its clicks can never fall through to
+        -- the window underneath.
+        reg(makeSelector(UILib, page, text,
             function() return items end,
             function() return cfg[key] end,
-            function(v) cfg[key] = v end, options))
+            function(v) cfg[key] = v end))
     end
     local function colorpicker(page, text, prefix)
         reg(UILib.makeColorPicker(page, text, cfg, prefix))
@@ -1188,7 +1403,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     toggle(p1, "Fill", "BoxFill")
     slider(p1, "Thickness", "BoxThickness", 1, 1, 4)
     slider(p1, "Opacity", "BoxTransparency", 0.05, 0.05, 1)
-    slider(p1, "Fill transparency", "BoxFillTransparency", 0.05, 0, 1)
+    slider(p1, "Fill opacity", "BoxFillTransparency", 0.05, 0, 1)
     slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
     dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
     colorpicker(p1, "Box colour", "Box")
@@ -1203,7 +1418,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p2, "Offset Y", "NameOffsetY", 1, -100, 100)
     slider(p2, "Text size", "NameSize", 1, 8, 20)
     dropdown(p2, "Source", "NameSource", { "Username", "DisplayName" })
-    toggle(p2, "Show health", "NameShowHealth")
+    toggle(p2, "Show health suffix", "NameShowHealth")
     toggle(p2, "Outline", "NameOutline")
     dropdown(p2, "Colour mode", "NameColorMode", MODES3)
     colorpicker(p2, "Name colour", "Name")
@@ -1253,7 +1468,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p5, "Origin offset X", "TracerOffsetX", 1, -200, 200)
     slider(p5, "Origin offset Y", "TracerOffsetY", 1, -200, 200)
     slider(p5, "Thickness", "TracerThickness", 1, 1, 3)
-    slider(p5, "Transparency", "TracerTransparency", 0.05, 0, 1)
+    slider(p5, "Opacity", "TracerTransparency", 0.05, 0, 1)
     dropdown(p5, "Colour mode", "TracerColorMode", MODES3)
     colorpicker(p5, "Tracer colour", "Tracer")
 
@@ -1266,7 +1481,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     section(p5, "Skeleton")
     toggle(p5, "Skeleton enabled", "Skeleton")
     slider(p5, "Thickness", "SkeletonThickness", 1, 1, 3)
-    slider(p5, "Transparency", "SkeletonTransparency", 0.05, 0, 1)
+    slider(p5, "Opacity", "SkeletonTransparency", 0.05, 0, 1)
     dropdown(p5, "Colour mode", "SkeletonColorMode", MODES3)
     colorpicker(p5, "Skeleton colour", "Skeleton")
 
@@ -1274,7 +1489,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     toggle(p5, "Look line enabled", "LookLine")
     slider(p5, "Length", "LookLineLength", 5, 10, 200)
     slider(p5, "Thickness", "LookLineThickness", 1, 1, 3)
-    slider(p5, "Transparency", "LookLineTransparency", 0.05, 0, 1)
+    slider(p5, "Opacity", "LookLineTransparency", 0.05, 0, 1)
     dropdown(p5, "Colour mode", "LookLineColorMode", MODES3)
     colorpicker(p5, "Look line colour", "LookLine")
 
@@ -1283,16 +1498,16 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p5, "Arrow size", "ArrowSize", 1, 4, 24)
     slider(p5, "Radius from centre", "ArrowRadius", 5, 40, 400)
     slider(p5, "Thickness", "ArrowThickness", 1, 1, 3)
-    slider(p5, "Transparency", "ArrowTransparency", 0.05, 0, 1)
+    slider(p5, "Opacity", "ArrowTransparency", 0.05, 0, 1)
     dropdown(p5, "Colour mode", "ArrowColorMode", MODES3)
     colorpicker(p5, "Arrow colour", "Arrow")
 
     section(p5, "Chams (Highlight)")
     toggle(p5, "Chams enabled", "Chams")
     toggle(p5, "Always on top", "ChamsAlwaysOnTop")
-    slider(p5, "Fill transparency", "ChamsFillTransparency", 0.05, 0, 1)
+    slider(p5, "Fill opacity", "ChamsFillTransparency", 0.05, 0, 1)
     colorpicker(p5, "Fill colour", "ChamsFill")
-    slider(p5, "Outline transparency", "ChamsOutlineTransparency", 0.05, 0, 1)
+    slider(p5, "Outline opacity", "ChamsOutlineTransparency", 0.05, 0, 1)
     colorpicker(p5, "Outline colour", "ChamsOutline")
     note(p5, "Chams can't render inside the preview window - check them in-game.")
 

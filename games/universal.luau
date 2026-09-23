@@ -833,17 +833,24 @@ local function buildMenu()
         function() return Config.Aimbot.Enabled end,
         function(v) Config.Aimbot.Enabled = v end,
         hotkeyById.ToggleAimbot)
-    dropdown(p1, "Activation",
-        function() return { "Hold RMB", "Always" } end,
-        function() return Config.Aimbot.Mode end,
-        function(v)
-            -- uilib dropdowns don't auto-save (host-owned, same as Havoc),
-            -- and picking "Always" should start aiming right away instead
-            -- of silently doing nothing while the master toggle is off.
-            Config.Aimbot.Mode = v
-            if v == "Always" then Config.Aimbot.Enabled = true end
-            saveConfig(); refreshGUI()
-        end)
+    local function onAimMode(v)
+        -- Picking "Always" should start aiming right away instead of silently
+        -- doing nothing while the master toggle is off.
+        Config.Aimbot.Mode = v
+        if v == "Always" then Config.Aimbot.Enabled = true end
+        saveConfig(); refreshGUI()
+    end
+    if ESPUI and ESPUI.makeSelector then
+        addControl(ESPUI.makeSelector(UILib, p1, "Activation",
+            function() return { "Hold RMB", "Always" } end,
+            function() return Config.Aimbot.Mode end,
+            onAimMode))
+    else
+        dropdown(p1, "Activation",
+            function() return { "Hold RMB", "Always" } end,
+            function() return Config.Aimbot.Mode end,
+            onAimMode)
+    end
     slider(p1, "FOV Radius",
         function() return Config.Aimbot.FOV end,
         function(v) Config.Aimbot.FOV = v end, 5, 20, 600)
