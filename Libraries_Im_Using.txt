@@ -1,0 +1,230 @@
+Actor Functions
+https://docs.potassium.pro/api-reference/introduction
+https://docs.potassium.pro/api-reference/Actor%20Library/create_comm_channel
+https://docs.potassium.pro/api-reference/Actor%20Library/getactors
+https://docs.potassium.pro/api-reference/Actor%20Library/getactorthreads
+https://docs.potassium.pro/api-reference/Actor%20Library/getdeletedactors
+https://docs.potassium.pro/api-reference/Actor%20Library/get_comm_channel
+https://docs.potassium.pro/api-reference/Actor%20Library/is_parallel
+https://docs.potassium.pro/api-reference/Actor%20Library/run_on_actor
+https://docs.potassium.pro/api-reference/Actor%20Library/run_on_thread
+
+Cache Library
+https://docs.potassium.pro/api-reference/Cache%20Library/cache.invalidate
+https://docs.potassium.pro/api-reference/Cache%20Library/cache.iscached
+https://docs.potassium.pro/api-reference/Cache%20Library/cache.replace
+https://docs.potassium.pro/api-reference/Cache%20Library/cloneref
+https://docs.potassium.pro/api-reference/Cache%20Library/compareinstances
+
+Closure Functions
+https://docs.potassium.pro/api-reference/Closure%20Library/getfunctionhash
+https://docs.potassium.pro/api-reference/Closure%20Library/iscclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/isexecutorclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/islclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/isnewcclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/hookfunction
+https://docs.potassium.pro/api-reference/Closure%20Library/isfunctionhooked
+https://docs.potassium.pro/api-reference/Closure%20Library/isourthread
+https://docs.potassium.pro/api-reference/Closure%20Library/loadstring
+https://docs.potassium.pro/api-reference/Closure%20Library/newcclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/newlclosure
+https://docs.potassium.pro/api-reference/Closure%20Library/restorefunction
+https://docs.potassium.pro/api-reference/Closure%20Library/setstackhidden
+
+Console Library
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoleclear
+https://docs.potassium.pro/api-reference/Console%20Library/rconsolecreate
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoledestroy
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoleerror
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoleinfo
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoleinput
+https://docs.potassium.pro/api-reference/Console%20Library/rconsoleprint
+https://docs.potassium.pro/api-reference/Console%20Library/rconsolesettitle
+https://docs.potassium.pro/api-reference/Console%20Library/rconsolewarn
+
+Crypt Library
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.base64decode
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.base64encode
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.decrypt
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.encrypt
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.generatebytes
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.generatekey
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.hash
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.hmac
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.lz4compress
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.lz4decompress
+https://docs.potassium.pro/api-reference/Crypt%20Library/crypt.random
+
+Debug Library
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getcallstack
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getconstant
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getconstants
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getinfo
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getproto
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getprotos
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getregistry
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getsafeenv
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getstack
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getupvalue
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.getupvalues
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.isvalidlevel
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setconstant
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setinfo
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setname
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setsafeenv
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setstack
+https://docs.potassium.pro/api-reference/Debug%20Library/debug.setupvalue
+
+Drawing Library
+https://docs.potassium.pro/api-reference/Drawing%20Library/Drawing.Fonts
+https://docs.potassium.pro/api-reference/Drawing%20Library/Drawing.new
+https://docs.potassium.pro/api-reference/Drawing%20Library/cleardrawcache
+https://docs.potassium.pro/api-reference/Drawing%20Library/getrenderproperty
+https://docs.potassium.pro/api-reference/Drawing%20Library/isrenderobj
+https://docs.potassium.pro/api-reference/Drawing%20Library/setrenderproperty
+    Types
+    https://docs.potassium.pro/Base
+    https://docs.potassium.pro/line
+    https://docs.potassium.pro/text
+    https://docs.potassium.pro/image
+    https://docs.potassium.pro/circle
+    https://docs.potassium.pro/square
+    https://docs.potassium.pro/triangle
+    https://docs.potassium.pro/quad
+    https://docs.potassium.pro/font
+    https://docs.potassium.pro/shader
+
+DrawingImmediate Library
+https://docs.potassium.pro/api-reference/DrawingImmediate%20Library/DrawingImmediate.GetPaint
+https://docs.potassium.pro/api-reference/DrawingImmediate%20Library/Functions
+
+Environment Functions
+https://docs.potassium.pro/api-reference/Environment%20Library/filtergc
+https://docs.potassium.pro/api-reference/Environment%20Library/getgc
+https://docs.potassium.pro/api-reference/Environment%20Library/getgenv
+https://docs.potassium.pro/api-reference/Environment%20Library/getreg
+https://docs.potassium.pro/api-reference/Environment%20Library/getrenv
+https://docs.potassium.pro/api-reference/Environment%20Library/getsenv
+https://docs.potassium.pro/api-reference/Environment%20Library/gettenv
+
+FileSystem Functions
+https://docs.potassium.pro/api-reference/FileSystem%20Library/appendfile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/delfile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/delfolder
+https://docs.potassium.pro/api-reference/FileSystem%20Library/dofile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/isfile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/isfolder
+https://docs.potassium.pro/api-reference/FileSystem%20Library/listfiles
+https://docs.potassium.pro/api-reference/FileSystem%20Library/loadfile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/makefolder
+https://docs.potassium.pro/api-reference/FileSystem%20Library/readfile
+https://docs.potassium.pro/api-reference/FileSystem%20Library/writefile
+
+Input Functions
+https://docs.potassium.pro/api-reference/Input%20Library/isrbxactive
+https://docs.potassium.pro/api-reference/Input%20Library/keypress
+https://docs.potassium.pro/api-reference/Input%20Library/keyrelease
+https://docs.potassium.pro/api-reference/Input%20Library/keytap
+https://docs.potassium.pro/api-reference/Input%20Library/mouse1click
+https://docs.potassium.pro/api-reference/Input%20Library/mouse1press
+https://docs.potassium.pro/api-reference/Input%20Library/mouse1release
+https://docs.potassium.pro/api-reference/Input%20Library/mouse2click
+https://docs.potassium.pro/api-reference/Input%20Library/mouse2press
+https://docs.potassium.pro/api-reference/Input%20Library/mouse2release
+https://docs.potassium.pro/api-reference/Input%20Library/mousemoveabs
+https://docs.potassium.pro/api-reference/Input%20Library/mousemoverel
+https://docs.potassium.pro/api-reference/Input%20Library/mousescroll
+
+Instance Functions
+https://docs.potassium.pro/api-reference/Instance%20Library/fireclickdetector
+https://docs.potassium.pro/api-reference/Instance%20Library/fireproximityprompt
+https://docs.potassium.pro/api-reference/Instance%20Library/firetouchinterest
+https://docs.potassium.pro/api-reference/Instance%20Library/getcallbackvalue
+https://docs.potassium.pro/api-reference/Instance%20Library/getcustomasset
+https://docs.potassium.pro/api-reference/Instance%20Library/gethui
+https://docs.potassium.pro/api-reference/Instance%20Library/getinstances
+https://docs.potassium.pro/api-reference/Instance%20Library/getnilinstances
+https://docs.potassium.pro/api-reference/Instance%20Library/getrendersteppedlist
+
+Oth Library
+https://docs.potassium.pro/api-reference/Oth%20Library/oth.get_original_thread
+https://docs.potassium.pro/api-reference/Oth%20Library/oth.get_root_callback
+https://docs.potassium.pro/api-reference/Oth%20Library/oth.hook
+https://docs.potassium.pro/api-reference/Oth%20Library/oth.is_hook_thread
+https://docs.potassium.pro/api-reference/Oth%20Library/oth.unhook
+
+MetaTable Functions
+https://docs.potassium.pro/api-reference/Metatable%20Library/getnamecallmethod
+https://docs.potassium.pro/api-reference/Metatable%20Library/getrawmetatable
+https://docs.potassium.pro/api-reference/Metatable%20Library/hookmetamethod
+https://docs.potassium.pro/api-reference/Metatable%20Library/isreadonly
+https://docs.potassium.pro/api-reference/Metatable%20Library/makereadonly
+https://docs.potassium.pro/api-reference/Metatable%20Library/makewritable
+https://docs.potassium.pro/api-reference/Metatable%20Library/setnamecallmethod
+https://docs.potassium.pro/api-reference/Metatable%20Library/setrawmetatable
+https://docs.potassium.pro/api-reference/Metatable%20Library/setreadonly
+
+Miscellaneous Functions
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/clearteleportqueue
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/getfpscap
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/gethwid
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/getfflag
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/getfflagtype
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/getobjects
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/httpget
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/identifyexecutor
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/messagebox
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/queueonteleport
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/request
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/saveinstance
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/setclipboard
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/setfflag
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/setfpscap
+https://docs.potassium.pro/api-reference/Miscellaneous%20Library/setrbxclipboard
+
+PsmSignal Library
+https://docs.potassium.pro/api-reference/PsmSignal%20Library/PsmSignal.new
+https://docs.potassium.pro/api-reference/PsmSignal%20Library/PsmConnection
+
+Reflection Functions
+https://docs.potassium.pro/api-reference/Reflection%20Library/getbspval
+https://docs.potassium.pro/api-reference/Reflection%20Library/gethiddenproperties
+https://docs.potassium.pro/api-reference/Reflection%20Library/gethiddenproperty
+https://docs.potassium.pro/api-reference/Reflection%20Library/getpcd
+https://docs.potassium.pro/api-reference/Reflection%20Library/getproperties
+https://docs.potassium.pro/api-reference/Reflection%20Library/getproximitypromptduration
+https://docs.potassium.pro/api-reference/Reflection%20Library/getsimulationradius
+https://docs.potassium.pro/api-reference/Reflection%20Library/isnetworkowner
+https://docs.potassium.pro/api-reference/Reflection%20Library/isscriptable
+https://docs.potassium.pro/api-reference/Reflection%20Library/setproximitypromptduration
+https://docs.potassium.pro/api-reference/Reflection%20Library/setscriptable
+https://docs.potassium.pro/api-reference/Reflection%20Library/setsimulationradius
+
+Regex Library
+https://docs.potassium.pro/api-reference/Regex%20Library/Regex.Escape
+https://docs.potassium.pro/api-reference/Regex%20Library/Regex.new
+
+Script Functions
+https://docs.potassium.pro/api-reference/Script%20Library/getloadedmodules
+https://docs.potassium.pro/api-reference/Script%20Library/getrunningscripts
+https://docs.potassium.pro/api-reference/Script%20Library/getscriptbytecode
+https://docs.potassium.pro/api-reference/Script%20Library/getscriptclosure
+https://docs.potassium.pro/api-reference/Script%20Library/getscriptfromthread
+https://docs.potassium.pro/api-reference/Script%20Library/getscriptthread
+https://docs.potassium.pro/api-reference/Script%20Library/getcallingscript
+https://docs.potassium.pro/api-reference/Script%20Library/getscripthash
+https://docs.potassium.pro/api-reference/Script%20Library/getscripts
+https://docs.potassium.pro/api-reference/Script%20Library/getthreadidentity
+https://docs.potassium.pro/api-reference/Script%20Library/setthreadidentity
+https://docs.potassium.pro/api-reference/Script%20Library/dumpbytecode
+https://docs.potassium.pro/api-reference/Script%20Library/decompile
+
+Signal Functions
+https://docs.potassium.pro/api-reference/Signal%20Library/cansignalreplicate
+https://docs.potassium.pro/api-reference/Signal%20Library/firesignal
+https://docs.potassium.pro/api-reference/Signal%20Library/getconnection
+https://docs.potassium.pro/api-reference/Signal%20Library/getconnections
+https://docs.potassium.pro/api-reference/Signal%20Library/getsignalarguments
+https://docs.potassium.pro/api-reference/Signal%20Library/getsignalargumentsinfo
+https://docs.potassium.pro/api-reference/Signal%20Library/getsignalwhitelist
+https://docs.potassium.pro/api-reference/Signal%20Library/replicatesignal

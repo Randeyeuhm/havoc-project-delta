@@ -1,0 +1,15 @@
+# --- Runtime artifacts (never commit) ---
+havoc_delta_config.json
+*.log
+
+# --- Large / regenerable ---
+# 18 MB game structure dump - regenerate with StructureDumper.Luau
+Project_Delta.Structure
+
+# --- Empty placeholder ---
+WeaponConfig.luau
+
+# --- OS / editor junk ---
+Thumbs.db
+Desktop.ini
+.vscode/
