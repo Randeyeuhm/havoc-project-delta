@@ -17,7 +17,7 @@ Adding support for a new game is just dropping a `<PlaceId>.luau` file into `gam
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"))()
 ```
 
-The loader downloads the matching script plus `uilib.luau` into your executor's workspace folder (only rewriting files when they changed), then runs it. Your existing configs keep working since they live in the same folder.
+The loader downloads the matching script plus the shared modules (`uilib.luau` and `espui.luau`) into your executor's workspace folder (only rewriting files when they changed), then runs it. Your existing configs keep working since they live in the same folder.
 
 ## Games
 
@@ -34,7 +34,8 @@ The original suite:
 Generic toolkit for games without a dedicated script:
 
 - **Camera aimbot** — FOV circle, smoothing, team check, optional visibility check, Hold-RMB or Always activation
-- **Player ESP** — boxes, names, health, distance, tracers, team check, configurable max distance
+- **Player ESP (fully customizable)** — boxes / fills / corner brackets, names, health bars + text, distance, tracers, head dots, skeletons, look lines, off-screen arrows and chams, with static / team / rainbow / gradient colour modes
+- **ESP Customizer** — two-window editor: a preview window with a real player model showing exactly how your ESP will look, plus a settings window for every element's style, placement, offsets and colours
 - **Movement** — walk speed, jump power, infinite jump, fly
 - **Misc** — fullbright, anti-AFK, rejoin server
 
@@ -50,6 +51,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) plus `uilib.luau` into 
 | `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
 | `uilib.luau` | Shared UI toolkit — widgets, toasts, rebind capture, popup management |
+| `espui.luau` | ESP schema, Drawing renderer and two-window customizer (preview + settings) used by every script |
 | `StructureDumper.Luau` | Dev tool — dumps a game's structure for keeping detection logic up to date |
 | `Libraries_Im_Using.txt` | Reference list of the executor APIs this project relies on |
 

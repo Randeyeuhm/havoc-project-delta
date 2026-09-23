@@ -43,8 +43,7 @@ end
 local CONFIG_FILE = "universal_hub_config.json"
 
 local DEFAULTS = {
-    ESP      = { Enabled = false, Box = true, Name = true, Health = true,
-                 Distance = true, Tracers = false, TeamCheck = true, MaxDistance = 2000 },
+    ESP      = { Enabled = false, TeamCheck = true, VisibleOnly = false, MaxDistance = 2000 },
     Aimbot   = { Enabled = false, Mode = "Hold RMB", FOV = 120, Smoothness = 4,
                  TeamCheck = true, VisibleOnly = false, FOVCircle = true },
     Movement = { WalkSpeed = 16, JumpPower = 50, InfJump = false, Fly = false, FlySpeed = 60 },
@@ -120,6 +119,28 @@ do
         UILib = res
     else
         warn("[Havoc Hub] uilib.luau not loaded (" .. tostring(res) .. ") - settings menu will be skipped")
+    end
+end
+
+-- ============================================================
+-- ESP MODULE (espui.luau: schema, renderer, customizer)
+-- ============================================================
+local ESPUI_FILE = "espui.luau"
+local ESPUI
+do
+    local ok, res = pcall(function()
+        local src = readfile(ESPUI_FILE)
+        if type(src) ~= "string" or src == "" then error("empty file") end
+        local chunk, compileErr = loadstring(src, "@" .. ESPUI_FILE)
+        if not chunk then error("compile error: " .. tostring(compileErr)) end
+        return chunk()
+    end)
+    if ok and type(res) == "table" then
+        ESPUI = res
+        ESPUI.fill(Config.ESP)
+        ESPUI.sanitize(Config.ESP)
+    else
+        warn("[Havoc Hub] espui.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
     end
 end
 
@@ -351,10 +372,9 @@ track(LocalPlayer.Idled:Connect(function()
 end))
 
 -- ============================================================
--- FEATURES: PLAYER ESP (Drawing)
+-- FEATURES: PLAYER ESP  (rendering lives in espui.luau)
 -- ============================================================
-local espCache = {}
-local drawingBroken = false
+local espRenderer = ESPUI and ESPUI.newRenderer(function() return Config.ESP end)
 
 local ESP_COLOR_ENEMY = Color3.fromRGB(255, 80, 80)
 local ESP_COLOR_ALLY  = Color3.fromRGB(82, 202, 128)
@@ -369,170 +389,93 @@ local function colorForPlayer(player)
     return ESP_COLOR_ENEMY
 end
 
-local function hideEsp(e)
-    if e.box then e.box.Visible = false end
-    if e.name then e.name.Visible = false end
-    if e.dist then e.dist.Visible = false end
-    if e.tracer then e.tracer.Visible = false end
+-- Raycast helper for the ESP "Visible only" filter.
+local function espVisible(char, camPos, targetPos)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = { char }
+    if LocalPlayer.Character then table.insert(ignore, LocalPlayer.Character) end
+    local cam = workspace.CurrentCamera
+    if cam then table.insert(ignore, cam) end
+    params.FilterDescendantsInstances = ignore
+    return workspace:Raycast(camPos, targetPos - camPos, params) == nil
 end
 
-local function destroyEsp(e)
-    for _, obj in pairs(e) do
-        if obj and obj.Remove then pcall(function() obj:Remove() end) end
+-- Best-effort joint positions for skeleton ESP (R15 names first, R6 after).
+local function buildSkeletonJoints(char)
+    local function partPos(...)
+        for _, name in ipairs({ ... }) do
+            local p = char:FindFirstChild(name)
+            if p and p:IsA("BasePart") then return p.Position end
+        end
+        return nil
     end
-end
-
-local function makeEspEntry()
-    local e = {}
-    -- "Square" is the rectangle primitive of Potassium's Drawing library -
-    -- there is no "Rectangle" type, and asking for one errors and disables
-    -- every Drawing feature in this script.
-    e.box = Drawing.new("Square")
-    e.box.Thickness = 1
-    e.box.Filled = false
-    e.name = Drawing.new("Text")
-    e.name.Size = 13
-    e.name.Center = true
-    e.name.Outline = true
-    e.name.OutlineColor = Color3.new(0, 0, 0)
-    e.dist = Drawing.new("Text")
-    e.dist.Size = 12
-    e.dist.Center = true
-    e.dist.Outline = true
-    e.dist.OutlineColor = Color3.new(0, 0, 0)
-    e.tracer = Drawing.new("Line")
-    e.tracer.Thickness = 1
-    e.tracer.Transparency = 0.35
-    return e
+    return {
+        Head = partPos("Head"),
+        Torso = partPos("UpperTorso", "Torso", "HumanoidRootPart"),
+        LeftHand = partPos("LeftHand", "Left Arm"),
+        RightHand = partPos("RightHand", "Right Arm"),
+        LeftFoot = partPos("LeftFoot", "Left Leg"),
+        RightFoot = partPos("RightFoot", "Right Leg"),
+    }
 end
 
 local function renderESP(cam)
-    if drawingBroken then return end
-    if not Drawing then drawingBroken = true; return end
-    if not Config.ESP.Enabled then
-        for _, e in pairs(espCache) do hideEsp(e) end
+    if not espRenderer then return end
+    local cfg = Config.ESP
+    if not cfg.Enabled then
+        espRenderer:render({}, cam)
         return
     end
 
-    local viewport = cam.ViewportSize
     local camPos = cam.CFrame.Position
-    local used = {}
-    local cfg = Config.ESP
-
+    local targets = {}
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
             local char = player.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             local hrp = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
             local head = char and char:FindFirstChild("Head")
-
-            local show = false
-            local topP, botP
-            local dist = 0
             if hum and hum.Health > 0 and hrp then
                 local teamBlocked = cfg.TeamCheck and player.Team and LocalPlayer.Team
                     and player.Team == LocalPlayer.Team
-                dist = (hrp.Position - camPos).Magnitude
+                local dist = (hrp.Position - camPos).Magnitude
                 if not teamBlocked and dist <= cfg.MaxDistance then
                     local headPos = head and head.Position or (hrp.Position + Vector3.new(0, 1.5, 0))
-                    local topWorld = headPos + Vector3.new(0, 0.6, 0)
-                    local botWorld = hrp.Position - Vector3.new(0, 3.2, 0)
-                    local tp, onTop = cam:WorldToViewportPoint(topWorld)
-                    local bp, onBot = cam:WorldToViewportPoint(botWorld)
-                    if tp.Z > 0 and bp.Z > 0 and (onTop or onBot) then
-                        topP, botP = tp, bp
-                        show = true
+                    local pass = true
+                    if cfg.VisibleOnly then
+                        local ok, visible = pcall(espVisible, char, camPos, headPos)
+                        pass = ok and visible
                     end
-                end
-            end
-
-            local e = espCache[player]
-            if show then
-                if not e then
-                    local ok, made = pcall(makeEspEntry)
-                    if not ok then
-                        drawingBroken = true
-                        warn("[Havoc Hub] ESP drawing failed: " .. tostring(made))
-                        return
+                    if pass then
+                        table.insert(targets, {
+                            key = player,
+                            model = char,
+                            name = cfg.NameSource == "DisplayName" and player.DisplayName or player.Name,
+                            health = hum.Health,
+                            maxHealth = hum.MaxHealth > 0 and hum.MaxHealth or 100,
+                            headPos = headPos,
+                            topPos = headPos + Vector3.new(0, 0.6, 0),
+                            bottomPos = hrp.Position - Vector3.new(0, 3.2, 0),
+                            distance = dist,
+                            teamColor = colorForPlayer(player),
+                            lookDir = head and head.CFrame.LookVector,
+                            skel = cfg.Skeleton and buildSkeletonJoints(char) or nil,
+                        })
                     end
-                    e = made
-                    espCache[player] = e
-                end
-
-                used[player] = true
-                local color = colorForPlayer(player)
-
-                local topY = math.min(topP.Y, botP.Y)
-                local botY = math.max(topP.Y, botP.Y)
-                local height = math.max(botY - topY, 8)
-                local width = math.max(height * 0.55, 6)
-                local cx = (topP.X + botP.X) / 2
-
-                if cfg.Box then
-                    e.box.Visible = true
-                    e.box.Color = color
-                    e.box.Position = Vector2.new(cx - width / 2, topY)
-                    e.box.Size = Vector2.new(width, height)
-                else
-                    e.box.Visible = false
-                end
-
-                if cfg.Name then
-                    local text = player.Name
-                    if cfg.Health then
-                        text = text .. " [" .. tostring(math.floor(hum.Health + 0.5)) .. "]"
-                    end
-                    e.name.Visible = true
-                    e.name.Color = Color3.fromRGB(235, 235, 245)
-                    e.name.Position = Vector2.new(cx, topY - 16)
-                    e.name.Text = text
-                else
-                    e.name.Visible = false
-                end
-
-                if cfg.Distance then
-                    e.dist.Visible = true
-                    e.dist.Color = Color3.fromRGB(180, 180, 195)
-                    e.dist.Position = Vector2.new(cx, botY + 3)
-                    e.dist.Text = tostring(math.floor(dist + 0.5)) .. "m"
-                else
-                    e.dist.Visible = false
-                end
-
-                if cfg.Tracers then
-                    e.tracer.Visible = true
-                    e.tracer.Color = color
-                    e.tracer.From = Vector2.new(viewport.X / 2, viewport.Y)
-                    e.tracer.To = Vector2.new(cx, botY)
-                else
-                    e.tracer.Visible = false
-                end
-            elseif e then
-                hideEsp(e)
-                if not player.Parent then
-                    espCache[player] = nil
-                    destroyEsp(e)
                 end
             end
         end
     end
 
-    -- Anything not drawn this frame (out of range, dead, team) is hidden.
-    for player, e in pairs(espCache) do
-        if not used[player] then
-            hideEsp(e)
-            if not player.Parent then
-                espCache[player] = nil
-                destroyEsp(e)
-            end
-        end
-    end
+    espRenderer:render(targets, cam, UserInputService:GetMouseLocation())
 end
 
 -- ============================================================
 -- FEATURES: AIMBOT (camera lock)
 -- ============================================================
 local fovCircle = nil
+local fovDrawingBroken = false
 
 local function aimingActive()
     if not Config.Aimbot.Enabled then return false end
@@ -607,11 +550,11 @@ end
 
 local function updateFovCircle(mouse)
     local show = Config.Aimbot.Enabled and Config.Aimbot.FOVCircle
-    if not show or drawingBroken then
+    if not show or fovDrawingBroken then
         if fovCircle then fovCircle.Visible = false end
         return
     end
-    if not Drawing then drawingBroken = true; return end
+    if not Drawing then fovDrawingBroken = true; return end
     if not fovCircle then
         local ok, circle = pcall(function()
             local c = Drawing.new("Circle")
@@ -623,7 +566,7 @@ local function updateFovCircle(mouse)
             return c
         end)
         if not ok then
-            drawingBroken = true
+            fovDrawingBroken = true
             warn("[Havoc Hub] FOV circle failed: " .. tostring(circle))
             return
         end
@@ -927,30 +870,32 @@ local function buildMenu()
         function() return Config.ESP.Enabled end,
         function(v) Config.ESP.Enabled = v end,
         hotkeyById.ToggleESP)
-    toggle(p2, "Boxes",
-        function() return Config.ESP.Box end,
-        function(v) Config.ESP.Box = v end)
-    toggle(p2, "Names",
-        function() return Config.ESP.Name end,
-        function(v) Config.ESP.Name = v end)
-    toggle(p2, "Health",
-        function() return Config.ESP.Health end,
-        function(v) Config.ESP.Health = v end)
-    toggle(p2, "Distance",
-        function() return Config.ESP.Distance end,
-        function(v) Config.ESP.Distance = v end)
-    toggle(p2, "Tracers",
-        function() return Config.ESP.Tracers end,
-        function(v) Config.ESP.Tracers = v end)
+    button(p2, "Open ESP Customizer", function()
+        if ESPUI then
+            ESPUI.open{
+                cfg = Config.ESP,
+                uilib = UILib,
+                screenGui = screenGui,
+                save = saveConfig,
+                notify = notify,
+            }
+        else
+            notify("espui.luau not loaded - customizer unavailable")
+        end
+    end)
+    bindrow(p2, hotkeyById.ToggleESP)
+    section(p2, "Targeting")
     toggle(p2, "Team Check",
         function() return Config.ESP.TeamCheck end,
         function(v) Config.ESP.TeamCheck = v end)
+    toggle(p2, "Visible Only",
+        function() return Config.ESP.VisibleOnly end,
+        function(v) Config.ESP.VisibleOnly = v end)
     slider(p2, "Max Distance",
         function() return Config.ESP.MaxDistance end,
         function(v) Config.ESP.MaxDistance = v end, 100, 100, 10000)
-    bindrow(p2, hotkeyById.ToggleESP)
-    note(p2, "Box ESP for every player, drawn over the game with team-aware " ..
-        "colours. No game-specific code - works anywhere the character has a head and torso.")
+    note(p2, "Box, name, health, distance, tracers, skeleton, arrows, chams and " ..
+        "all colours/placements live in the ESP Customizer - with a live preview.")
 
     -- ---------------- Movement ----------------
     local p3 = pages[3]

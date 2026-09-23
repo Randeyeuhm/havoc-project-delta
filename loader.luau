@@ -17,9 +17,9 @@
     Adding support for a new game = drop a "<PlaceId>.luau" file into the
     repo's games/ folder and push. No loader changes needed.
 
-    It also syncs uilib.luau (the shared UI toolkit) into the executor's
-    workspace folder, since the scripts read it from disk. Files are only
-    rewritten when the remote content actually changed.
+    It also syncs uilib.luau + espui.luau (shared UI toolkit and ESP
+    customizer) into the executor's workspace folder, since the scripts read
+    them from disk. Files are only rewritten when the content changed.
 ]]
 
 local USER   = "Randeyeuhm"
@@ -29,6 +29,7 @@ local BRANCH = "main"
 local GAMES_DIR      = "games/"
 local UNIVERSAL_FILE = GAMES_DIR .. "universal.luau"
 local UILIB_FILE     = "uilib.luau"
+local ESPUI_FILE     = "espui.luau"
 
 local RAW_BASE = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(USER, REPO, BRANCH)
 
@@ -89,17 +90,19 @@ if not gameSrc then
 end
 log(("fetched %s (%.1f KB)"):format(baseName(gamePath), #gameSrc / 1024))
 
--- 2) UI library - non-fatal, a local copy still works if the fetch fails.
-local uilibSrc = fetch(UILIB_FILE)
-if uilibSrc then
-    local ok, status = syncToDisk(UILIB_FILE, uilibSrc)
-    if ok then
-        log("uilib.luau: " .. status)
+-- 2) Shared modules - non-fatal, local copies still work if a fetch fails.
+for _, name in ipairs({ UILIB_FILE, ESPUI_FILE }) do
+    local src = fetch(name)
+    if src then
+        local ok, status = syncToDisk(name, src)
+        if ok then
+            log(name .. ": " .. status)
+        else
+            warn("[Havoc Hub] could not save " .. name .. " (" .. tostring(status) .. ")")
+        end
     else
-        warn("[Havoc Hub] could not save uilib.luau (" .. tostring(status) .. ") - settings menu may be skipped")
+        warn("[Havoc Hub] could not update " .. name .. " - using the local copy if present")
     end
-else
-    warn("[Havoc Hub] could not update uilib.luau - using the local copy if present")
 end
 
 -- Keep a local copy of the loaded script, for manual runs.
