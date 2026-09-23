@@ -650,7 +650,10 @@ end
 -- ============================================================
 local openSelector = nil  -- { close = fn } of the currently expanded one
 
-function ESPUI.makeSelector(uilib, parent, label, getItems, getSelected, onSelect)
+-- File-scope local so the customizer below can call it directly; exported
+-- on the table as well for host scripts (a bare call to a table-defined
+-- function would be a nil global - that exact bug hid here once).
+local function makeSelector(uilib, parent, label, getItems, getSelected, onSelect)
     local create, corner, stroke, tween = uilib.create, uilib.corner, uilib.stroke, uilib.tween
     local THEME, FONTS = uilib.THEME, uilib.FONTS
     local ITEM_H, GAP = 24, 2
@@ -807,6 +810,7 @@ function ESPUI.makeSelector(uilib, parent, label, getItems, getSelected, onSelec
     pcall(update)
     return { update = update, row = row, searchText = label }
 end
+ESPUI.makeSelector = makeSelector
 
 -- ============================================================
 -- CUSTOMIZER UI  (preview window + settings window)
