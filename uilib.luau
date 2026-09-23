@@ -67,7 +67,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w4-picker-inset"
+UILib.VERSION = "w5-toast-center"
 
 -- ============================================================
 -- UI THEME
@@ -1515,8 +1515,12 @@ local function makeToaster(parentGui)
         local frameStroke = stroke(frame, THEME.STROKE)
 
         local bar = create("Frame", {
+            -- AnchorPoint, so the 0.5 y-position centres the FULL-height
+            -- bar; without it the bar sat 5px low and hugged the bottom
+            -- edge of the toast.
+            AnchorPoint = Vector2.new(0, 0.5),
             Size = UDim2.new(0, 3, 1, -10),
-            Position = UDim2.new(0, 7, 0.5, -5),
+            Position = UDim2.new(0, 7, 0.5, 0),
             BackgroundColor3 = THEME.ACCENT,
             BorderSizePixel = 0,
             Parent = frame,
