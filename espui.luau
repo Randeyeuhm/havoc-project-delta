@@ -1614,6 +1614,6 @@ function ESPUI.open(ctx)
     return true
 end
 
-print(("[espui] %s loaded (opacity sliders: value = OPACITY, 1 = fully visible)"):format(ESPUI.VERSION))
+print(("[espui] %s loaded (no opacity controls - every element fully visible)"):format(ESPUI.VERSION))
 
 return ESPUI
