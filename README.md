@@ -1,46 +1,63 @@
-# Havoc Project Delta
+# Havoc Hub (Havoc Project Delta)
 
-A script suite for the Roblox game **Havoc**, built for the [Potassium](https://docs.potassium.pro/) executor. Modular LuaU (Luau) codebase with a standalone UI toolkit and persistent configuration.
+A multi-game script suite for Roblox, built for the [Potassium](https://docs.potassium.pro/) executor. One loader picks the right script for the current game — and falls back to a universal toolkit anywhere else.
 
-## Features
+## How it works
+
+`loader.luau` checks `game.PlaceId` when you execute it:
+
+1. **`games/<PlaceId>.luau`** — if the repo has a script for the current game, that one loads (e.g. `games/7336302630.luau` is the Havoc Project Delta suite).
+2. **`games/universal.luau`** — otherwise the universal script loads: generic aimbot, ESP and utilities that work across most games.
+
+Adding support for a new game is just dropping a `<PlaceId>.luau` file into `games/` — no loader changes needed.
+
+## Quick start (loader)
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"))()
+```
+
+The loader downloads the matching script plus `uilib.luau` into your executor's workspace folder (only rewriting files when they changed), then runs it. Your existing configs keep working since they live in the same folder.
+
+## Games
+
+### Havoc — `games/7336302630.luau` (PlaceId 7336302630)
+
+The original suite:
 
 - **Aimbot** — target selection, FOV control, visible-only check, silent aim, ballistics tuning
 - **ESP** — Player / NPC / Drops / Radar. Names, health, distance, team colors; vehicles (e.g. MI-24V) included; optional landmine overlay
-- **Inventory ESP** — compact live item card
-- **Movement & Misc** — walkspeed / jump overrides, fly, viewmodel tweaks
-- **Persistent config** — everything saves to `havoc_delta_config.json` and survives re-execution
-- **Rebindable hotkeys** — click a key chip, press a key. Duplicate keys are refused; the menu key stays locked
-- **Menu** — dark, searchable, card-based UI powered by `uilib.luau`
+- **Inventory ESP**, HUD, radar, movement/misc tweaks, persistent config and rebindable hotkeys
 
-## Requirements
+### Universal — `games/universal.luau` (any other game)
 
-- A Roblox executor with filesystem access, `loadstring` and the `Drawing` API — built and tested on **Potassium**
-- The game's client is not included, obviously. Bring your own account, at your own risk
+Generic toolkit for games without a dedicated script:
 
-## Setup
+- **Camera aimbot** — FOV circle, smoothing, team check, optional visibility check, Hold-RMB or Always activation
+- **Player ESP** — boxes, names, health, distance, tracers, team check, configurable max distance
+- **Movement** — walk speed, jump power, infinite jump, fly
+- **Misc** — fullbright, anti-AFK, rejoin server
 
-1. Copy **both** of these into your executor's workspace folder (the same folder where `havoc_delta_config.json` is written):
-   - `Havoc Project delta.luau` — the main script
-   - `uilib.luau` — the menu library it loads at startup
-2. Execute `Havoc Project delta.luau` through the executor.
-3. Press `RightShift` to toggle the menu.
+## Manual setup (without the loader)
 
-> If `uilib.luau` is missing, everything **except the settings menu** still runs — you'll just see a warning in the console.
+Copy `games/7336302630.luau` (or `games/universal.luau`) plus `uilib.luau` into your executor's workspace folder (same place the config files are written), then execute the script. If `uilib.luau` is missing, everything except the settings menu still runs — you'll just see a warning.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `Havoc Project delta.luau` | Main script — features, hooks, ESP, aimbot, config system |
-| `uilib.luau` | Self-contained UI toolkit — widgets, toasts, dropdowns, rebind capture, popup management |
-| `StructureDumper.Luau` | Dev tool — dumps the game's structure (ReplicatedStorage, zones, part layouts) for keeping detection logic up to date |
+| `loader.luau` | Hub loader — picks by PlaceId, syncs files, runs |
+| `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
+| `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
+| `uilib.luau` | Shared UI toolkit — widgets, toasts, rebind capture, popup management |
+| `StructureDumper.Luau` | Dev tool — dumps a game's structure for keeping detection logic up to date |
 | `Libraries_Im_Using.txt` | Reference list of the executor APIs this project relies on |
 
 ## Configuration
 
-- Saved as `havoc_delta_config.json` in the executor workspace, next to the scripts
-- Persists keybinds (including enabled/disabled state), ESP settings, aimbot settings and GUI position
-- To reset: delete the config file from the workspace folder and re-execute
+- Havoc saves to `havoc_delta_config.json`, the universal script to `universal_hub_config.json` — both in the executor workspace next to the scripts
+- Persists keybinds (including enabled/disabled state), feature toggles and values
+- To reset a script: delete its config file from the workspace folder and re-execute
 
 ## Disclaimer
 
