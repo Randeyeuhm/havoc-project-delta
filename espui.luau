@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v12-corner-scale"
+ESPUI.VERSION = "v13-corner-1to1"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -206,6 +206,14 @@ local OFFSET_REF_H = 150
 
 local function offsetScale(h)
     return math.clamp(h / OFFSET_REF_H, 0.3, 3)
+end
+
+-- Corner bracket length: PURE linear scaling (no clamps) so the preview
+-- and every in-game distance show the exact same proportions. The slider
+-- value is pixels at the 150px reference box; a 1px floor keeps tiny
+-- distant boxes from losing their brackets entirely.
+local function cornerLen(value, h)
+    return math.max(value * h / OFFSET_REF_H, 1)
 end
 
 -- Text centre point for an anchor around box rect r (text elements use
@@ -483,11 +491,10 @@ function ESPUI.newRenderer(getCfg)
 
                 if cfg.Box then
                     if style == "Corners" then
-                        -- Corner length scales with box height (same maths as
-                        -- the offsets and the preview), so brackets keep
-                        -- their proportions at every distance instead of
-                        -- growing relative to distant (smaller) boxes.
-                        local cl, th = cfg.BoxCornerLength * offsetScale(rect.h), cfg.BoxThickness
+                        -- Corner length scales linearly with box height -
+                        -- exactly the same maths as the preview, so brackets
+                        -- are 1:1 at every distance.
+                        local cl, th = cornerLen(cfg.BoxCornerLength, rect.h), cfg.BoxThickness
                         local specs = cornerSpecs(rect, cl, th)
                         local edgeT = drawT(cfg.BoxTransparency)
                         for c = 1, 8 do
@@ -1194,7 +1201,9 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             local bot = projectPoint(modelCF.Position - Vector3.new(0, modelSize.Y / 2, 0))
             if top and bot then
                 local h = math.max(bot.Y - top.Y, 40)
-                local w = h * (modelSize.X / math.max(modelSize.Y, 0.01))
+                -- Fixed 0.55 aspect - the exact width rule the in-game
+                -- renderer uses, so the preview box is 1:1 with the game.
+                local w = math.max(h * 0.55, 6)
                 rect = { x = (top.X + bot.X) / 2 - w / 2, y = top.Y, w = w, h = h }
             end
         end
@@ -1228,8 +1237,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         end
         local showCorners = cfg.Box and style == "Corners"
         if showCorners then
-            -- Same distance scaling as the in-game renderer.
-            local specs = cornerSpecs(rect, cfg.BoxCornerLength * offsetScale(rect.h), cfg.BoxThickness)
+            local specs = cornerSpecs(rect, cornerLen(cfg.BoxCornerLength, rect.h), cfg.BoxThickness)
             for i = 1, 8 do
                 local c = el.corners[i]
                 local s = specs[i]
@@ -1458,7 +1466,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
     dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
     colorpicker(p1, "Box colour", "Box")
-    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline. Corner length scales with distance so brackets look the same up close and far away.")
+    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline. Corner length follows the box size - preview and in-game match exactly.")
 
     -- ---------------- Name ----------------
     local p2 = pages[2]
