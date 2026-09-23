@@ -835,63 +835,15 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
     local cfg = ctx.cfg
     local create, corner, stroke = UILib.create, UILib.corner, UILib.stroke
 
-    local preview = create("Frame", {
-        Name = "ESPPreview",
-        Size = UDim2.new(0, 300, 0, 430),
-        Position = UDim2.new(0, 604, 0, 40),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Active = true,
-        Draggable = true,
-        ZIndex = 20,
-        Parent = ctx.screenGui,
-    })
-    corner(preview, 10); stroke(preview, THEME.STROKE)
-
-    local header = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 36),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = preview,
-    })
-    corner(header, 10)
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 10),
-        Position = UDim2.new(0, 0, 1, -10),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = header,
-    })
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 2),
-        Position = UDim2.new(0, 0, 0, 36),
-        BackgroundColor3 = THEME.ACCENT,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-        Parent = preview,
-    })
-    create("TextLabel", {
-        Size = UDim2.new(1, -60, 1, 0),
-        Position = UDim2.fromOffset(14, 0),
-        BackgroundTransparency = 1,
-        Text = "ESP PREVIEW",
-        TextColor3 = THEME.TEXT,
-        TextSize = 13,
-        Font = FONTS.BOLD,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = header,
-    })
-    local closeBtn = create("TextButton", {
-        Size = UDim2.fromOffset(24, 24),
-        Position = UDim2.new(1, -36, 0.5, -12),
-        BackgroundColor3 = THEME.RED,
-        BorderSizePixel = 0,
-        Text = "",
-        AutoButtonColor = false,
-        Parent = header,
-    })
-    corner(closeBtn, 6)
-    closeBtn.MouseButton1Click:Connect(function() preview.Visible = false end)
+    local win = UILib.makeWindow{
+        parent = ctx.screenGui,
+        name = "ESPPreview",
+        title = "ESP PREVIEW",
+        size = UDim2.new(0, 300, 0, 430),
+        position = UDim2.new(0, 604, 0, 40),
+        zindex = 20,
+    }
+    local preview = win.frame
 
     local vp = create("ViewportFrame", {
         Size = UDim2.new(1, -16, 0, 310),
@@ -1224,155 +1176,23 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     local cfg = ctx.cfg
     local create, corner, stroke = UILib.create, UILib.corner, UILib.stroke
 
-    local options = create("Frame", {
-        Name = "ESPCustomizer",
-        Size = UDim2.new(0, 560, 0, 470),
-        Position = UDim2.new(0, 30, 0, 40),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Active = true,
-        Draggable = true,
-        -- Above the preview window (20): dropdown lists live in here, so
-        -- this window must win both render order and pointer priority when
-        -- the two are dragged over each other.
-        ZIndex = 21,
-        Parent = ctx.screenGui,
-    })
-    corner(options, 10); stroke(options, THEME.STROKE)
-
-    local header = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 36),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = options,
-    })
-    corner(header, 10)
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 10),
-        Position = UDim2.new(0, 0, 1, -10),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = header,
-    })
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 2),
-        Position = UDim2.new(0, 0, 0, 36),
-        BackgroundColor3 = THEME.ACCENT,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-        Parent = options,
-    })
-    create("TextLabel", {
-        Size = UDim2.new(1, -60, 1, 0),
-        Position = UDim2.fromOffset(14, 0),
-        BackgroundTransparency = 1,
-        Text = "ESP CUSTOMIZER",
-        TextColor3 = THEME.TEXT,
-        TextSize = 13,
-        Font = FONTS.BOLD,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = header,
-    })
-    local closeBtn = create("TextButton", {
-        Size = UDim2.fromOffset(24, 24),
-        Position = UDim2.new(1, -36, 0.5, -12),
-        BackgroundColor3 = THEME.RED,
-        BorderSizePixel = 0,
-        Text = "",
-        AutoButtonColor = false,
-        Parent = header,
-    })
-    corner(closeBtn, 6)
-    closeBtn.MouseButton1Click:Connect(function() options.Visible = false end)
-
-    -- Tabs + pages
-    local tabDefs = { "Box", "Name", "Health", "Distance", "Extras", "Filters" }
-    local tabRail = create("Frame", {
-        Size = UDim2.new(1, -24, 0, 30),
-        Position = UDim2.new(0, 12, 0, 46),
-        BackgroundColor3 = THEME.RAIL,
-        BorderSizePixel = 0,
-        Parent = options,
-    })
-    corner(tabRail, 8); stroke(tabRail, THEME.STROKE)
-    create("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 4),
-        VerticalAlignment = Enum.VerticalAlignment.Center,
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = tabRail,
-    })
-    create("UIPadding", { PaddingLeft = UDim.new(0, 4), Parent = tabRail })
-
-    local pages, tabButtons = {}, {}
-    for i, name in ipairs(tabDefs) do
-        local page = create("ScrollingFrame", {
-            Size = UDim2.new(1, -24, 1, -104),
-            Position = UDim2.new(0, 12, 0, 84),
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            ScrollBarThickness = 5,
-            ScrollBarImageColor3 = THEME.STROKE,
-            ScrollBarImageTransparency = 0.2,
-            CanvasSize = UDim2.new(0, 0, 0, 0),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-            Visible = false,
-            Parent = options,
-        })
-        create("UIListLayout", {
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            Parent = page,
-        })
-        create("UIPadding", { PaddingBottom = UDim.new(0, 10), Parent = page })
-        pages[i] = page
-
-        local btn = create("TextButton", {
-            Size = UDim2.fromOffset(84, 22),
-            LayoutOrder = i,
-            BackgroundColor3 = THEME.PANEL,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Text = name,
-            TextColor3 = THEME.TEXT,
-            TextSize = 11,
-            Font = FONTS.MEDIUM,
-            Parent = tabRail,
-        })
-        corner(btn, 6)
-        tabButtons[i] = btn
-    end
-
-    -- Dropdown lists are parented to this layer instead of straight to the
-    -- window (see the `dropdown` helper below). Sitting at the top of the
-    -- window's ZIndex stack, an open list can never be covered by any other
-    -- control - its items always win the pointer.
-    local popupLayer = create("Frame", {
-        Name = "PopupLayer",
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        Active = false,
-        ZIndex = 100,
-        Parent = options,
-    })
-
-    local activeTab = 0
-    local function setTab(idx)
-        activeTab = idx
-        for i, page in ipairs(pages) do page.Visible = (i == idx) end
-        for i, btn in ipairs(tabButtons) do
-            btn.BackgroundColor3 = (i == idx) and THEME.ACCENT or THEME.PANEL
-        end
-    end
-    for i, btn in ipairs(tabButtons) do
-        btn.MouseEnter:Connect(function()
-            if activeTab ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end
-        end)
-        btn.MouseLeave:Connect(function()
-            if activeTab ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL }) end
-        end)
-        btn.MouseButton1Click:Connect(function() setTab(i) end)
-    end
+    local win = UILib.makeWindow{
+        parent = ctx.screenGui,
+        name = "ESPCustomizer",
+        title = "ESP CUSTOMIZER",
+        size = UDim2.new(0, 560, 0, 470),
+        position = UDim2.new(0, 30, 0, 40),
+        -- Above the preview window (20) so its popup layer beats everything
+        -- when the two windows are dragged over each other.
+        zindex = 21,
+        tabs = { "Box", "Name", "Health", "Distance", "Extras", "Filters" },
+    }
+    local options = win.frame
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
+    -- Dropdown lists are parented to the window's popup layer (see the
+    -- `dropdown` helper below), so an open list can never be covered by any
+    -- other control - its items always win the pointer.
+    local popupLayer = win.popupLayer
 
     local controls = {}
     local function refresh()
@@ -1574,7 +1394,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     end)
     note(p6, "Every change applies live and is saved with the script's config.")
 
-    setTab(1)
+    win.setTab(1)
     print("[espui] settings built (" .. tostring(#controls) .. " controls)")
 
     return options, refresh

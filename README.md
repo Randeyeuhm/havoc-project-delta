@@ -50,7 +50,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's wo
 | `loader.luau` | Hub loader — picks by PlaceId, fetches modules, runs everything via loadstring |
 | `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
-| `uilib.luau` | Shared UI toolkit — widgets, toasts, rebind capture, popup management |
+| `uilib.luau` | Shared UI toolkit — window base, widgets, toasts, rebind capture, popup management |
 | `espui.luau` | ESP schema, Drawing renderer and two-window customizer (preview + settings) used by every script |
 | `StructureDumper.Luau` | Dev tool — dumps a game's structure for keeping detection logic up to date |
 | `Libraries_Im_Using.txt` | Reference list of the executor APIs this project relies on |

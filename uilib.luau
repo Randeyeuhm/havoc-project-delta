@@ -1416,6 +1416,228 @@ local function makeInput(parent, label, getter, setter, opts)
 end
 
 -- ============================================================
+-- WINDOW  (the one standard scaffold for every panel: draggable frame,
+-- header + accent rule, optional tab rail with scrolling pages, close
+-- button, and a popup layer that dropdown lists are parented to, so an
+-- open list always floats above the window's own content)
+-- ============================================================
+
+-- makeWindow{ parent, title, subtitle?, size?, position?, zindex?,
+--             name?, closable? (default true), draggable? (default true),
+--             tabs? (list of names), onClose? }
+-- Without `tabs` no pages are created (use the frame directly for
+-- single-purpose windows like the ESP preview). Returns a handle:
+--   w.frame      - the window frame
+--   w.header     - the title bar
+--   w.popupLayer - pass as makeDropdown's overlayParent
+--   w.tab(index or name) -> ScrollingFrame page
+--   w.setTab(i)  - switch the active page
+--   w.show() / w.hide() / w.toggle() / w.isVisible()
+--   w.destroy()
+local function makeWindow(opts)
+    opts = opts or {}
+    local W = {}
+
+    local frame = create("Frame", {
+        Name = opts.name or "UILibWindow",
+        Size = opts.size or UDim2.new(0, 540, 0, 400),
+        Position = opts.position or UDim2.new(0, 30, 0, 40),
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0,
+        Active = true,
+        Draggable = opts.draggable ~= false,
+        ZIndex = opts.zindex or 20,
+        Parent = opts.parent,
+    })
+    corner(frame, 10); stroke(frame, THEME.STROKE)
+
+    -- Header: rounded top (a square lower strip covers the bottom corners),
+    -- accent rule underneath.
+    local header = create("Frame", {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundColor3 = THEME.HEADER,
+        BorderSizePixel = 0,
+        Parent = frame,
+    })
+    corner(header, 10)
+    create("Frame", {
+        Size = UDim2.new(1, 0, 0, 10),
+        Position = UDim2.new(0, 0, 1, -10),
+        BackgroundColor3 = THEME.HEADER,
+        BorderSizePixel = 0,
+        Parent = header,
+    })
+    create("Frame", {
+        Size = UDim2.new(1, 0, 0, 2),
+        Position = UDim2.new(0, 0, 0, 36),
+        BackgroundColor3 = THEME.ACCENT,
+        BorderSizePixel = 0,
+        ZIndex = 2,
+        Parent = frame,
+    })
+    textLabel({
+        Size = UDim2.new(1, -60, 1, 0),
+        Position = UDim2.fromOffset(14, 0),
+        Text = opts.title or "",
+        TextColor3 = THEME.TEXT,
+        TextSize = 13,
+        Font = FONTS.BOLD,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = header,
+    })
+    if opts.subtitle then
+        textLabel({
+            Size = UDim2.fromOffset(160, 12),
+            Position = UDim2.new(1, -208, 0.5, -6),
+            Text = tostring(opts.subtitle),
+            TextColor3 = THEME.TEXT_DIM,
+            TextSize = 10,
+            Font = FONTS.MEDIUM,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent = header,
+        })
+    end
+
+    if opts.closable ~= false then
+        local closeBtn = create("TextButton", {
+            Size = UDim2.fromOffset(24, 24),
+            Position = UDim2.new(1, -36, 0.5, -12),
+            BackgroundColor3 = THEME.RED,
+            BorderSizePixel = 0,
+            Text = "",
+            AutoButtonColor = false,
+            Parent = header,
+        })
+        corner(closeBtn, 6)
+        closeBtn.MouseEnter:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED_HI }) end)
+        closeBtn.MouseLeave:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED }) end)
+        closeBtn.MouseButton1Click:Connect(function()
+            -- onClose takes over when given (e.g. hiding an entire GUI);
+            -- otherwise the window just hides.
+            if opts.onClose then
+                pcall(opts.onClose)
+            else
+                frame.Visible = false
+            end
+        end)
+    end
+
+    -- Tabs: rail buttons + one scrolling page each.
+    local names = opts.tabs
+    local pages, tabButtons = {}, {}
+    local activeTab = 0
+
+    if names then
+        local rail = create("Frame", {
+            Size = UDim2.new(1, -24, 0, 30),
+            Position = UDim2.new(0, 12, 0, 46),
+            BackgroundColor3 = THEME.RAIL,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        corner(rail, 8); stroke(rail, THEME.STROKE)
+        create("UIListLayout", {
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 4),
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Parent = rail,
+        })
+        create("UIPadding", { PaddingLeft = UDim.new(0, 4), Parent = rail })
+
+        for i, name in ipairs(names) do
+            local page = create("ScrollingFrame", {
+                Size = UDim2.new(1, -24, 1, -104),
+                Position = UDim2.new(0, 12, 0, 84),
+                BackgroundTransparency = 1,
+                BorderSizePixel = 0,
+                ScrollBarThickness = 5,
+                ScrollBarImageColor3 = THEME.STROKE,
+                ScrollBarImageTransparency = 0.2,
+                CanvasSize = UDim2.new(0, 0, 0, 0),
+                AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                Visible = false,
+                Parent = frame,
+            })
+            create("UIListLayout", {
+                Padding = UDim.new(0, 6),
+                SortOrder = Enum.SortOrder.LayoutOrder,
+                Parent = page,
+            })
+            create("UIPadding", { PaddingBottom = UDim.new(0, 10), Parent = page })
+            pages[i] = page
+
+            local btn = create("TextButton", {
+                Size = UDim2.fromOffset(84, 22),
+                LayoutOrder = i,
+                BackgroundColor3 = THEME.PANEL,
+                BorderSizePixel = 0,
+                AutoButtonColor = false,
+                Text = name,
+                TextColor3 = THEME.TEXT,
+                TextSize = 11,
+                Font = FONTS.MEDIUM,
+                Parent = rail,
+            })
+            corner(btn, 6)
+            tabButtons[i] = btn
+        end
+
+        local function setTab(idx)
+            activeTab = idx
+            for i, page in ipairs(pages) do page.Visible = (i == idx) end
+            for i, btn in ipairs(tabButtons) do
+                btn.BackgroundColor3 = (i == idx) and THEME.ACCENT or THEME.PANEL
+            end
+        end
+        for i, btn in ipairs(tabButtons) do
+            btn.MouseEnter:Connect(function()
+                if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end
+            end)
+            btn.MouseLeave:Connect(function()
+                if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL }) end
+            end)
+            btn.MouseButton1Click:Connect(function() setTab(i) end)
+        end
+        setTab(1)
+        W.setTab = setTab
+        W.activeTab = function() return activeTab end
+    else
+        W.setTab = function() end
+        W.activeTab = function() return 0 end
+    end
+
+    -- Popup layer - created last so it tops everything in the window.
+    local popupLayer = create("Frame", {
+        Name = "PopupLayer",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Active = false,
+        ZIndex = 100,
+        Parent = frame,
+    })
+
+    W.frame = frame
+    W.header = header
+    W.popupLayer = popupLayer
+    W.tab = function(nameOrIndex)
+        if type(nameOrIndex) == "number" then return pages[nameOrIndex] end
+        if names then
+            for i, n in ipairs(names) do
+                if n == nameOrIndex then return pages[i] end
+            end
+        end
+        return nil
+    end
+    W.show = function() frame.Visible = true end
+    W.hide = function() frame.Visible = false end
+    W.toggle = function() frame.Visible = not frame.Visible end
+    W.isVisible = function() return frame.Visible end
+    W.destroy = function() frame:Destroy() end
+    return W
+end
+
+-- ============================================================
 -- EXPORTS
 -- ============================================================
 UILib.create            = create
@@ -1432,5 +1654,6 @@ UILib.makeKeybindRow    = makeKeybindRow
 UILib.makeDropdown      = makeDropdown
 UILib.makeButton        = makeButton
 UILib.makeInput         = makeInput
+UILib.makeWindow        = makeWindow
 
 return UILib

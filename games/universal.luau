@@ -653,185 +653,22 @@ end))
 -- MENU
 -- ============================================================
 local function buildMenu()
-    local create, corner, stroke = UILib.create, UILib.corner, UILib.stroke
-    local THEME, FONTS = UILib.THEME, UILib.FONTS
-
-    local main = create("Frame", {
-        Name = "Main",
-        Size = UDim2.new(0, 540, 0, 360),
-        Position = UDim2.new(0, 30, 0, 40),
-        BackgroundColor3 = THEME.BG,
-        BorderSizePixel = 0,
-        Active = true,
-        Draggable = true,
-        Parent = screenGui,
-    })
-    corner(main, 10); stroke(main, THEME.STROKE)
-
-    -- Header: title bar + accent rule, matching the Havoc window style.
-    local header = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 36),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = main,
-    })
-    corner(header, 10)
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 10),
-        Position = UDim2.new(0, 0, 1, -10),
-        BackgroundColor3 = THEME.HEADER,
-        BorderSizePixel = 0,
-        Parent = header,
-    })
-    create("Frame", {
-        Size = UDim2.new(1, 0, 0, 2),
-        Position = UDim2.new(0, 0, 0, 36),
-        BackgroundColor3 = THEME.ACCENT,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-        Parent = main,
-    })
-    local dot = create("Frame", {
-        Size = UDim2.fromOffset(8, 8),
-        Position = UDim2.new(0, 14, 0.5, -4),
-        BackgroundColor3 = THEME.ACCENT,
-        BorderSizePixel = 0,
-        Parent = header,
-    })
-    corner(dot, 4)
-    create("TextLabel", {
-        Size = UDim2.new(1, -320, 1, 0),
-        Position = UDim2.fromOffset(30, 0),
-        BackgroundTransparency = 1,
-        Text = "HAVOC HUB  ·  UNIVERSAL",
-        TextColor3 = THEME.TEXT,
-        TextSize = 13,
-        Font = FONTS.BOLD,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = header,
-    })
-    create("TextLabel", {
-        Size = UDim2.fromOffset(150, 12),
-        Position = UDim2.new(1, -200, 0.5, -6),
-        BackgroundTransparency = 1,
-        Text = "PlaceId " .. tostring(game.PlaceId),
-        TextColor3 = THEME.TEXT_DIM,
-        TextSize = 10,
-        Font = FONTS.MEDIUM,
-        TextXAlignment = Enum.TextXAlignment.Right,
-        Parent = header,
-    })
-
-    local closeBtn = create("TextButton", {
-        Size = UDim2.fromOffset(24, 24),
-        Position = UDim2.new(1, -36, 0.5, -12),
-        BackgroundColor3 = THEME.RED,
-        BorderSizePixel = 0,
-        Text = "",
-        AutoButtonColor = false,
-        Parent = header,
-    })
-    corner(closeBtn, 6)
-    for i = 1, 2 do
-        local arm = create("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, 0, 0.5, 0),
-            Size = UDim2.new(0, 12, 0, 2),
-            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-            BorderSizePixel = 0,
-            Rotation = (i == 1) and 45 or -45,
-            Parent = closeBtn,
-        })
-        corner(arm, 1)
-    end
-    closeBtn.MouseEnter:Connect(function() UILib.tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED_HI }) end)
-    closeBtn.MouseLeave:Connect(function() UILib.tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED }) end)
-    closeBtn.MouseButton1Click:Connect(function()
-        screenGui.Enabled = false
-        notify("Menu hidden - press RightShift to reopen")
-    end)
-
-    -- Tab rail + one scrolling page per tab.
-    local tabDefs = { "Aimbot", "ESP", "Movement", "Misc" }
-    local tabRail = create("Frame", {
-        Size = UDim2.new(1, -24, 0, 30),
-        Position = UDim2.new(0, 12, 0, 46),
-        BackgroundColor3 = THEME.RAIL,
-        BorderSizePixel = 0,
-        Parent = main,
-    })
-    corner(tabRail, 8); stroke(tabRail, THEME.STROKE)
-    local railLayout = create("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 4),
-        VerticalAlignment = Enum.VerticalAlignment.Center,
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = tabRail,
-    })
-    create("UIPadding", {
-        PaddingLeft = UDim.new(0, 4),
-        Parent = tabRail,
-    })
-
-    local pages, tabButtons = {}, {}
-    for i, name in ipairs(tabDefs) do
-        local page = create("ScrollingFrame", {
-            Size = UDim2.new(1, -24, 1, -96),
-            Position = UDim2.new(0, 12, 0, 92),
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            ScrollBarThickness = 5,
-            ScrollBarImageColor3 = THEME.STROKE,
-            ScrollBarImageTransparency = 0.2,
-            CanvasSize = UDim2.new(0, 0, 0, 0),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-            Visible = false,
-            Parent = main,
-        })
-        create("UIListLayout", {
-            Padding = UDim.new(0, 6),
-            SortOrder = Enum.SortOrder.LayoutOrder,
-            Parent = page,
-        })
-        create("UIPadding", {
-            PaddingBottom = UDim.new(0, 10),
-            Parent = page,
-        })
-        pages[i] = page
-
-        local btn = create("TextButton", {
-            Size = UDim2.fromOffset(112, 22),
-            LayoutOrder = i,
-            BackgroundColor3 = THEME.PANEL,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Text = name,
-            TextColor3 = THEME.TEXT,
-            TextSize = 12,
-            Font = FONTS.MEDIUM,
-            Parent = tabRail,
-        })
-        corner(btn, 6)
-        tabButtons[i] = btn
-    end
-
-    local activeTab = 0
-    local function setTab(idx)
-        activeTab = idx
-        for i, page in ipairs(pages) do page.Visible = (i == idx) end
-        for i, btn in ipairs(tabButtons) do
-            btn.BackgroundColor3 = (i == idx) and THEME.ACCENT or THEME.PANEL
-        end
-    end
-    for i, btn in ipairs(tabButtons) do
-        btn.MouseEnter:Connect(function()
-            if activeTab ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end
-        end)
-        btn.MouseLeave:Connect(function()
-            if activeTab ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL }) end
-        end)
-        btn.MouseButton1Click:Connect(function() setTab(i) end)
-    end
+    local win = UILib.makeWindow{
+        parent = screenGui,
+        name = "Main",
+        title = "HAVOC HUB  ·  UNIVERSAL",
+        subtitle = "PlaceId " .. tostring(game.PlaceId),
+        size = UDim2.new(0, 540, 0, 360),
+        position = UDim2.new(0, 30, 0, 40),
+        tabs = { "Aimbot", "ESP", "Movement", "Misc" },
+        -- The X hides the whole GUI (RightShift brings it back); the
+        -- window itself stays visible inside it.
+        onClose = function()
+            screenGui.Enabled = false
+            notify("Menu hidden - press RightShift to reopen")
+        end,
+    }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4) }
 
     -- Page helpers: everything registered so refreshGUI() can sync it.
     local function section(page, text) addControl(UILib.makeSectionHeader(page, text)) end
@@ -843,7 +680,7 @@ local function buildMenu()
     end
     local function bindrow(page, entry, opts) addControl(UILib.makeKeybindRow(page, entry, opts)) end
     local function dropdown(page, label, getItems, getSelected, onSelect)
-        addControl(UILib.makeDropdown(page, label, getItems, getSelected, onSelect, main))
+        addControl(UILib.makeDropdown(page, label, getItems, getSelected, onSelect, win.popupLayer))
     end
     local function button(page, text, onClick, opts) addControl(UILib.makeButton(page, text, onClick, opts)) end
     local function note(page, text) UILib.makeNote(page, text, "auto") end
@@ -961,7 +798,7 @@ local function buildMenu()
     note(p4, ("Havoc Hub - universal fallback script. PlaceId %d has no " ..
         "game-specific script yet."):format(game.PlaceId))
 
-    setTab(1)
+    win.setTab(1)
 end
 
 if UILib and screenGui then
