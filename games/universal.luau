@@ -24,7 +24,6 @@ if setstackhidden then pcall(setstackhidden, true) end
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
-local GuiService        = game:GetService("GuiService")
 local Lighting          = game:GetService("Lighting")
 local TweenService      = game:GetService("TweenService")
 local HttpService       = game:GetService("HttpService")
@@ -385,7 +384,10 @@ end
 
 local function makeEspEntry()
     local e = {}
-    e.box = Drawing.new("Rectangle")
+    -- "Square" is the rectangle primitive of Potassium's Drawing library -
+    -- there is no "Rectangle" type, and asking for one errors and disables
+    -- every Drawing feature in this script.
+    e.box = Drawing.new("Square")
     e.box.Thickness = 1
     e.box.Filled = false
     e.name = Drawing.new("Text")
@@ -404,7 +406,7 @@ local function makeEspEntry()
     return e
 end
 
-local function renderESP(cam, insetY)
+local function renderESP(cam)
     if drawingBroken then return end
     if not Drawing then drawingBroken = true; return end
     if not Config.ESP.Enabled then
@@ -450,7 +452,7 @@ local function renderESP(cam, insetY)
                     local ok, made = pcall(makeEspEntry)
                     if not ok then
                         drawingBroken = true
-                        warn("[Havoc Hub] Drawing unavailable - ESP disabled")
+                        warn("[Havoc Hub] ESP drawing failed: " .. tostring(made))
                         return
                     end
                     e = made
@@ -500,7 +502,7 @@ local function renderESP(cam, insetY)
                 if cfg.Tracers then
                     e.tracer.Visible = true
                     e.tracer.Color = color
-                    e.tracer.From = Vector2.new(viewport.X / 2, viewport.Y + insetY)
+                    e.tracer.From = Vector2.new(viewport.X / 2, viewport.Y)
                     e.tracer.To = Vector2.new(cx, botY)
                 else
                     e.tracer.Visible = false
@@ -603,7 +605,7 @@ local function updateAimbot(cam, mouse)
     cam.CFrame = camCF:Lerp(goal, alpha)
 end
 
-local function updateFovCircle(mouse, insetY)
+local function updateFovCircle(mouse)
     local show = Config.Aimbot.Enabled and Config.Aimbot.FOVCircle
     if not show or drawingBroken then
         if fovCircle then fovCircle.Visible = false end
@@ -622,12 +624,12 @@ local function updateFovCircle(mouse, insetY)
         end)
         if not ok then
             drawingBroken = true
-            warn("[Havoc Hub] Drawing unavailable - FOV circle disabled")
+            warn("[Havoc Hub] FOV circle failed: " .. tostring(circle))
             return
         end
         fovCircle = circle
     end
-    fovCircle.Position = Vector2.new(mouse.X, mouse.Y + insetY)
+    fovCircle.Position = mouse
     fovCircle.Radius = Config.Aimbot.FOV
     fovCircle.Visible = true
 end
@@ -1001,11 +1003,10 @@ end
 track(RunService.RenderStepped:Connect(function()
     local cam = workspace.CurrentCamera
     if not cam then return end
-    local insetY = GuiService:GetGuiInset().Y
     local mouse = UserInputService:GetMouseLocation()
-    pcall(renderESP, cam, insetY)
+    pcall(renderESP, cam)
     pcall(updateAimbot, cam, mouse)
-    pcall(updateFovCircle, mouse, insetY)
+    pcall(updateFovCircle, mouse)
     pcall(updateFly, cam)
 end))
 
