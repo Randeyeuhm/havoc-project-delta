@@ -893,7 +893,14 @@ local function buildMenu()
     dropdown(p1, "Activation",
         function() return { "Hold RMB", "Always" } end,
         function() return Config.Aimbot.Mode end,
-        function(v) Config.Aimbot.Mode = v end)
+        function(v)
+            -- uilib dropdowns don't auto-save (host-owned, same as Havoc),
+            -- and picking "Always" should start aiming right away instead
+            -- of silently doing nothing while the master toggle is off.
+            Config.Aimbot.Mode = v
+            if v == "Always" then Config.Aimbot.Enabled = true end
+            saveConfig(); refreshGUI()
+        end)
     slider(p1, "FOV Radius",
         function() return Config.Aimbot.FOV end,
         function(v) Config.Aimbot.FOV = v end, 5, 20, 600)
@@ -1005,10 +1012,18 @@ track(RunService.RenderStepped:Connect(function()
     if not cam then return end
     local mouse = UserInputService:GetMouseLocation()
     pcall(renderESP, cam)
-    pcall(updateAimbot, cam, mouse)
     pcall(updateFovCircle, mouse)
     pcall(updateFly, cam)
 end))
+
+-- Camera aim runs at Camera priority + 1: the game's camera module rewrites
+-- Camera.CFrame every frame, so a plain RenderStepped write is overwritten
+-- before it ever renders (same reason Havoc's third person binds here).
+RunService:BindToRenderStep("HavocHubAimbot", Enum.RenderPriority.Camera.Value + 1, function()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    pcall(updateAimbot, cam, UserInputService:GetMouseLocation())
+end)
 
 track(LocalPlayer.CharacterAdded:Connect(function(char)
     task.spawn(function()
