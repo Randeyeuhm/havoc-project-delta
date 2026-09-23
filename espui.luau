@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v11-opacity-returned"
+ESPUI.VERSION = "v12-corner-scale"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -483,7 +483,11 @@ function ESPUI.newRenderer(getCfg)
 
                 if cfg.Box then
                     if style == "Corners" then
-                        local cl, th = cfg.BoxCornerLength, cfg.BoxThickness
+                        -- Corner length scales with box height (same maths as
+                        -- the offsets and the preview), so brackets keep
+                        -- their proportions at every distance instead of
+                        -- growing relative to distant (smaller) boxes.
+                        local cl, th = cfg.BoxCornerLength * offsetScale(rect.h), cfg.BoxThickness
                         local specs = cornerSpecs(rect, cl, th)
                         local edgeT = drawT(cfg.BoxTransparency)
                         for c = 1, 8 do
@@ -1224,7 +1228,8 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         end
         local showCorners = cfg.Box and style == "Corners"
         if showCorners then
-            local specs = cornerSpecs(rect, cfg.BoxCornerLength, cfg.BoxThickness)
+            -- Same distance scaling as the in-game renderer.
+            local specs = cornerSpecs(rect, cfg.BoxCornerLength * offsetScale(rect.h), cfg.BoxThickness)
             for i = 1, 8 do
                 local c = el.corners[i]
                 local s = specs[i]
@@ -1453,7 +1458,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
     dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
     colorpicker(p1, "Box colour", "Box")
-    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline.")
+    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline. Corner length scales with distance so brackets look the same up close and far away.")
 
     -- ---------------- Name ----------------
     local p2 = pages[2]
