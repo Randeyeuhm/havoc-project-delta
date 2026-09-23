@@ -139,6 +139,11 @@ do
         ESPUI = res
         ESPUI.fill(Config.ESP)
         ESPUI.sanitize(Config.ESP)
+        if ESPUI.VERSION then
+            print("[universal] espui " .. tostring(ESPUI.VERSION) .. " loaded")
+        else
+            warn("[universal] espui.luau has no version marker - it is an OLD build; re-run the loader to update it")
+        end
     else
         warn("[Havoc Hub] espui.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
     end

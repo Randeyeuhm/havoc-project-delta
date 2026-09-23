@@ -96,7 +96,12 @@ for _, name in ipairs({ UILIB_FILE, ESPUI_FILE }) do
     if src then
         local ok, status = syncToDisk(name, src)
         if ok then
-            log(name .. ": " .. status)
+            log(("%s: %s (%.1f KB)"):format(name, status, #src / 1024))
+            if name == ESPUI_FILE then
+                -- Echo the build string so a stale local copy is obvious.
+                local ver = src:match("ESPUI%.VERSION%s*=%s*\"([^\"]+)\"")
+                log("espui build: " .. (ver or "unknown"))
+            end
         else
             warn("[Havoc Hub] could not save " .. name .. " (" .. tostring(status) .. ")")
         end

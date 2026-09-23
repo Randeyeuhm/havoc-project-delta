@@ -34,13 +34,19 @@ local RunService = game:GetService("RunService")
 
 local ESPUI = {}
 
+-- Bumped whenever behaviour changes. Printed here on load and reported by
+-- the loader, so "is my copy actually the new one?" is always answerable
+-- from the console.
+ESPUI.VERSION = "v4-opacity-unified"
+
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
 -- makeColorPicker can edit them directly via prefix)
 -- ============================================================
 -- NOTE: every "*Transparency" field below is actually OPACITY (1 = fully
--- visible, 0 = invisible) - the renderer maps them with 1 - value. Sliders
--- are labelled "Opacity" to match.
+-- visible, 0 = invisible). The in-game renderer and the preview BOTH convert
+-- through the shared tex() helper below, so the two views can never disagree.
+-- Sliders are labelled "Opacity" to match.
 local DEFAULTS = {
     -- master + filters
     Enabled = false, TeamCheck = false, VisibleOnly = false,
@@ -568,7 +574,7 @@ function ESPUI.newRenderer(getCfg)
                             o.Radius = cfg.HeadDotSize
                             o.Color = ESPUI.colorFor(cfg.HeadDotColorMode,
                                 cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB, t.teamColor, hue)
-                            o.Transparency = 1
+                            o.Transparency = 0
                         else
                             o.Visible = false
                         end
@@ -1226,7 +1232,10 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         BorderSizePixel = 0,
         Active = true,
         Draggable = true,
-        ZIndex = 20,
+        -- Above the preview window (20): dropdown lists live in here, so
+        -- this window must win both render order and pointer priority when
+        -- the two are dragged over each other.
+        ZIndex = 21,
         Parent = ctx.screenGui,
     })
     corner(options, 10); stroke(options, THEME.STROKE)
@@ -1334,6 +1343,19 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         tabButtons[i] = btn
     end
 
+    -- Dropdown lists are parented to this layer instead of straight to the
+    -- window (see the `dropdown` helper below). Sitting at the top of the
+    -- window's ZIndex stack, an open list can never be covered by any other
+    -- control - its items always win the pointer.
+    local popupLayer = create("Frame", {
+        Name = "PopupLayer",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Active = false,
+        ZIndex = 100,
+        Parent = options,
+    })
+
     local activeTab = 0
     local function setTab(idx)
         activeTab = idx
@@ -1398,7 +1420,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
                     -- toggles and sliders) - persist the pick here.
                     if ctx.save then pcall(ctx.save) end
                 end,
-                options)
+                popupLayer)
         end)
     end
     local function colorpicker(page, text, prefix)
@@ -1596,5 +1618,7 @@ function ESPUI.open(ctx)
     }
     return true
 end
+
+print(("[espui] %s loaded (opacity sliders: value = OPACITY, 1 = fully visible)"):format(ESPUI.VERSION))
 
 return ESPUI
