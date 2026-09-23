@@ -1,4 +1,4 @@
-# Havoc Hub (Havoc Project Delta)
+# Havoc Hub
 
 A multi-game script suite for Roblox, built for the [Potassium](https://docs.potassium.pro/) executor. One loader picks the right script for the current game — and falls back to a universal toolkit anywhere else.
 
