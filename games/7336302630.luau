@@ -300,6 +300,7 @@ do
             ShowHeadHighlight = true, HeadHighlightHollow = true,
             ShowBodyHighlight = false, BodyHighlightHollow = true,
             MaxDistance = 4500, BoxColor = Color3.fromRGB(255, 0, 0),
+            -- Opacity semantics: 1 = fully visible (migrated from transparency).
             CornerBoxTransparency = 0.5, CornerBoxLength = 8,
             HeadHighlightR = 255, HeadHighlightG = 255, HeadHighlightB = 255,
             BodyHighlightR = 255, BodyHighlightG = 255, BodyHighlightB = 255,
@@ -311,6 +312,7 @@ do
             ShowBodyHighlight = false, BodyHighlightHollow = true,
             MaxDistance = 4500, BoxColor = Color3.fromRGB(0, 255, 0),
             ShowLandmines = false,
+            -- Opacity semantics: 1 = fully visible (migrated from transparency).
             CornerBoxTransparency = 0.5, CornerBoxLength = 8,
             HeadHighlightR = 255, HeadHighlightG = 255, HeadHighlightB = 0,
             BodyHighlightR = 255, BodyHighlightG = 255, BodyHighlightB = 0,
@@ -392,6 +394,7 @@ do
             Radar = false,
             RadarNPCs = true,
             RadarRange = 600,
+            -- Opacity semantics: 1 = fully visible (migrated from transparency).
             RadarOpacity = 0.85,
             VMHideArms = false,
             VMHideHands = false,
@@ -466,6 +469,20 @@ do
     if type(Config.KeybindEnabled) ~= "table" then Config.KeybindEnabled = {} end
     Config.Misc.RadarRange   = math.clamp(Config.Misc.RadarRange   or 600,  100, 3000)
     Config.Misc.RadarOpacity = math.clamp(Config.Misc.RadarOpacity or 0.85, 0.1, 1)
+    -- One-time opacity migration: CornerBoxTransparency and RadarOpacity used
+    -- to be TRANSPARENCY values (1 = invisible, 0.05 = visible). They are now
+    -- OPACITY values (1 = fully visible), so saved values get converted once
+    -- to keep today's look; from then on the sliders read 1 = visible.
+    Config.Meta = (type(Config.Meta) == "table") and Config.Meta or {}
+    if Config.Meta.OpacityV2 ~= true then
+        local function toOpacity(v, fallback)
+            return 1 - math.clamp(tonumber(v) or fallback, 0, 1)
+        end
+        Config.Player.CornerBoxTransparency = toOpacity(Config.Player.CornerBoxTransparency, 0.5)
+        Config.NPC.CornerBoxTransparency    = toOpacity(Config.NPC.CornerBoxTransparency, 0.5)
+        Config.Misc.RadarOpacity            = toOpacity(Config.Misc.RadarOpacity, 0.15)
+        Config.Meta.OpacityV2 = true
+    end
     -- Global ForceField toggle removed - set the ForceField material per group
     -- (or any other) from the Viewmodel > Appearance material list instead.
     Config.Misc.VMForceField = nil
@@ -1766,7 +1783,10 @@ do
             L[7][2],L[7][3],L[7][4],L[7][5] = hRight, hBottom, hRight, hBottom-cornerLen
             L[8][2],L[8][3],L[8][4],L[8][5] = hRight-cornerLen, hBottom, hRight, hBottom
 
-            local color, transp = boxColor, self.CornerBoxTransparency
+            -- Config stores OPACITY (1 = fully visible); Drawing wants
+            -- transparency, so invert here.
+            local color = boxColor
+            local transp = 1 - math.clamp(self.CornerBoxTransparency or 0.5, 0, 1)
             for i = 1, 8 do
                 local e = L[i]
                 local line = data[e[1]]
@@ -5517,7 +5537,7 @@ do
         local range   = Config.Misc.RadarRange or 600
         local radius  = (RADAR_SIZE * 0.5) - 10
         local scale   = radius / range
-        local opacity = Config.Misc.RadarOpacity or 0.85
+        local opacity = math.clamp(Config.Misc.RadarOpacity or 0.85, 0, 1)
 
         local n = 0
         for t in pairs(PlayerESP.Objects) do n = n + 1; _pool[n] = t end
@@ -5549,7 +5569,9 @@ do
                 local dot = dotFor(used)
                 dot.Position = UDim2.new(0.5, rightD * scale, 0.5, -fwdD * scale)
                 dot.BackgroundColor3 = dotColor(target)
-                dot.BackgroundTransparency = clamped and math.min(opacity + 0.35, 1) or opacity
+                -- Config stores OPACITY; Drawing wants transparency.
+                local baseTransp = 1 - opacity
+                dot.BackgroundTransparency = clamped and math.min(baseTransp + 0.35, 1) or baseTransp
                 dot.Visible = true
             end
         end
@@ -6285,7 +6307,7 @@ do
             addToggle(cat, sub, "Corner box",     function() return esp.ShowCornerBox end, function(v) esp.ShowCornerBox = v end)
             addValue (cat, sub, "Corner length",  function() return esp.CornerBoxLength end,
                 function(v) esp.CornerBoxLength = v end, 1, 2, 40, function(v) return tostring(math.floor(v)) end)
-            addValue (cat, sub, "Box transparency", function() return esp.CornerBoxTransparency end,
+            addValue (cat, sub, "Box opacity", function() return esp.CornerBoxTransparency end,
                 function(v) esp.CornerBoxTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
             addSection(cat, sub, "Labels")
             addToggle(cat, sub, "Show name",      function() return esp.ShowName end, function(v) esp.ShowName = v end)
