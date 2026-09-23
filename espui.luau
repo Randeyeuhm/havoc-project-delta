@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v14-corner-fill"
+ESPUI.VERSION = "v15-health-name"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -60,15 +60,15 @@ local DEFAULTS = {
 
     -- name
     Name = true, NameAnchor = "Above", NameOffsetX = 0, NameOffsetY = 0,
-    NameSize = 13, NameSource = "Username", NameShowHealth = true, NameOutline = true,
+    NameSize = 13, NameSource = "Username", NameOutline = true,
     NameColorMode = "Static", NameR = 235, NameG = 235, NameB = 245,
 
     -- health
-    Health = true, HealthStyle = "Bar",
+    Health = true, HealthStyle = "Both",
     HealthBarAnchor = "Left", HealthBarWidth = 2, HealthBarHeight = 0,
     HealthBarOutline = true, HealthBarTransparency = 1,
     HealthColorMode = "Gradient", HealthR = 82, HealthG = 202, HealthB = 128,
-    HealthTextAnchor = "Below", HealthTextOffsetX = 0, HealthTextOffsetY = 0,
+    HealthTextAnchor = "Name", HealthTextOffsetX = 0, HealthTextOffsetY = 0,
     HealthTextSize = 11, HealthTextFormat = "Value", HealthTextOutline = true,
     HealthTextColorMode = "Gradient", HealthTextR = 255, HealthTextG = 255, HealthTextB = 255,
 
@@ -111,7 +111,7 @@ local CHOICES = {
     HealthStyle = { ["Bar"] = true, ["Text"] = true, ["Both"] = true },
     HealthBarAnchor = { ["Left"] = true, ["Right"] = true, ["Top"] = true, ["Bottom"] = true },
     HealthColorMode = { ["Gradient"] = true, ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    HealthTextAnchor = { ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
+    HealthTextAnchor = { ["Name"] = true, ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
     HealthTextFormat = { ["Value"] = true, ["Percent"] = true, ["Value/Max"] = true },
     HealthTextColorMode = { ["Gradient"] = true, ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
     DistanceAnchor = { ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
@@ -136,6 +136,20 @@ end
 
 -- Repairs invalid enum values (e.g. a hand-edited config).
 function ESPUI.sanitize(cfg)
+    -- The Name tab's "Show health suffix" moved into the Health tab
+    -- (health text position "Name"). Old configs migrate to keep the look.
+    if cfg.NameShowHealth ~= nil then
+        if cfg.NameShowHealth == true then
+            if not cfg.Health then
+                cfg.Health = true
+                cfg.HealthStyle = "Text"
+            elseif cfg.HealthStyle == "Bar" then
+                cfg.HealthStyle = "Both"
+            end
+            cfg.HealthTextAnchor = "Name"
+        end
+        cfg.NameShowHealth = nil
+    end
     -- The "Fill" style was removed (redundant with the Fill toggle) -
     -- saved configs migrate to Full + Fill on so the look is unchanged.
     if cfg.BoxStyle == "Fill" then
@@ -539,16 +553,13 @@ function ESPUI.newRenderer(getCfg)
                     end
                 end
 
-                -- Name
+                -- Name (health next to it is drawn by the health text block
+                -- below when its position is "Name")
                 if cfg.Name then
-                    local text = t.name or "?"
-                    if cfg.NameShowHealth then
-                        text = text .. " [" .. formatHealthText("Value", t.health, t.maxHealth) .. "]"
-                    end
                     local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
                     local nameColor = ESPUI.colorFor(cfg.NameColorMode,
                         cfg.NameR, cfg.NameG, cfg.NameB, t.teamColor, hue)
-                    applyText(e, "name", nx, ny, text, cfg.NameSize, nameColor, cfg.NameOutline)
+                    applyText(e, "name", nx, ny, t.name or "?", cfg.NameSize, nameColor, cfg.NameOutline)
                 else
                     hideDrawing(e.name)
                 end
@@ -578,12 +589,34 @@ function ESPUI.newRenderer(getCfg)
                 end
 
                 if cfg.Health and (cfg.HealthStyle == "Text" or cfg.HealthStyle == "Both") then
-                    local hx, hy = textCenter(cfg.HealthTextAnchor, rect,
-                        cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
                     local text = formatHealthText(cfg.HealthTextFormat, t.health, t.maxHealth)
                     local txtColor = ESPUI.colorFor(cfg.HealthTextColorMode,
                         cfg.HealthTextR, cfg.HealthTextG, cfg.HealthTextB, t.teamColor, hue, frac)
-                    applyText(e, "healthText", hx, hy, text, cfg.HealthTextSize, txtColor, cfg.HealthTextOutline)
+                    if cfg.HealthTextAnchor == "Name" then
+                        -- Sits right after the name label (the slot the old
+                        -- "show health suffix" used); centres at the name
+                        -- anchor point when the name itself is hidden.
+                        local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
+                        applyText(e, "healthText", nx, ny, text, cfg.HealthTextSize, txtColor, cfg.HealthTextOutline)
+                        local nameW, textW = 0, 0
+                        if cfg.Name and e.name then
+                            local okb, b = pcall(function() return e.name.TextBounds end)
+                            if okb and b then nameW = b.X end
+                        end
+                        if nameW <= 0 and cfg.Name then nameW = #(t.name or "?") * cfg.NameSize * 0.55 end
+                        if e.healthText then
+                            local okb, b = pcall(function() return e.healthText.TextBounds end)
+                            if okb and b then textW = b.X end
+                        end
+                        if textW <= 0 then textW = #text * cfg.HealthTextSize * 0.55 end
+                        local hx = nx
+                        if cfg.Name then hx = nx + nameW / 2 + 6 + textW / 2 end
+                        if e.healthText then e.healthText.Position = Vector2.new(hx, ny) end
+                    else
+                        local hx, hy = textCenter(cfg.HealthTextAnchor, rect,
+                            cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
+                        applyText(e, "healthText", hx, hy, text, cfg.HealthTextSize, txtColor, cfg.HealthTextOutline)
+                    end
                 else
                     hideDrawing(e.healthText)
                 end
@@ -1265,12 +1298,10 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             for i = 1, 8 do el.corners[i].Visible = false end
         end
 
-        -- Name
+        -- Name (health next to it comes from the health text block below)
         el.name.Visible = cfg.Name
         if cfg.Name then
-            local text = "DemoPlayer"
-            if cfg.NameShowHealth then text = text .. " [72]" end
-            el.name.Text = text
+            el.name.Text = "DemoPlayer"
             el.name.TextSize = cfg.NameSize
             el.name.TextColor3 = ESPUI.colorFor(cfg.NameColorMode,
                 cfg.NameR, cfg.NameG, cfg.NameB, demoTeam, now)
@@ -1308,8 +1339,18 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             el.healthText.TextColor3 = ESPUI.colorFor(cfg.HealthTextColorMode,
                 cfg.HealthTextR, cfg.HealthTextG, cfg.HealthTextB, demoTeam, now, frac)
             el.healthTextStroke.Enabled = cfg.HealthTextOutline and true or false
-            local hx, hy = textCenter(cfg.HealthTextAnchor, rect, cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
-            el.healthText.Position = UDim2.fromOffset(hx, hy)
+            if cfg.HealthTextAnchor == "Name" then
+                -- Right after the name label (same maths as the renderer).
+                local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
+                local hx = nx
+                if cfg.Name then
+                    hx = nx + el.name.TextBounds.X / 2 + 6 + el.healthText.TextBounds.X / 2
+                end
+                el.healthText.Position = UDim2.fromOffset(hx, ny)
+            else
+                local hx, hy = textCenter(cfg.HealthTextAnchor, rect, cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
+                el.healthText.Position = UDim2.fromOffset(hx, hy)
+            end
         end
 
         -- Distance
@@ -1491,10 +1532,10 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p2, "Offset Y", "NameOffsetY", 1, -100, 100)
     slider(p2, "Text size", "NameSize", 1, 8, 20)
     dropdown(p2, "Source", "NameSource", { "Username", "DisplayName" })
-    toggle(p2, "Show health suffix", "NameShowHealth")
     toggle(p2, "Outline", "NameOutline")
     dropdown(p2, "Colour mode", "NameColorMode", MODES3)
     colorpicker(p2, "Name colour", "Name")
+    note(p2, "Health next to the name lives in the Health tab: set its text position to 'Name'.")
 
     -- ---------------- Health ----------------
     local p3 = pages[3]
@@ -1510,7 +1551,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     dropdown(p3, "Bar colour mode", "HealthColorMode", HEALTH_MODES)
     colorpicker(p3, "Bar colour (Static mode)", "Health")
     section(p3, "Health text")
-    dropdown(p3, "Text position", "HealthTextAnchor", ANCHORS)
+    dropdown(p3, "Text position", "HealthTextAnchor", { "Name", "Above", "Below", "Inside", "Left", "Right" })
     slider(p3, "Text offset X", "HealthTextOffsetX", 1, -100, 100)
     slider(p3, "Text offset Y", "HealthTextOffsetY", 1, -100, 100)
     slider(p3, "Text size", "HealthTextSize", 1, 8, 18)
@@ -1518,6 +1559,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     toggle(p3, "Text outline", "HealthTextOutline")
     dropdown(p3, "Text colour mode", "HealthTextColorMode", HEALTH_MODES)
     colorpicker(p3, "Text colour (Static mode)", "HealthText")
+    note(p3, "'Name' position puts the health text right after the player name (offset sliders don't apply there; colour modes do - try Gradient).")
 
     -- ---------------- Distance ----------------
     local p4 = pages[4]
