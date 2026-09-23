@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v5-window-scaffold"
+ESPUI.VERSION = "v6-offset-scale"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -193,11 +193,22 @@ local function formatDistance(cfg, dist)
     return num .. (cfg.DistanceUnit == "Studs" and " studs" or "m")
 end
 
+-- Manual offsets are tuned at this reference box height; scaling them with
+-- the actual box keeps placements proportional at every distance - a value
+-- that looks right up close keeps looking right across the map. The preview
+-- uses the same maths, so what you tune there is what the game shows.
+local OFFSET_REF_H = 150
+
+local function offsetScale(h)
+    return math.clamp(h / OFFSET_REF_H, 0.3, 3)
+end
+
 -- Text centre point for an anchor around box rect r (text elements use
 -- Center=true / AnchorPoint 0.5,0.5, so this returns the centre).
 local function textCenter(anchor, r, offX, offY)
     local cx, cy = r.x + r.w / 2, r.y + r.h / 2
-    offX, offY = offX or 0, offY or 0
+    local s = offsetScale(r.h)
+    offX, offY = (offX or 0) * s, (offY or 0) * s
     if anchor == "Above" then return cx + offX, r.y - 13 + offY end
     if anchor == "Below" then return cx + offX, r.y + r.h + 5 + offY end
     if anchor == "Inside" then return cx + offX, r.y + 9 + offY end
@@ -498,13 +509,16 @@ function ESPUI.newRenderer(getCfg)
                     local bg, fill = healthBarRects(cfg, rect, frac)
                     local barColor = ESPUI.colorFor(cfg.HealthColorMode,
                         cfg.HealthR, cfg.HealthG, cfg.HealthB, t.teamColor, hue, frac)
+                    -- The track and outline fade together with the bar, so
+                    -- the slider controls the whole bar, not just the fill.
+                    local barOpacity = math.clamp(cfg.HealthBarTransparency or 1, 0, 1)
                     applySquare(e, "healthBg", bg.x, bg.y, bg.w, bg.h,
-                        Color3.new(0, 0, 0), 0.5, true, 1)
+                        Color3.new(0, 0, 0), 1 - 0.5 * barOpacity, true, 1)
                     applySquare(e, "healthFill", fill.x, fill.y, fill.w, fill.h,
                         barColor, tex(cfg.HealthBarTransparency), true, 1)
                     if cfg.HealthBarOutline then
                         applySquare(e, "healthBorder", bg.x, bg.y, bg.w, bg.h,
-                            Color3.new(0, 0, 0), 0.3, false, 1)
+                            Color3.new(0, 0, 0), 1 - 0.7 * barOpacity, false, 1)
                     else
                         hideDrawing(e.healthBorder)
                     end
@@ -1081,14 +1095,17 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             local bg, fill = healthBarRects(cfg, rect, frac)
             local barColor = ESPUI.colorFor(cfg.HealthColorMode,
                 cfg.HealthR, cfg.HealthG, cfg.HealthB, demoTeam, now, frac)
+            local barOpacity = math.clamp(cfg.HealthBarTransparency or 1, 0, 1)
             el.healthBg.Position = UDim2.fromOffset(bg.x, bg.y)
             el.healthBg.Size = UDim2.fromOffset(bg.w, bg.h)
+            el.healthBg.BackgroundTransparency = 1 - 0.5 * barOpacity
             el.healthFill.Position = UDim2.fromOffset(fill.x, fill.y)
             el.healthFill.Size = UDim2.fromOffset(fill.w, fill.h)
             el.healthFill.BackgroundColor3 = barColor
             el.healthFill.BackgroundTransparency = tex(cfg.HealthBarTransparency)
             el.healthBorder.Position = UDim2.fromOffset(bg.x, bg.y)
             el.healthBorder.Size = UDim2.fromOffset(bg.w, bg.h)
+            el.healthBorderStroke.Transparency = 1 - 0.7 * barOpacity
         end
         local showHealthText = cfg.Health and (cfg.HealthStyle == "Text" or cfg.HealthStyle == "Both")
         el.healthText.Visible = showHealthText
@@ -1265,12 +1282,12 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     toggle(p1, "Outline", "BoxOutline")
     toggle(p1, "Fill", "BoxFill")
     slider(p1, "Thickness", "BoxThickness", 1, 1, 4)
-    slider(p1, "Opacity", "BoxTransparency", 0.05, 0.05, 1)
+    slider(p1, "Outline opacity", "BoxTransparency", 0.05, 0.05, 1)
     slider(p1, "Fill opacity", "BoxFillTransparency", 0.05, 0, 1)
     slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
     dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
     colorpicker(p1, "Box colour", "Box")
-    note(p1, "Corners style draws four corner brackets and ignores fill/outline.")
+    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline.")
 
     -- ---------------- Name ----------------
     local p2 = pages[2]
