@@ -149,6 +149,13 @@ function ESPUI.healthColor(frac)
     )
 end
 
+-- Converts a config opacity (1 = fully visible) into the transparency value
+-- Drawing/GUI objects expect (1 = invisible). The preview and the in-game
+-- renderer both go through this one function, so they can never drift apart.
+local function tex(value)
+    return 1 - math.clamp(value or 1, 0, 1)
+end
+
 -- mode: "Static" | "Team" | "Rainbow" | "Gradient"
 -- hue: current rainbow hue (caller adds a per-element offset)
 -- frac: health fraction for Gradient mode
@@ -348,9 +355,9 @@ function ESPUI.newRenderer(getCfg)
             hl.Adornee = model
             if hl.Parent ~= model then hl.Parent = model end
             hl.FillColor = Color3.fromRGB(cfg.ChamsFillR, cfg.ChamsFillG, cfg.ChamsFillB)
-            hl.FillTransparency = 1 - cfg.ChamsFillTransparency
+            hl.FillTransparency = tex(cfg.ChamsFillTransparency)
             hl.OutlineColor = Color3.fromRGB(cfg.ChamsOutlineR, cfg.ChamsOutlineG, cfg.ChamsOutlineB)
-            hl.OutlineTransparency = 1 - cfg.ChamsOutlineTransparency
+            hl.OutlineTransparency = tex(cfg.ChamsOutlineTransparency)
             hl.DepthMode = cfg.ChamsAlwaysOnTop
                 and Enum.HighlightDepthMode.AlwaysOnTop
                 or Enum.HighlightDepthMode.Occluded
@@ -423,7 +430,7 @@ function ESPUI.newRenderer(getCfg)
                             o.PointB = center - dir * size * 0.4 + perp * size * 0.7
                             o.PointC = center - dir * size * 0.4 - perp * size * 0.7
                             o.Color = arrowColor
-                            o.Transparency = 1 - math.clamp(cfg.ArrowTransparency or 0.3, 0, 1)
+                            o.Transparency = tex(cfg.ArrowTransparency)
                             o.Thickness = cfg.ArrowThickness
                         end
                     end
@@ -451,17 +458,17 @@ function ESPUI.newRenderer(getCfg)
                         for c = 1, 8 do
                             local s = specs[c]
                             applySquare(e, "corner" .. c, s[1], s[2], s[3], s[4],
-                                boxColor, 1 - cfg.BoxTransparency, true, 1)
+                                boxColor, tex(cfg.BoxTransparency), true, 1)
                         end
                     else
                         local wantFill = (style == "Fill") or (style == "Full" and cfg.BoxFill)
                         if wantFill then
                             applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, 1 - cfg.BoxFillTransparency, true, 1)
+                                boxColor, tex(cfg.BoxFillTransparency), true, 1)
                         end
                         if cfg.BoxOutline then
                             applySquare(e, "boxOutline", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, 1 - cfg.BoxTransparency, false, cfg.BoxThickness)
+                                boxColor, tex(cfg.BoxTransparency), false, cfg.BoxThickness)
                         end
                     end
                 end
@@ -488,7 +495,7 @@ function ESPUI.newRenderer(getCfg)
                     applySquare(e, "healthBg", bg.x, bg.y, bg.w, bg.h,
                         Color3.new(0, 0, 0), 0.5, true, 1)
                     applySquare(e, "healthFill", fill.x, fill.y, fill.w, fill.h,
-                        barColor, 1 - (cfg.HealthBarTransparency or 1), true, 1)
+                        barColor, tex(cfg.HealthBarTransparency), true, 1)
                     if cfg.HealthBarOutline then
                         applySquare(e, "healthBorder", bg.x, bg.y, bg.w, bg.h,
                             Color3.new(0, 0, 0), 0.3, false, 1)
@@ -540,7 +547,7 @@ function ESPUI.newRenderer(getCfg)
                         cfg.TracerR, cfg.TracerG, cfg.TracerB, t.teamColor, hue)
                     applyLine(e, "tracer", origin.X, origin.Y,
                         rect.x + rect.w / 2, rect.y + rect.h,
-                        tracerColor, cfg.TracerThickness, 1 - cfg.TracerTransparency)
+                        tracerColor, cfg.TracerThickness, tex(cfg.TracerTransparency))
                 else
                     hideDrawing(e.tracer)
                 end
@@ -596,7 +603,7 @@ function ESPUI.newRenderer(getCfg)
                                 ln.To = Vector2.new(b.X, b.Y)
                                 ln.Color = skelColor
                                 ln.Thickness = cfg.SkeletonThickness
-                                ln.Transparency = 1 - cfg.SkeletonTransparency
+                                ln.Transparency = tex(cfg.SkeletonTransparency)
                             end
                         elseif e.skel[li] then
                             hideDrawing(e.skel[li])
@@ -614,7 +621,7 @@ function ESPUI.newRenderer(getCfg)
                         local lookColor = ESPUI.colorFor(cfg.LookLineColorMode,
                             cfg.LookLineR, cfg.LookLineG, cfg.LookLineB, t.teamColor, hue)
                         applyLine(e, "lookLine", a.X, a.Y, b.X, b.Y,
-                            lookColor, cfg.LookLineThickness, 1 - cfg.LookLineTransparency)
+                            lookColor, cfg.LookLineThickness, tex(cfg.LookLineTransparency))
                     else
                         hideDrawing(e.lookLine)
                     end
@@ -1065,7 +1072,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             el.fill.Position = UDim2.fromOffset(rect.x, rect.y)
             el.fill.Size = UDim2.fromOffset(rect.w, rect.h)
             el.fill.BackgroundColor3 = boxColor
-            el.fill.BackgroundTransparency = cfg.BoxFillTransparency
+            el.fill.BackgroundTransparency = tex(cfg.BoxFillTransparency)
         end
         local showOutline = cfg.Box and cfg.BoxOutline and style ~= "Corners"
         el.strokeFrame.Visible = showOutline
@@ -1074,7 +1081,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             el.strokeFrame.Size = UDim2.fromOffset(rect.w, rect.h)
             el.stroke.Color = boxColor
             el.stroke.Thickness = cfg.BoxThickness
-            el.stroke.Transparency = 1 - cfg.BoxTransparency
+            el.stroke.Transparency = tex(cfg.BoxTransparency)
         end
         local showCorners = cfg.Box and style == "Corners"
         if showCorners then
@@ -1086,7 +1093,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
                 c.Position = UDim2.fromOffset(s[1], s[2])
                 c.Size = UDim2.fromOffset(s[3], s[4])
                 c.BackgroundColor3 = boxColor
-                c.BackgroundTransparency = 1 - cfg.BoxTransparency
+                c.BackgroundTransparency = tex(cfg.BoxTransparency)
             end
         else
             for i = 1, 8 do el.corners[i].Visible = false end
@@ -1121,7 +1128,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             el.healthFill.Position = UDim2.fromOffset(fill.x, fill.y)
             el.healthFill.Size = UDim2.fromOffset(fill.w, fill.h)
             el.healthFill.BackgroundColor3 = barColor
-            el.healthFill.BackgroundTransparency = 1 - (cfg.HealthBarTransparency or 1)
+            el.healthFill.BackgroundTransparency = tex(cfg.HealthBarTransparency)
             el.healthBorder.Position = UDim2.fromOffset(bg.x, bg.y)
             el.healthBorder.Size = UDim2.fromOffset(bg.w, bg.h)
         end
@@ -1162,7 +1169,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             local tracerColor = ESPUI.colorFor(cfg.TracerColorMode,
                 cfg.TracerR, cfg.TracerG, cfg.TracerB, demoTeam, now)
             placeLine(el.tracer, ax, ay, rect.x + rect.w / 2, rect.y + rect.h,
-                cfg.TracerThickness, tracerColor, 1 - cfg.TracerTransparency)
+                cfg.TracerThickness, tracerColor, tex(cfg.TracerTransparency))
         end
 
         -- Head dot
@@ -1192,7 +1199,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             for i, pair in ipairs(SKEL_PAIRS) do
                 local a, b = joints[pair[1]], joints[pair[2]]
                 placeLine(el.skel[i], a[1], a[2], b[1], b[2],
-                    cfg.SkeletonThickness, skelColor, 1 - cfg.SkeletonTransparency)
+                    cfg.SkeletonThickness, skelColor, tex(cfg.SkeletonTransparency))
             end
         end
     end
@@ -1381,14 +1388,17 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         end)
     end
     local function dropdown(page, text, key, items)
-        -- Inline selector instead of uilib's floating dropdown: the list
-        -- expands inside the row, so its clicks can never fall through to
-        -- the window underneath.
-        guard("selector " .. text, function()
-            return makeSelector(UILib, page, text,
+        guard("dropdown " .. text, function()
+            return UILib.makeDropdown(page, text,
                 function() return items end,
                 function() return cfg[key] end,
-                function(v) cfg[key] = v end)
+                function(v)
+                    cfg[key] = v
+                    -- uilib dropdowns don't auto-save (host-owned, unlike
+                    -- toggles and sliders) - persist the pick here.
+                    if ctx.save then pcall(ctx.save) end
+                end,
+                options)
         end)
     end
     local function colorpicker(page, text, prefix)
