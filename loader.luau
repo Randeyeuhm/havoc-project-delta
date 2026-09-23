@@ -89,6 +89,9 @@ for _, name in ipairs({ UILIB_FILE, ESPUI_FILE }) do
             -- Echo the build string so a stale module is obvious.
             local ver = src:match("ESPUI%.VERSION%s*=%s*\"([^\"]+)\"")
             log("espui build: " .. (ver or "unknown"))
+        elseif name == UILIB_FILE then
+            local ver = src:match("UILib%.VERSION%s*=%s*\"([^\"]+)\"")
+            log("uilib build: " .. (ver or "unknown"))
         end
     else
         warn("[Havoc Hub] could not fetch " .. name .. " - the script will fall back to a local copy if present")

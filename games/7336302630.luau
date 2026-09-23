@@ -78,6 +78,7 @@ do
     end)
     if ok and type(res) == "table" then
         UILib = res
+        print("[Havoc] uilib " .. tostring(UILib.VERSION or "?") .. " loaded")
     else
         warn("[Havoc] uilib.luau not loaded (" .. tostring(res) .. ") - settings menu will be skipped")
     end

@@ -134,6 +134,11 @@ do
     end)
     if ok and type(res) == "table" then
         UILib = res
+        if UILib.VERSION then
+            print("[universal] uilib " .. tostring(UILib.VERSION) .. " loaded")
+        else
+            warn("[universal] uilib.luau has no version marker - it is an OLD build; re-run the loader to update it")
+        end
     else
         warn("[Havoc Hub] uilib.luau not loaded (" .. tostring(res) .. ") - settings menu will be skipped")
     end
@@ -670,20 +675,43 @@ local function buildMenu()
     }
     local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4) }
 
-    -- Page helpers: everything registered so refreshGUI() can sync it.
-    local function section(page, text) addControl(UILib.makeSectionHeader(page, text)) end
+    -- Page helpers: every widget goes through a labelled pcall, so one bad
+    -- row can never empty the rest of the menu - and the console names
+    -- exactly what failed and how many controls actually got built.
+    local builtCount = 0
+    local function guard(what, fn)
+        local ok, e = pcall(fn)
+        if ok and type(e) == "table" then
+            builtCount = builtCount + 1
+            addControl(e)
+            return e
+        end
+        warn(("[universal] widget '%s' failed: %s"):format(what, tostring(e)))
+        return nil
+    end
+    local function section(page, text)
+        guard("section " .. text, function() return UILib.makeSectionHeader(page, text) end)
+    end
     local function toggle(page, text, getter, setter, hkEntry)
-        addControl(UILib.makeToggle(page, text, getter, setter, hkEntry))
+        guard("toggle " .. text, function() return UILib.makeToggle(page, text, getter, setter, hkEntry) end)
     end
     local function slider(page, text, getter, setter, step, min, max)
-        addControl(UILib.makeSlider(page, text, getter, setter, step, min, max))
+        guard("slider " .. text, function() return UILib.makeSlider(page, text, getter, setter, step, min, max) end)
     end
-    local function bindrow(page, entry, opts) addControl(UILib.makeKeybindRow(page, entry, opts)) end
+    local function bindrow(page, entry, opts)
+        guard("keybind row " .. tostring(entry and entry.Desc or "?"), function()
+            return UILib.makeKeybindRow(page, entry, opts)
+        end)
+    end
     local function dropdown(page, label, getItems, getSelected, onSelect)
-        addControl(UILib.makeDropdown(page, label, getItems, getSelected, onSelect, win.popupLayer))
+        guard("dropdown " .. label, function()
+            return UILib.makeDropdown(page, label, getItems, getSelected, onSelect, win.popupLayer)
+        end)
     end
-    local function button(page, text, onClick, opts) addControl(UILib.makeButton(page, text, onClick, opts)) end
-    local function note(page, text) UILib.makeNote(page, text, "auto") end
+    local function button(page, text, onClick, opts)
+        guard("button " .. text, function() return UILib.makeButton(page, text, onClick, opts) end)
+    end
+    local function note(page, text) pcall(function() UILib.makeNote(page, text, "auto") end) end
 
     -- ---------------- Aimbot ----------------
     local p1 = pages[1]
@@ -799,6 +827,7 @@ local function buildMenu()
         "game-specific script yet."):format(game.PlaceId))
 
     win.setTab(1)
+    print(("[universal] menu built (%d controls)"):format(builtCount))
 end
 
 if UILib and screenGui then
