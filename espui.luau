@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v9-no-opacity"
+ESPUI.VERSION = "v10-full-visibility"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -319,6 +319,8 @@ function ESPUI.newRenderer(getCfg)
         return obj
     end
 
+    -- NOTE: on this executor, Drawing "Transparency" is inverted - 1 renders
+    -- fully visible, 0 renders nothing at all. Every visible element passes 1.
     local function applySquare(e, field, x, y, w, h, color, transparency, filled, thickness)
         local o = getObj(e, field, function() return Drawing.new("Square") end)
         if not o then return end
@@ -448,7 +450,7 @@ function ESPUI.newRenderer(getCfg)
                             o.PointB = center - dir * size * 0.4 + perp * size * 0.7
                             o.PointC = center - dir * size * 0.4 - perp * size * 0.7
                             o.Color = arrowColor
-                            o.Transparency = 0
+                            o.Transparency = 1
                             o.Thickness = cfg.ArrowThickness
                         end
                     end
@@ -477,7 +479,7 @@ function ESPUI.newRenderer(getCfg)
                     if style == "Corners" then
                         local cl, th = cfg.BoxCornerLength, cfg.BoxThickness
                         local specs = cornerSpecs(rect, cl, th)
-                        local edgeT = 0   -- fully visible, by design
+                        local edgeT = 1   -- full visibility (this executor's Drawing Transparency is 1 = visible, 0 = invisible)
                         for c = 1, 8 do
                             local s = specs[c]
                             if s[3] >= s[4] then
@@ -492,11 +494,11 @@ function ESPUI.newRenderer(getCfg)
                         local wantFill = (style == "Fill") or (style == "Full" and cfg.BoxFill)
                         if wantFill then
                             applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, 0, true, 1)
+                                boxColor, 1, true, 1)
                         end
                         if cfg.BoxOutline then
                             local th = cfg.BoxThickness
-                            local edgeT = 0   -- fully visible, by design
+                            local edgeT = 1   -- full visibility (see note above)
                             local x0, y0, x1, y1 = rect.x, rect.y, rect.x + rect.w, rect.y + rect.h
                             applyLine(e, "boxEdge1", x0, y0, x1, y0, boxColor, th, edgeT)
                             applyLine(e, "boxEdge2", x0, y1, x1, y1, boxColor, th, edgeT)
@@ -528,9 +530,9 @@ function ESPUI.newRenderer(getCfg)
                     applySquare(e, "healthBg", bg.x, bg.y, bg.w, bg.h,
                         Color3.new(0, 0, 0), 0.5, true, 1)
                     applySquare(e, "healthFill", fill.x, fill.y, fill.w, fill.h,
-                        barColor, 0, true, 1)
+                        barColor, 1, true, 1)
                     if cfg.HealthBarOutline then
-                        local bt = 0.3
+                        local bt = 0.75
                         local bx, by, bx1, by1 = bg.x, bg.y, bg.x + bg.w, bg.y + bg.h
                         applyLine(e, "healthEdge1", bx, by, bx1, by, Color3.new(0, 0, 0), 1, bt)
                         applyLine(e, "healthEdge2", bx, by1, bx1, by1, Color3.new(0, 0, 0), 1, bt)
@@ -585,7 +587,7 @@ function ESPUI.newRenderer(getCfg)
                         cfg.TracerR, cfg.TracerG, cfg.TracerB, t.teamColor, hue)
                     applyLine(e, "tracer", origin.X, origin.Y,
                         rect.x + rect.w / 2, rect.y + rect.h,
-                        tracerColor, cfg.TracerThickness, 0)
+                        tracerColor, cfg.TracerThickness, 1)
                 else
                     hideDrawing(e.tracer)
                 end
@@ -606,7 +608,7 @@ function ESPUI.newRenderer(getCfg)
                             o.Radius = cfg.HeadDotSize
                             o.Color = ESPUI.colorFor(cfg.HeadDotColorMode,
                                 cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB, t.teamColor, hue)
-                            o.Transparency = 0
+                            o.Transparency = 1
                         else
                             o.Visible = false
                         end
@@ -641,7 +643,7 @@ function ESPUI.newRenderer(getCfg)
                                 ln.To = Vector2.new(b.X, b.Y)
                                 ln.Color = skelColor
                                 ln.Thickness = cfg.SkeletonThickness
-                                ln.Transparency = 0
+                                ln.Transparency = 1
                             end
                         elseif e.skel[li] then
                             hideDrawing(e.skel[li])
@@ -659,7 +661,7 @@ function ESPUI.newRenderer(getCfg)
                         local lookColor = ESPUI.colorFor(cfg.LookLineColorMode,
                             cfg.LookLineR, cfg.LookLineG, cfg.LookLineB, t.teamColor, hue)
                         applyLine(e, "lookLine", a.X, a.Y, b.X, b.Y,
-                            lookColor, cfg.LookLineThickness, 0)
+                            lookColor, cfg.LookLineThickness, 1)
                     else
                         hideDrawing(e.lookLine)
                     end
@@ -901,7 +903,7 @@ function ESPUI.primitiveTest()
         s.Size = Vector2.new(w, h)
         s.Filled = true
         s.Color = Color3.fromRGB(255, 60, 60)
-        s.Transparency = 0
+        s.Transparency = 1
         s.Visible = true
     end)
 
@@ -913,7 +915,7 @@ function ESPUI.primitiveTest()
         s.Filled = false
         s.Thickness = 2
         s.Color = Color3.fromRGB(60, 255, 60)
-        s.Transparency = 0
+        s.Transparency = 1
         s.Visible = true
     end)
 
@@ -932,7 +934,7 @@ function ESPUI.primitiveTest()
             ln.To = Vector2.new(e[3], e[4])
             ln.Thickness = 2
             ln.Color = Color3.fromRGB(80, 140, 255)
-            ln.Transparency = 0
+            ln.Transparency = 1
             ln.Visible = true
         end
     end)
@@ -947,7 +949,7 @@ function ESPUI.primitiveTest()
         q.PointD = Vector2.new(x0, qy + h)
         q.Filled = true
         q.Color = Color3.fromRGB(255, 220, 60)
-        q.Transparency = 0
+        q.Transparency = 1
         q.Visible = true
     end)
 
@@ -962,7 +964,7 @@ function ESPUI.primitiveTest()
         q.Filled = false
         q.Thickness = 2
         q.Color = Color3.fromRGB(255, 130, 60)
-        q.Transparency = 0
+        q.Transparency = 1
         q.Visible = true
     end)
 
@@ -974,7 +976,7 @@ function ESPUI.primitiveTest()
         c.NumSides = 24
         c.Filled = true
         c.Color = Color3.fromRGB(80, 220, 220)
-        c.Transparency = 0
+        c.Transparency = 1
         c.Visible = true
     end)
 
@@ -987,7 +989,7 @@ function ESPUI.primitiveTest()
         t.PointC = Vector2.new(x0, ty + h)
         t.Filled = true
         t.Color = Color3.fromRGB(255, 80, 220)
-        t.Transparency = 0
+        t.Transparency = 1
         t.Visible = true
     end)
 
