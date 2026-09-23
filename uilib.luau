@@ -3,6 +3,8 @@
     This module holds the reusable GUI toolkit:
       • THEME / FONTS - palette and fonts shared by every panel
       • create / corner / stroke / tween helpers, makeRow
+      • makeWindow: the standard window scaffold (header, tabs, popup layer)
+      • makeToaster: auto-sizing top-centre notifications
       • Widget factories:
           makeSectionHeader, makeNote, makeToggle, makeSlider,
           makeColorPicker, makeKeybindRow, makeDropdown,
@@ -12,8 +14,7 @@
       • Keybind rebind capture (beginRebind / handleRebindInput)
 
     App-specific pieces stay in the host script and are NOT here:
-    the main window layout (buildGUI wiring), toasts, HUD, radar,
-    Inventory ESP, config persistence, hotkey actions.
+    HUD, radar, Inventory ESP, config persistence, hotkey actions.
 
     ---- Wiring it into a host script --------------------------
         local UILib = require(path.to.uilib)
@@ -60,12 +61,13 @@
 local UserInputService = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
 local GuiService        = game:GetService("GuiService")
+local TextService       = game:GetService("TextService")
 
 local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w1-window-scaffold"
+UILib.VERSION = "w2-toaster"
 
 -- ============================================================
 -- UI THEME
@@ -1420,6 +1422,115 @@ local function makeInput(parent, label, getter, setter, opts)
 end
 
 -- ============================================================
+-- TOASTS  (small top-centre notifications - the host calls
+-- UILib.makeToaster(screenGui) once and uses the returned notify(text))
+-- ============================================================
+-- Toasts auto-size to their message (measured with TextService), wrap
+-- instead of truncating, stack up to 4 deep and fade out.
+local TOAST_TEXT_SIZE = 12
+local TOAST_MAX_W     = 460
+local TOAST_MIN_W     = 150
+local TOAST_INSET     = 30  -- 18px left + 12px right text inset
+
+local function makeToaster(parentGui)
+    local slots = {}  -- [i] = { frame = Frame, height = number }
+
+    local function measure(text)
+        local ok, bounds = pcall(function()
+            return TextService:GetTextSize(text, TOAST_TEXT_SIZE, FONTS.MEDIUM,
+                Vector2.new(TOAST_MAX_W - TOAST_INSET, 1e5))
+        end)
+        if ok and bounds then
+            return math.clamp(bounds.X + TOAST_INSET, TOAST_MIN_W, TOAST_MAX_W),
+                math.max(bounds.Y, 14) + 14
+        end
+        return 280, 30
+    end
+
+    local function slotY(index)
+        local y = 8
+        for i = 1, index - 1 do
+            local s = slots[i]
+            y = y + (s and s.height or 0) + 6
+        end
+        return y
+    end
+
+    return function(text)
+        text = tostring(text)
+        local width, height = measure(text)
+
+        local slot
+        for i = 1, 4 do
+            if not slots[i] then slot = i; break end
+        end
+        if not slot then
+            slot = 1
+            local old = slots[1]
+            if old then old.frame:Destroy() end
+            slots[1] = nil
+        end
+
+        local frame = create("Frame", {
+            Name = "Toast",
+            Size = UDim2.fromOffset(width, height),
+            Position = UDim2.new(0.5, -width / 2, 0, -height - 10),
+            BackgroundColor3 = THEME.HEADER,
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 200,
+            Parent = parentGui,
+        })
+        corner(frame, 6)
+        local frameStroke = stroke(frame, THEME.STROKE)
+
+        local bar = create("Frame", {
+            Size = UDim2.new(0, 3, 1, -10),
+            Position = UDim2.new(0, 7, 0.5, -5),
+            BackgroundColor3 = THEME.ACCENT,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        corner(bar, 2)
+
+        local lbl = create("TextLabel", {
+            Size = UDim2.new(1, -TOAST_INSET, 1, 0),
+            Position = UDim2.fromOffset(18, 0),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = THEME.TEXT,
+            TextSize = TOAST_TEXT_SIZE,
+            Font = FONTS.MEDIUM,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextWrapped = true,
+            TextTruncate = Enum.TextTruncate.None,
+            ZIndex = 201,
+            Parent = frame,
+        })
+
+        slots[slot] = { frame = frame, height = height }
+        local targetY = slotY(slot)
+        tween(frame, 0.2, {
+            Position = UDim2.new(0.5, -width / 2, 0, targetY),
+            BackgroundTransparency = 0,
+        })
+        task.delay(2.6 + math.min(#text / 60, 1.6), function()
+            if frame.Parent then
+                tween(frame, 0.25, {
+                    Position = UDim2.new(0.5, -width / 2, 0, targetY - 14),
+                    BackgroundTransparency = 1,
+                })
+                tween(bar, 0.25, { BackgroundTransparency = 1 })
+                tween(lbl, 0.25, { TextTransparency = 1 })
+                tween(frameStroke, 0.25, { Transparency = 1 })
+                task.delay(0.3, function() if frame.Parent then frame:Destroy() end end)
+            end
+            if slots[slot] and slots[slot].frame == frame then slots[slot] = nil end
+        end)
+    end
+end
+
+-- ============================================================
 -- WINDOW  (the one standard scaffold for every panel: draggable frame,
 -- header + accent rule, optional tab rail with scrolling pages, close
 -- button, and a popup layer that dropdown lists are parented to, so an
@@ -1659,6 +1770,7 @@ UILib.makeDropdown      = makeDropdown
 UILib.makeButton        = makeButton
 UILib.makeInput         = makeInput
 UILib.makeWindow        = makeWindow
+UILib.makeToaster       = makeToaster
 
 print(("[uilib] %s loaded"):format(UILib.VERSION))
 

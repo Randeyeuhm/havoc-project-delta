@@ -192,73 +192,14 @@ if UILib then
     if not ok then pcall(function() screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end) end
 end
 
-local toastSlots = {}
-
--- Small top-centre toast used for hotkey feedback and widget warnings.
--- Falls back to a print when the menu isn't available.
-local function notify(text)
-    text = tostring(text)
-    if not (screenGui and UILib) then
-        print("[Havoc Hub]", text)
-        return
-    end
-
-    local slot
-    for i = 1, 4 do
-        if not toastSlots[i] then slot = i; break end
-    end
-    if not slot then
-        slot = 1
-        local old = toastSlots[1]
-        if old then old:Destroy() end
-    end
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.fromOffset(280, 30)
-    frame.Position = UDim2.new(0.5, -140, 0, -38)  -- starts above the screen
-    frame.BackgroundColor3 = UILib.THEME.HEADER
-    frame.BorderSizePixel = 0
-    frame.BackgroundTransparency = 1
-    frame.Parent = screenGui
-    UILib.corner(frame, 6)
-    UILib.stroke(frame, UILib.THEME.STROKE)
-
-    local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(0, 3, 1, -10)
-    bar.Position = UDim2.new(0, 7, 0.5, -5)
-    bar.BackgroundColor3 = UILib.THEME.ACCENT
-    bar.BorderSizePixel = 0
-    bar.Parent = frame
-    UILib.corner(bar, 2)
-
-    local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -24, 1, 0)
-    lbl.Position = UDim2.new(0, 18, 0, 0)
-    lbl.BackgroundTransparency = 1
-    lbl.Text = text
-    lbl.TextColor3 = UILib.THEME.TEXT
-    lbl.TextSize = 12
-    lbl.Font = UILib.FONTS.MEDIUM
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.TextTruncate = Enum.TextTruncate.AtEnd
-    lbl.Parent = frame
-
-    toastSlots[slot] = frame
-    local targetY = 8 + (slot - 1) * 36
-    UILib.tween(frame, 0.2, {
-        Position = UDim2.new(0.5, -140, 0, targetY),
-        BackgroundTransparency = 0,
-    })
-    task.delay(2.6, function()
-        if frame.Parent then
-            UILib.tween(frame, 0.25, {
-                Position = UDim2.new(0.5, -140, 0, targetY - 14),
-                BackgroundTransparency = 1,
-            })
-            task.delay(0.3, function() if frame.Parent then frame:Destroy() end end)
-        end
-        if toastSlots[slot] == frame then toastSlots[slot] = nil end
-    end)
+-- Toasts come from the UI library (auto-sized with TextService, so long
+-- messages wrap instead of clipping). Falls back to a print when there is
+-- no menu available.
+local notify
+if screenGui and UILib and UILib.makeToaster then
+    notify = UILib.makeToaster(screenGui)
+else
+    notify = function(text) print("[Havoc Hub]", tostring(text)) end
 end
 
 -- ============================================================
