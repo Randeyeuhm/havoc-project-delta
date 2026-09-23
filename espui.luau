@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v13-corner-1to1"
+ESPUI.VERSION = "v14-corner-fill"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -103,7 +103,7 @@ local DEFAULTS = {
 ESPUI.DEFAULTS = DEFAULTS
 
 local CHOICES = {
-    BoxStyle = { ["Full"] = true, ["Corners"] = true, ["Fill"] = true },
+    BoxStyle = { ["Full"] = true, ["Corners"] = true },
     BoxColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
     NameAnchor = { ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
     NameSource = { ["Username"] = true, ["DisplayName"] = true },
@@ -136,6 +136,12 @@ end
 
 -- Repairs invalid enum values (e.g. a hand-edited config).
 function ESPUI.sanitize(cfg)
+    -- The "Fill" style was removed (redundant with the Fill toggle) -
+    -- saved configs migrate to Full + Fill on so the look is unchanged.
+    if cfg.BoxStyle == "Fill" then
+        cfg.BoxStyle = "Full"
+        cfg.BoxFill = true
+    end
     for field, allowed in pairs(CHOICES) do
         if not allowed[cfg[field]] then cfg[field] = DEFAULTS[field] end
     end
@@ -334,8 +340,10 @@ function ESPUI.newRenderer(getCfg)
     end
 
     -- NOTE: on this executor, Drawing "Transparency" is inverted - 1 renders
-    -- fully visible, 0 renders nothing at all. Every visible element passes 1.
-    local function applySquare(e, field, x, y, w, h, color, transparency, filled, thickness)
+    -- fully visible, 0 renders nothing at all (opacity reaches here via
+    -- drawT). Optional zindex pins render order: box fills pass 0 so the
+    -- brackets/edges always draw on top of them.
+    local function applySquare(e, field, x, y, w, h, color, transparency, filled, thickness, zindex)
         local o = getObj(e, field, function() return Drawing.new("Square") end)
         if not o then return end
         o.Visible = true
@@ -345,6 +353,7 @@ function ESPUI.newRenderer(getCfg)
         o.Transparency = transparency
         o.Filled = filled and true or false
         o.Thickness = thickness or 1
+        if zindex then o.ZIndex = zindex end
     end
 
     local function applyText(e, field, x, y, text, size, color, outline)
@@ -491,6 +500,12 @@ function ESPUI.newRenderer(getCfg)
 
                 if cfg.Box then
                     if style == "Corners" then
+                        -- Fill works with the corners style too - drawn at
+                        -- ZIndex 0 so the brackets always sit on top.
+                        if cfg.BoxFill then
+                            applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
+                                boxColor, drawT(cfg.BoxFillTransparency), true, 1, 0)
+                        end
                         -- Corner length scales linearly with box height -
                         -- exactly the same maths as the preview, so brackets
                         -- are 1:1 at every distance.
@@ -508,10 +523,9 @@ function ESPUI.newRenderer(getCfg)
                             end
                         end
                     else
-                        local wantFill = (style == "Fill") or (style == "Full" and cfg.BoxFill)
-                        if wantFill then
+                        if cfg.BoxFill then
                             applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, drawT(cfg.BoxFillTransparency), true, 1)
+                                boxColor, drawT(cfg.BoxFillTransparency), true, 1, 0)
                         end
                         if cfg.BoxOutline then
                             local th = cfg.BoxThickness
@@ -1218,7 +1232,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         local boxColor = ESPUI.colorFor(cfg.BoxColorMode, cfg.BoxR, cfg.BoxG, cfg.BoxB, demoTeam, now)
 
         -- Box
-        local showFill = cfg.Box and (style == "Fill" or (style == "Full" and cfg.BoxFill))
+        local showFill = cfg.Box and cfg.BoxFill
         el.fill.Visible = showFill
         if showFill then
             el.fill.Position = UDim2.fromOffset(rect.x, rect.y)
@@ -1457,7 +1471,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     local p1 = pages[1]
     section(p1, "Box")
     toggle(p1, "Box enabled", "Box")
-    dropdown(p1, "Style", "BoxStyle", { "Full", "Corners", "Fill" })
+    dropdown(p1, "Style", "BoxStyle", { "Full", "Corners" })
     toggle(p1, "Outline", "BoxOutline")
     toggle(p1, "Fill", "BoxFill")
     slider(p1, "Thickness", "BoxThickness", 1, 1, 4)
@@ -1466,7 +1480,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
     dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
     colorpicker(p1, "Box colour", "Box")
-    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers edges (and corners); Fill covers the box fill and needs the Fill toggle on (Full style). Corners style ignores fill/outline. Corner length follows the box size - preview and in-game match exactly.")
+    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers the box edges; Fill fills the box and works with both styles. Corner length follows the box size - preview and in-game match exactly.")
 
     -- ---------------- Name ----------------
     local p2 = pages[2]
