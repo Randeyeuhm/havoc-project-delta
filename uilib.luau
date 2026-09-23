@@ -67,7 +67,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w3-select"
+UILib.VERSION = "w4-picker-inset"
 
 -- ============================================================
 -- UI THEME
@@ -392,13 +392,18 @@ local function isPointerDown(input)
     return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
 end
 
--- InputObject positions are measured from below the top-bar inset, but a
--- ScreenGui with IgnoreGuiInset lays out from the true top of the screen.
--- Shift the point into gui's space so it compares with AbsolutePosition.
+-- Pointer (InputObject) positions come in "true top of screen" space - the
+-- same space GetMouseLocation and WorldToViewportPoint use (verified
+-- in-game: shifting them by the inset moved drawings ~36px down). An
+-- IgnoreGuiInset ScreenGui lays out in that same space, so no shift is
+-- needed; a default ScreenGui lays out below the top bar, so the point
+-- moves down by the inset to compare with its AbsolutePosition. (This was
+-- the opposite way around, which left Y-sensitive drags like the colour
+-- picker's square ~36px off the cursor.)
 local function toGuiSpace(gui, pos)
     local p = Vector2.new(pos.X, pos.Y)
     local sg = gui:FindFirstAncestorOfClass("ScreenGui")
-    if sg and sg.IgnoreGuiInset then
+    if sg and not sg.IgnoreGuiInset then
         p = p + (GuiService:GetGuiInset())
     end
     return p
