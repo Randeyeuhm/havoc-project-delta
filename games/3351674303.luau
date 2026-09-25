@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v35"
+local SCRIPT_VERSION = "de-v36"
 
 local Connections = {}
 local function track(conn)
@@ -443,11 +443,12 @@ local function installRaceFinishedProbe()
     end)
 end
 
--- RACE CLOCK: every racing-loop tick the client pushes the race's elapsed
--- time (tick() - raceStart) through ClientRaceHelper.updateTrackInfo.
--- Wrapping it gives the assist a live, exact race timer, so it can hold at
--- the finish line until the track's payout minimum time has passed.
-local raceClock = { time = nil, at = nil }
+-- RACE CLOCK: every racing-loop tick the client pushes the race's live HUD
+-- info (elapsed time, current lap, total laps, NEXT expected gate) through
+-- ClientRaceHelper.updateTrackInfo. Wrapping it gives the assist an exact
+-- race timer (for the payout hold) plus the authoritative lap count and lap
+-- position (for correct floors, and for restarting mid-race).
+local raceClock = { time = nil, at = nil, laps = nil, lap = nil, nextCp = nil }
 local function installRaceClockHook()
     if not ClientRaceHelper or type(ClientRaceHelper.updateTrackInfo) ~= "function" then return end
     if type(vehicleHooks.origUpdateTrackInfo) ~= "function" then
@@ -455,9 +456,20 @@ local function installRaceClockHook()
     end
     local orig = vehicleHooks.origUpdateTrackInfo
     ClientRaceHelper.updateTrackInfo = function(info, ...)
-        if type(info) == "table" and tonumber(info.Time) then
-            raceClock.time = tonumber(info.Time)
-            raceClock.at = os.clock()
+        if type(info) == "table" then
+            if tonumber(info.Time) then
+                raceClock.time = tonumber(info.Time)
+                raceClock.at = os.clock()
+            end
+            local tl = tonumber(info.TotalLaps)
+            if tl and tl > 0 then raceClock.laps = tl end
+            local cl = tonumber(info.CurrentLap)
+            if cl then raceClock.lap = cl end
+            if info.Checkpoint ~= nil then raceClock.nextCp = info.Checkpoint end
+        elseif info == nil then
+            -- the race UI got torn down (race over / left) - forget it all
+            raceClock.time, raceClock.at = nil, nil
+            raceClock.laps, raceClock.lap, raceClock.nextCp = nil, nil, nil
         end
         return orig(info, ...)
     end
@@ -1608,13 +1620,17 @@ local function runRaceRoutine()
         return
     end
     local lapsKnown, minTime, trackName = raceTrackInfo(trackModel)
-    local laps = math.clamp(lapsKnown or 4, 1, 8)
     local startClock = os.clock()
     raceBusy = true
     task.spawn(function()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
+        -- the race HUD's TotalLaps arrives live on every racing tick - it
+        -- beats the config lookup and fixes the old "assumed 4 laps" bug
+        -- (a wrong floor + a phantom finish hold halfway through the race)
+        if raceClock.laps and raceClock.laps > 0 then lapsKnown = raceClock.laps end
+        local laps = math.clamp(lapsKnown or 2, 1, 8)
         local carMin = carAwareMinTime(chassis, trackModel, laps)
         local minTxt = ""
         if carMin then
@@ -1654,7 +1670,12 @@ local function runRaceRoutine()
                 end
             end
         end
-        notify(("Race assist: taking %d checkpoints x%d lap(s)%s"):format(#cps, laps, minTxt))
+        local contTxt = ""
+        local curLap = tonumber(raceClock.lap)
+        if curLap and curLap > 1 then
+            contTxt = (" - continuing lap %d/%d"):format(math.min(curLap, laps), laps)
+        end
+        notify(("Race assist: taking %d checkpoints x%d lap(s)%s%s"):format(#cps, laps, minTxt, contTxt))
         local ok, err = pcall(function()
             local function dirBetween(fromPart, toPart)
                 local d = (toPart.Position - fromPart.Position) * Vector3.new(1, 0, 1)
@@ -1669,9 +1690,14 @@ local function runRaceRoutine()
                 dirs[i] = dirBetween(cps[i - 1] or cps[#cps], cps[i])
             end
             local finishDir = dirBetween(cps[#cps], finish)
-            for pass = 1, laps do
+            -- Cross a stretch of checkpoints [fromIdx..#cps] and return how
+            -- many the server accepted / how many crossing rays missed. The
+            -- rejected path redoes the SAME gate with spaced re-crossings
+            -- (looping back through the previous gate broke runs more than
+            -- it helped).
+            local function crossFrom(fromIdx)
                 local taken, skipped = 0, 0
-                for i = 1, #cps do
+                for i = fromIdx, #cps do
                     legitimizeVehicleStats(chassis)
                     local res = crossCheckpoint(cps[i], dirs[i])
                     if res == "ok" then
@@ -1681,10 +1707,6 @@ local function runRaceRoutine()
                     elseif res == "novh" then
                         error("couldn't move your car - make sure you're sitting in it", 0)
                     else
-                        -- Server rejected this crossing: redo the SAME
-                        -- checkpoint with spaced-out re-crossings. Looping
-                        -- back through the previous gate broke runs more
-                        -- than it helped.
                         notify(("Race assist: checkpoint %d rejected (%s) - redoing it"):format(i, tostring(res)))
                         local cleared = false
                         for _ = 1, 4 do
@@ -1715,30 +1737,73 @@ local function runRaceRoutine()
                     end
                     task.wait(Config.Race.HopDelay or 0.5)  -- hop delay (Race tab slider)
                 end
-                if pass == 1 and taken == 0 then
-                    -- nothing answered: race may not have started, or every
-                    -- checkpoint is already taken and only the finish is left
-                    local fres = tryFinish(finish, finishDir, false)
-                    if fres == "ok" then
-                        notify("Race assist: race finished!")
-                        watchRacePayout()
-                        return
+                return taken, skipped
+            end
+
+            -- Which gate is the RACE waiting for? The HUD info names the
+            -- next expected checkpoint part - or the finish itself once
+            -- every gate of the final lap is counted. Following it makes
+            -- restarts mid-race continue exactly where the server is.
+            local function expectedIndex()
+                if not raceClock.nextCp then return nil end
+                local okM, res = pcall(function()
+                    local part = trackEntryPart(raceClock.nextCp)
+                    if part == finish then return "finish" end
+                    for i = 1, #cps do
+                        if cps[i] == part then return i end
                     end
-                    error("no checkpoint answered - wait for the race to start (GO) and retry (if the checkpoints were already taken, press again for the finish)", 0)
+                    return nil
+                end)
+                if okM then return res end
+                return nil
+            end
+
+            local startRaceLap = math.clamp(tonumber(raceClock.lap) or 1, 1, laps)
+            if expectedIndex() ~= nil then
+                -- LIVE MODE: follow the race's own expectations (fresh runs
+                -- and mid-race restarts both just work; once the race says
+                -- the finish is next, we drop into the finish rounds below)
+                local pass = 0
+                while true do
+                    local idx = expectedIndex()
+                    if idx == nil or idx == "finish" then break end
+                    pass = pass + 1
+                    if pass > laps + 2 then
+                        error("the race didn't advance - press the button again", 0)
+                    end
+                    local taken, skipped = crossFrom(idx)
+                    notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(
+                        math.min(startRaceLap + pass - 1, laps), laps, taken, skipped))
                 end
-                notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
-                -- take the finish line too: after the final lap, or every lap
-                -- when the lap count couldn't be read
-                if pass == laps or not lapsKnown then
-                    waitForPayout(minTime, startClock)
-                    local fres = tryFinish(finish, finishDir, false)
-                    if fres == "ok" then
-                        notify("Race assist: race finished!")
-                        watchRacePayout()
-                        return
+            else
+                -- BLIND MODE: no live race info - cross everything, laps times
+                for pass = 1, laps do
+                    local taken, skipped = crossFrom(1)
+                    if pass == 1 and taken == 0 then
+                        -- nothing answered: race may not have started, or
+                        -- every checkpoint is taken and only the finish left
+                        local fres = tryFinish(finish, finishDir, false)
+                        if fres == "ok" then
+                            notify("Race assist: race finished!")
+                            watchRacePayout()
+                            return
+                        end
+                        error("no checkpoint answered - wait for the race to start (GO) and retry (if the checkpoints were already taken, press again for the finish)", 0)
                     end
-                    if fres == "novh" then
-                        error("couldn't move your car - make sure you're sitting in it", 0)
+                    notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
+                    -- take the finish line too on the last lap, or every
+                    -- lap when the lap count couldn't be read
+                    if pass == laps or not lapsKnown then
+                        waitForPayout(minTime, startClock)
+                        local fres = tryFinish(finish, finishDir, false)
+                        if fres == "ok" then
+                            notify("Race assist: race finished!")
+                            watchRacePayout()
+                            return
+                        end
+                        if fres == "novh" then
+                            error("couldn't move your car - make sure you're sitting in it", 0)
+                        end
                     end
                 end
             end
@@ -2165,9 +2230,11 @@ local function buildMenu()
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
-        "instead of giving up. You must be in a race with your car spawned; " ..
-        "wait for the countdown (GO) before pressing. Race records and " ..
-        "leaderboards are monitored - use it on tracks you don't care about.")
+        "instead of giving up. Stopping and pressing again mid-race " ..
+        "resumes from the gate the race is actually waiting for. You must " ..
+        "be in a race with your car spawned; wait for the countdown (GO) " ..
+        "before pressing. Race records and leaderboards are monitored - " ..
+        "use it on tracks you don't care about.")
     note(p7, "Tip: the Vehicle tab's 'Remove tires' toggle keeps the wheels " ..
         "from flailing around during the jumps.")
 
