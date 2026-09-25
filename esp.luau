@@ -1227,6 +1227,147 @@ function ESP.open(ctx)
     return true
 end
 
+-- ============================================================
+-- CUSTOMIZER - OBJECT ESP (drops / loot / corpses)
+-- ============================================================
+-- Game scripts render object ESP themselves (project Delta's drops
+-- renderer); this edits the config fields those renderers read. ctx:
+--   cfg, uilib, screenGui, types   - required
+--   types = { { key = "Item", label = "Items" }, ... }
+--     each type's sub-table holds Enabled / Hollow / R,G,B
+--   nameField = "Show%sNames"      - optional: shared name toggle per type
+--   distance = "MaxDistance"       - optional: shared range slider field
+--   labelSize = "LabelSize"        - optional: shared label size slider
+--   title, save, notify            - optional
+function ESP.openObjects(ctx)
+    if type(ctx) ~= "table" or not ctx.cfg or not ctx.uilib or not ctx.screenGui
+       or type(ctx.types) ~= "table" then
+        return false, "esp.openObjects needs { cfg, types, uilib, screenGui }"
+    end
+    if ctx.uilib.restoreIdentity then ctx.uilib.restoreIdentity() end
+    if OPEN.objects and OPEN.objects.screenGui == ctx.screenGui then
+        if OPEN.objects.cfg == ctx.cfg then
+            local w = OPEN.objects.window
+            if w.isVisible and w.isVisible() then
+                w.hide()
+            else
+                w.show()
+                OPEN.objects.refresh()
+            end
+            return true
+        end
+        -- A different config on the same screen: rebuild cleanly.
+        if OPEN.objects.window and OPEN.objects.window.destroy then
+            pcall(OPEN.objects.window.destroy)
+        end
+        OPEN.objects = nil
+    end
+
+    local UILib = ctx.uilib
+    local cfg = ctx.cfg
+    local save = ctx.save
+    local function persist()
+        if save then pcall(save) end
+    end
+
+    local titles = {}
+    for _, t in ipairs(ctx.types) do titles[#titles + 1] = t.label or t.key or "?" end
+    titles[#titles + 1] = "Shared"
+
+    local win = UILib.makeWindow{
+        parent = ctx.screenGui,
+        name = "ESPObjectsWindow",
+        title = ctx.title or "OBJECT ESP",
+        size = UDim2.new(0, 320, 0, 400),
+        position = UDim2.new(1, -350, 0, 90),
+        zindex = 22,
+        tabs = titles,
+    }
+
+    local controls = {}
+    local function refresh()
+        for _, e in ipairs(controls) do
+            if e.update then pcall(e.update) end
+        end
+    end
+    -- Labelled pcalls: one bad row must never empty a whole tab.
+    local function guard(what, fn)
+        local ok, e = pcall(fn)
+        if ok and type(e) == "table" then
+            table.insert(controls, e)
+            return e
+        end
+        warn(("[esp] object widget '%s' failed: %s"):format(what, tostring(e)))
+        return nil
+    end
+    local function section(page, text)
+        guard("section " .. text, function() return UILib.makeSectionHeader(page, text) end)
+    end
+    local function note(page, text)
+        pcall(function() UILib.makeNote(page, text, "auto") end)
+    end
+
+    for i, t in ipairs(ctx.types) do
+        local page = win.tab(i)
+        local sub = cfg[t.key]
+        if type(sub) ~= "table" then sub = {}; cfg[t.key] = sub end
+        local label = t.label or t.key
+        section(page, label)
+        guard("enable " .. label, function()
+            return UILib.makeToggle(page, "Enabled",
+                function() return sub.Enabled end,
+                function(v) sub.Enabled = v; persist() end)
+        end)
+        guard("hollow " .. label, function()
+            return UILib.makeToggle(page, "Hollow (outline only)",
+                function() return sub.Hollow end,
+                function(v) sub.Hollow = v; persist() end)
+        end)
+        guard("colour " .. label, function()
+            return UILib.makeColorPicker(page, "Colour", sub, "", persist)
+        end)
+        local nk = ctx.nameField and ctx.nameField:format(t.key)
+        if nk and cfg[nk] ~= nil then
+            guard("names " .. label, function()
+                return UILib.makeToggle(page, "Show names",
+                    function() return cfg[nk] end,
+                    function(v) cfg[nk] = v; persist() end)
+            end)
+        end
+    end
+
+    local shared = win.tab(#ctx.types + 1)
+    if ctx.distance then
+        section(shared, "Range")
+        guard("distance", function()
+            return UILib.makeSlider(shared, "Max distance",
+                function() return cfg[ctx.distance] end,
+                function(v) cfg[ctx.distance] = v; persist() end,
+                50, ctx.distanceMin or 100, ctx.distanceMax or 10000,
+                function(v) return tostring(math.floor(v)) end)
+        end)
+    end
+    if ctx.labelSize then
+        section(shared, "Labels")
+        guard("label size", function()
+            return UILib.makeSlider(shared, "Label size",
+                function() return cfg[ctx.labelSize] end,
+                function(v) cfg[ctx.labelSize] = v; persist() end,
+                1, ctx.labelSizeMin or 8, ctx.labelSizeMax or 24,
+                function(v) return tostring(math.floor(v)) end)
+        end)
+    end
+    note(shared, "Object ESP is drawn by the game script - changes apply live.")
+
+    OPEN.objects = {
+        screenGui = ctx.screenGui,
+        cfg = ctx.cfg,
+        window = win,
+        refresh = refresh,
+    }
+    return true
+end
+
 print(("[esp] %s loaded (one-file library: engine + customizer, opacity: 1 = fully visible)"):format(ESP.VERSION))
 
 return ESP

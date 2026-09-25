@@ -449,9 +449,11 @@ do
     end
 
     Config.Weapon.InstantHitVelocity = math.max(Config.Weapon.InstantHitVelocity or IH_DEFAULT_VELOCITY, IH_DEFAULT_VELOCITY)
-    Config.Player.MaxDistance = math.max(Config.Player.MaxDistance or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
-    Config.NPC.MaxDistance    = math.max(Config.NPC.MaxDistance    or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
-    Config.Drops.MaxDistance  = math.max(Config.Drops.MaxDistance  or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
+    -- Max distance is set from the ESP customizer (slider range 100-10000);
+    -- keep whatever is saved and only repair broken values.
+    Config.Player.MaxDistance = math.clamp(tonumber(Config.Player.MaxDistance) or 4500, 100, 10000)
+    Config.NPC.MaxDistance    = math.clamp(tonumber(Config.NPC.MaxDistance)    or 4500, 100, 10000)
+    Config.Drops.MaxDistance  = math.clamp(tonumber(Config.Drops.MaxDistance)  or 4500, 100, 10000)
     Config.Aimbot.MaxDistance = math.max(Config.Aimbot.MaxDistance or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
 
     -- The library's clamps repair enum fields and cap MaxDistance at 10000
@@ -5159,13 +5161,12 @@ do
 
         ammoInfoLabel = addInfo("Aimbot", "Ballistics", "—")
 
-        -- ESP appearance (box, labels, chams) is configured in the hub-wide
-        -- ESP customizer (esp.luau) - the same windows the other games use.
+        -- ESP appearance (box, labels, chams, range) is configured in the
+        -- hub-wide ESP customizer (esp.luau) - the same windows the other
+        -- games use. The menu keeps only the quick enable toggle.
         local function buildESPSection(cat, sub, cfg, keybindId)
-            addSection(cat, sub, "Range")
+            addSection(cat, sub, "General")
             addToggle(cat, sub, "Enabled", function() return cfg.Enabled end, function(v) cfg.Enabled = v end, keybindId)
-            addValue (cat, sub, "Max distance", function() return cfg.MaxDistance end,
-                function(v) cfg.MaxDistance = v end, 100, 100, 4500, function(v) return tostring(math.floor(v)) end)
             addSection(cat, sub, "Appearance")
             addButton(cat, sub, "Open ESP customizer", function()
                 if ESPUI then
@@ -5174,7 +5175,7 @@ do
                     notify("esp.luau not loaded - customizer unavailable")
                 end
             end)
-            addInfo(cat, sub, "Box, labels and chams for this list are set in the customizer.")
+            addInfo(cat, sub, "Box, labels, chams and range for this list are set in the customizer.")
         end
 
         buildESPSection("ESP", "Player", Config.Player, "PlayerESP")
@@ -5184,23 +5185,31 @@ do
         addToggle("ESP", "NPC", "Landmine ESP", function() return Config.NPC.ShowLandmines end,
             function(v) Config.NPC.ShowLandmines = v end)
 
-        addSection("ESP", "Drops", "Items")
-        addToggle("ESP", "Drops", "Items",       function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
-        addToggle("ESP", "Drops", "Item hollow", function() return Config.Drops.Item.Hollow end, function(v) Config.Drops.Item.Hollow = v end)
-        addColor ("ESP", "Drops", "Item colour",  Config.Drops.Item, "")
-        addToggle("ESP", "Drops", "Item names",  function() return Config.Drops.ShowItemNames end, function(v) Config.Drops.ShowItemNames = v end)
-
-        addSection("ESP", "Drops", "Corpses")
-        addToggle("ESP", "Drops", "Corpses",       function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
-        addToggle("ESP", "Drops", "Corpse hollow", function() return Config.Drops.Corpse.Hollow end, function(v) Config.Drops.Corpse.Hollow = v end)
-        addColor ("ESP", "Drops", "Corpse colour",  Config.Drops.Corpse, "")
-        addToggle("ESP", "Drops", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
-
-        addSection("ESP", "Drops", "Display")
-        addValue ("ESP", "Drops", "Max distance", function() return Config.Drops.MaxDistance end,
-            function(v) Config.Drops.MaxDistance = v end, 100, 100, 4500, function(v) return tostring(math.floor(v)) end)
-        addValue ("ESP", "Drops", "Label size", function() return Config.Drops.LabelSize end,
-            function(v) Config.Drops.LabelSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
+        addSection("ESP", "Drops", "Objects")
+        addToggle("ESP", "Drops", "Items",   function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
+        addToggle("ESP", "Drops", "Corpses", function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
+        addButton("ESP", "Drops", "Open objects customizer", function()
+            if ESPUI and ESPUI.openObjects then
+                ESPUI.openObjects{
+                    cfg = Config.Drops,
+                    title = "OBJECT ESP",
+                    types = {
+                        { key = "Item",   label = "Items" },
+                        { key = "Corpse", label = "Corpses" },
+                    },
+                    nameField = "Show%sNames",
+                    distance = "MaxDistance",
+                    labelSize = "LabelSize",
+                    uilib = UILib,
+                    screenGui = gui,
+                    save = saveConfig,
+                    notify = notify,
+                }
+            else
+                notify("esp.luau not loaded - customizer unavailable")
+            end
+        end)
+        addInfo("ESP", "Drops", "Hollow, colours, names, range and label size are in the customizer.")
 
         addSection("ESP", "Radar", "Radar")
         addToggle("ESP", "Radar", "Enabled", function() return Config.Misc.Radar end,
