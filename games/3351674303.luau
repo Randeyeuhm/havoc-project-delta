@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v54"
+local SCRIPT_VERSION = "de-v55"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2264,7 +2264,7 @@ local function buildMenu()
         name = "Main",
         title = "HAVOC HUB  ·  DRIVING EMPIRE",
         subtitle = ("PlaceId %d  ·  %s"):format(game.PlaceId, SCRIPT_VERSION),
-        tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc", "Race" },
+        tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc" },
         controls = guiControls,
         footerHint = "RightShift — show / hide this menu",
         onClose = function()
@@ -2272,7 +2272,7 @@ local function buildMenu()
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5) }
 
     local builtCount = 0
     local function guard(what, fn)
@@ -2346,6 +2346,24 @@ local function buildMenu()
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
     note(p1, "Resets when you switch cars - keep 1.0 for races you care about.")
+
+    section(p1, "Race assist")
+    button(p1, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
+    slider(p1, "Hop delay (s)",
+        function() return Config.Race.HopDelay end,
+        function(v) Config.Race.HopDelay = v end, 0.05, 0.5, 1.5)
+    slider(p1, "Sweep distance",
+        function() return Config.Race.SweepDist end,
+        function(v) Config.Race.SweepDist = v end, 1, 6, 60)
+    slider(p1, "Payout buffer (s)",
+        function() return Config.Race.PayoutBuffer end,
+        function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
+    slider(p1, "Car time pad",
+        function() return Config.Race.CarLimitPad end,
+        function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
+    button(p1, "Print payout table (console)", function() printPayoutTable() end)
+    note(p1, "Sweep = gate placement; buffer = extra finish delay.")
+    note(p1, "Wait for GO. No payout? Raise Car time pad.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -2496,31 +2514,6 @@ local function buildMenu()
         lockNote = "RightShift is the menu key and stays bound",
     })
     note(p6, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
-
-    -- ---------------- Race ----------------
-    local p7 = pages[6]
-    section(p7, "Race assist")
-    button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
-    section(p7, "Payout info")
-    button(p7, "Print payout table (console)", function() printPayoutTable() end)
-    note(p7, "No payout? Stay on the server until the race fully ends - the cash watcher reports for 5 minutes.")
-    section(p7, "Timing")
-    slider(p7, "Hop delay (s)",
-        function() return Config.Race.HopDelay end,
-        function(v) Config.Race.HopDelay = v end, 0.05, 0.5, 1.5)
-    slider(p7, "Sweep distance",
-        function() return Config.Race.SweepDist end,
-        function(v) Config.Race.SweepDist = v end, 1, 6, 60)
-    slider(p7, "Payout buffer (s)",
-        function() return Config.Race.PayoutBuffer end,
-        function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
-    slider(p7, "Car time pad",
-        function() return Config.Race.CarLimitPad end,
-        function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
-    note(p7, "Sweep = placement around each gate; buffer adds to the finish floor.")
-    note(p7, "Server checks your finish time vs what your car can do - Car time pad is the safety margin (raise if a run doesn't pay). No 'RaceFinished' line for you = rejected run.")
-    note(p7, "Rejected gates are redone; re-pressing resumes mid-race. Wait for GO - races are monitored.")
-    note(p7, "Tip: 'Remove tires' on the Vehicle tab stops wheel flail during jumps.")
 
     win.setTab(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
