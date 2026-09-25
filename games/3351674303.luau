@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v32"
+local SCRIPT_VERSION = "de-v33"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
-    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1 },
+    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25 },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -190,6 +190,7 @@ Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
 Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0, 60)
+Config.Race.CarLimitPad = math.clamp(tonumber(Config.Race.CarLimitPad) or 1.25, 1, 3)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1347,6 +1348,35 @@ local function fmtSecs(v)
     return tostring(math.round(v * 10) / 10)
 end
 
+-- The server also sanity-checks finish times against the car: your finish
+-- can't be faster than the track physically allows at that car's top speed.
+-- Compute that floor from the track's checkpoint distances + the car's tune
+-- (plus a safety pad) so the assist never crosses before it looks possible.
+local function carAwareMinTime(chassis, trackModel, laps)
+    if not RaceUtil or type(RaceUtil.getTrackModelData) ~= "function" then return nil end
+    local ok, data = pcall(RaceUtil.getTrackModelData, trackModel)
+    if not ok or type(data) ~= "table" or type(data.Distances) ~= "table" then return nil end
+    local d = data.Distances
+    local spawns = data.Spawnpoints or {}
+    local cps = data.Checkpoints or {}
+    local length = (d.SpawnToFirst and d.SpawnToFirst[#spawns] or 0)
+        + math.clamp(laps or 1, 1, 20) * (d.Lap or 0)
+        - ((d.ToNextCheckpoint and d.ToNextCheckpoint[#cps]) or 0)
+        + (d.LastToFinish or 0)
+    if length <= 0 then return nil end
+    local topMPH = 180
+    if chassis and chassis.Tune and type(chassis.Tune.TransmissionSpeeds) == "table" then
+        local t = chassis.Tune.TransmissionSpeeds
+        local v = tonumber(t[#t])
+        if v and v > 0 then topMPH = v end
+    end
+    local topStuds = math.clamp(topMPH * 1.6, 100, 900)  -- mph-ish -> studs/s-ish
+    local pad = Config.Race.CarLimitPad or 1.25
+    local floorTime = (length / topStuds) * pad
+    print(("[driving-empire] car limit: track %.0f studs, car top %.0f mph, floor %.1fs (pad %.2f)"):format(length, topMPH, floorTime, pad))
+    return floorTime
+end
+
 -- The finish result the server receives includes the car's recorded top
 -- speed (VehicleStatTracker). Teleport runs never actually move fast, so
 -- that reading stays near zero - which can look impossible for the finish
@@ -1415,7 +1445,7 @@ local function waitForPayout(minTime, startClock)
     if elapsed >= target then return end
     local waitFor = math.min(target - elapsed, 600)
     if waitFor > 0.5 then
-        notify(("Race assist: holding %.1fs before the finish - track minimum %ss + %ss buffer"):format(waitFor, fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1)))
+        notify(("Race assist: holding %.1fs before the finish - finish gate %ss + %ss buffer"):format(waitFor, fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1)))
     end
     -- wait precisely: half-second chunks until close, then tenths, so the
     -- finish crossing lands right after the minimum
@@ -1533,8 +1563,13 @@ local function runRaceRoutine()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
+        local carMin = carAwareMinTime(chassis, trackModel, laps)
         local minTxt = ""
-        if minTime then
+        if carMin then
+            local hold = math.max(minTime or 0, carMin)
+            minTxt = (" - car limit ~%ss (crossing ~%ss)"):format(fmtSecs(carMin), fmtSecs(hold + (Config.Race.PayoutBuffer or 1)))
+            minTime = hold
+        elseif minTime then
             minTxt = (" - track minimum %ss (buffer +%ss)"):format(fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1))
         end
         if trackName and RaceUtil then
@@ -2056,18 +2091,22 @@ local function buildMenu()
     slider(p7, "Payout buffer (s)",
         function() return Config.Race.PayoutBuffer end,
         function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
+    slider(p7, "Car time pad",
+        function() return Config.Race.CarLimitPad end,
+        function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
     note(p7, "Hop delay: pause between checkpoints (0.5-1.5s). Sweep " ..
         "distance: how far before/after each gate the car is placed. " ..
         "Payout buffer: extra wait ADDED ON TOP of the track's minimum " ..
         "finish time (the toast reads that minimum from the game's own " ..
         "config - this slider never changes it). Server wait is locked at " ..
         "0.5s. Defaults: 0.5 / 12 / 1.")
-    note(p7, "Minimum finish time comes from the game's LIVE config - right " ..
-        "now it is ~1s on nearly every track (LightningLoop 30s), so paying " ..
-        "finishes are effectively unrestricted by time. The 59-150s values " ..
-        "in older game files are stale fallbacks - the toast always shows " ..
-        "the live one. Cash pays by finishing place x extra-racer bonus x " ..
-        "event multipliers - not by your car.")
+    note(p7, "Minimum finish time comes from the game's LIVE config (~1s " ..
+        "right now) - but the server ALSO checks your finish time against " ..
+        "what your car could do on the track (track length / car top speed). " ..
+        "The assist computes that floor and holds at the last checkpoint " ..
+        "until it passes; Car time pad is the safety multiplier (default " ..
+        "1.25 - raise it if a fast finish still doesn't pay). Cash pays by " ..
+        "finishing place x extra-racer bonus x event multipliers.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
