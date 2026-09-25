@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v50"
+local SCRIPT_VERSION = "de-v51"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2106,6 +2106,44 @@ local function installDeliveryProbe()
 end
 
 installDeliveryProbe()
+
+-- FREEZE: while the delivery farm is on, pin the car in place - the whole
+-- job runs on teleports, and a rolling or pushed car can slide out of the
+-- pickup circle (item collection pauses) or off the drop-off mid-handover.
+-- Velocities are zeroed just before and just after each physics step (the
+-- same state the game's own parked cars sit in); nothing is anchored, so
+-- the game's sim and our teleports stay untouched.
+local freezeCache = { model = nil, parts = {} }
+local function installDeliveryFreeze()
+    if vehicleHooks.deliveryFreezeConn then return end
+    local function hold()
+        if Config.Delivery.Enabled ~= true then return end
+        if raceBusy then return end  -- the race assist owns the car
+        local vObj = getDrivenVehicle()
+        local model = vObj and vObj.Object
+        if not model then return end
+        if freezeCache.model ~= model then
+            freezeCache.model = model
+            freezeCache.parts = {}
+            for _, d in ipairs(model:GetDescendants()) do
+                if d:IsA("BasePart") then
+                    table.insert(freezeCache.parts, d)
+                end
+            end
+        end
+        for _, p in ipairs(freezeCache.parts) do
+            if p.Parent then
+                p.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                p.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end
+    vehicleHooks.deliveryFreezeConn = RunService.Stepped:Connect(hold)
+    vehicleHooks.deliveryFreezeConn2 = RunService.Heartbeat:Connect(hold)
+    print("[driving-empire] delivery freeze: car is held in place while the farm is on")
+end
+
+installDeliveryFreeze()
 task.spawn(function()
     while true do
         task.wait(1)
@@ -2322,7 +2360,7 @@ local function buildMenu()
             notify("Teleport failed")
         end
     end)
-    note(p5, "Teleports to each pickup/dropoff like the race assist - stay in a car. Hard pays more; outlaws can steal.")
+    note(p5, "Teleports to each pickup/dropoff and freezes your car while on. Hard pays more; outlaws can steal.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
