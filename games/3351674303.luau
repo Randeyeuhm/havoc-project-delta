@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v24"
+local SCRIPT_VERSION = "de-v25"
 
 local Connections = {}
 local function track(conn)
@@ -1455,15 +1455,20 @@ local function runRaceRoutine()
                 if okG and isG == true then gmmOpts = { IsGlobalMultiplayer = true } end
             end
             local payMode = gmmOpts and "GlobalMultiplayer" or "Exhibition"
-            local okPay, cash, bonus = pcall(function()
+            -- the game's own calculator: solo number + what it pays with a
+            -- typical 5-car lobby (racer bonus included, player benefits too)
+            local okPay, cash1, cash5 = pcall(function()
+                if type(RaceUtil.calculatePayout) == "function" then
+                    return RaceUtil.calculatePayout(payMode, trackName, 1, 1, LocalPlayer, nil, gmmOpts),
+                        RaceUtil.calculatePayout(payMode, trackName, 1, 5, LocalPlayer, nil, gmmOpts)
+                end
                 local c = RaceUtil.calculateBaselinePayout and RaceUtil.calculateBaselinePayout(payMode, trackName, 1, gmmOpts) or nil
-                local b = RaceUtil.calculatePayoutBonusPercent and RaceUtil.calculatePayoutBonusPercent(payMode, trackName, 2, gmmOpts) or nil
-                return c, b
+                return c, nil
             end)
-            if okPay and type(cash) == "number" and cash > 0 then
-                minTxt = minTxt .. (", 1st place ~%s"):format(formatCash(cash))
-                if type(bonus) == "number" and bonus > 0 then
-                    minTxt = minTxt .. (", +%s%% per extra racer"):format(tostring(math.round(bonus * 10) / 10))
+            if okPay and type(cash1) == "number" and cash1 > 0 then
+                minTxt = minTxt .. (", 1st ~%s"):format(formatCash(cash1))
+                if type(cash5) == "number" and cash5 > cash1 then
+                    minTxt = minTxt .. (" (5 racers: ~%s)"):format(formatCash(cash5))
                 end
             end
         end
