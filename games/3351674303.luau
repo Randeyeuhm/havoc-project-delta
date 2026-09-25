@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v28"
+local SCRIPT_VERSION = "de-v29"
 
 local Connections = {}
 local function track(conn)
@@ -1332,7 +1332,7 @@ local function waitForPayout(minTime, startClock)
     if elapsed >= target then return end
     local waitFor = math.min(target - elapsed, 600)
     if waitFor > 0.5 then
-        notify(("Race assist: holding %.1fs before the finish - this race pays out after %ss"):format(waitFor, fmtSecs(minTime)))
+        notify(("Race assist: holding %.1fs before the finish - track minimum %ss + %ss buffer"):format(waitFor, fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1)))
     end
     -- wait precisely: half-second chunks until close, then tenths, so the
     -- finish crossing lands right after the minimum
@@ -1450,7 +1450,10 @@ local function runRaceRoutine()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
-        local minTxt = minTime and (" - payout after %ss"):format(fmtSecs(minTime)) or ""
+        local minTxt = ""
+        if minTime then
+            minTxt = (" - track minimum %ss (buffer +%ss)"):format(fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1))
+        end
         if trackName and RaceUtil then
             -- show the game's own payout numbers: fixed cash per finishing
             -- place, plus a bonus for every extra racer (never car-based).
@@ -1963,10 +1966,10 @@ local function buildMenu()
         function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
     note(p7, "Hop delay: pause between checkpoints (0.5-1.5s). Sweep " ..
         "distance: how far before/after each gate the car is placed. " ..
-        "Payout buffer: extra wait at the finish so it lands just after the " ..
-        "track's live minimum time (default 1s - the crossing happens about " ..
-        "a second after the minimum). Server wait is locked at 0.5s - that " ..
-        "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 1.")
+        "Payout buffer: extra wait ADDED ON TOP of the track's minimum " ..
+        "finish time (the toast reads that minimum from the game's own " ..
+        "config - this slider never changes it). Server wait is locked at " ..
+        "0.5s. Defaults: 0.5 / 12 / 1.")
     note(p7, "Old fallback minimum finish times baked into the game files " ..
         "(the LIVE minimum is usually much lower - the toast shows the real " ..
         "one): Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
