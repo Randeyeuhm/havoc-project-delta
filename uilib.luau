@@ -1602,6 +1602,132 @@ local function makeToaster(parentGui)
 end
 
 -- ============================================================
+-- BANNERS  (full-width top strip for persistent status messages -
+-- UILib.makeBanner(parent, opts) returns { frame, set, show, hide,
+-- isVisible, destroy }; set(text) shows it, hide() hides it)
+-- ============================================================
+local function makeBanner(parent, opts)
+    opts = opts or {}
+
+    local frame = create("Frame", {
+        Name = opts.name or "Banner",
+        Size = UDim2.new(1, 0, 0, opts.height or 44),
+        Position = UDim2.fromOffset(0, 0),
+        BackgroundColor3 = opts.color or Color3.fromRGB(180, 20, 30),
+        BorderSizePixel = 0,
+        Visible = false,
+        ZIndex = opts.zindex or 50,
+        Parent = parent,
+    })
+
+    create("Frame", {
+        Name = "Stripe",
+        Size = UDim2.new(1, 0, 0, 2),
+        Position = UDim2.new(0, 0, 1, -2),
+        BackgroundColor3 = opts.stripeColor or Color3.fromRGB(255, 60, 70),
+        BorderSizePixel = 0,
+        ZIndex = 1,
+        Parent = frame,
+    })
+
+    local label = create("TextLabel", {
+        Size = UDim2.new(1, -40, 1, 0),
+        Position = UDim2.fromOffset(20, 0),
+        BackgroundTransparency = 1,
+        TextColor3 = opts.textColor or Color3.fromRGB(255, 255, 255),
+        TextStrokeTransparency = 0.4,
+        TextStrokeColor3 = Color3.fromRGB(0, 0, 0),
+        TextSize = opts.textSize or 16,
+        Font = opts.font or FONTS.BOLD,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Text = "",
+        ZIndex = 2,
+        Parent = frame,
+    })
+
+    local B = { frame = frame }
+    B.set = function(text)
+        label.Text = tostring(text)
+        frame.Visible = true
+    end
+    B.show = function() frame.Visible = true end
+    B.hide = function() frame.Visible = false end
+    B.isVisible = function() return frame.Visible end
+    B.destroy = function() frame:Destroy() end
+    return B
+end
+
+-- ============================================================
+-- HITMARKER  (four diagonal ticks around the crosshair; the host calls
+-- UILib.makeHitmarker(parent) once and fires handle.hit(headshot) on
+-- registered hits - red ticks for headshots, fast fade after each hit)
+-- ============================================================
+local function makeHitmarker(parent)
+    local state = { frame = nil, ticks = {}, token = 0 }
+
+    local function ensure()
+        if state.frame and state.frame.Parent then return end
+        local frame = create("Frame", {
+            Name = "HitmarkerFrame",
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 0, 0.5, 0),
+            Size = UDim2.new(0, 36, 0, 36),
+            BackgroundTransparency = 1,
+            ZIndex = 60,
+            Parent = parent,
+        })
+        state.ticks = {}
+        for i = 1, 4 do
+            local tick_ = create("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Size = UDim2.new(0, 11, 0, 2),
+                BorderSizePixel = 0,
+                BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+                BackgroundTransparency = 1,
+                Position = UDim2.new(0.5, (i == 1 or i == 3) and -8 or 8, 0.5, (i <= 2) and -8 or 8),
+                Rotation = (i == 1 or i == 4) and 45 or -45,
+                ZIndex = 61,
+                Parent = frame,
+            })
+            corner(tick_, 1)
+            table.insert(state.ticks, tick_)
+        end
+        state.frame = frame
+    end
+
+    local function hit(headshot)
+        local ok = pcall(ensure)
+        if not ok or not state.frame then return end
+        local col = headshot and Color3.fromRGB(255, 90, 90) or Color3.fromRGB(255, 255, 255)
+        for _, t in ipairs(state.ticks) do
+            t.BackgroundColor3 = col
+            t.BackgroundTransparency = 0
+        end
+        state.token = state.token + 1
+        local token = state.token
+        task.spawn(function()
+            for i = 1, 12 do
+                if state.token ~= token then return end
+                local a = i / 12
+                for _, t in ipairs(state.ticks) do
+                    t.BackgroundTransparency = a
+                end
+                task.wait(0.02)
+            end
+        end)
+    end
+
+    return {
+        hit = hit,
+        destroy = function()
+            if state.frame then pcall(function() state.frame:Destroy() end) end
+            state.frame = nil
+            state.ticks = {}
+        end,
+    }
+end
+
+-- ============================================================
 -- WINDOW  (the one standard scaffold for every panel: draggable frame,
 -- header + accent rule, optional tab rail with scrolling pages, close
 -- button, and a popup layer that dropdown lists are parented to, so an
@@ -2091,6 +2217,8 @@ UILib.makeDropdown      = makeDropdown
 UILib.makeButton        = makeButton
 UILib.makeInput         = makeInput
 UILib.makeWindow        = makeWindow
+UILib.makeBanner        = makeBanner
+UILib.makeHitmarker     = makeHitmarker
 UILib.makeToaster       = makeToaster
 UILib.restoreIdentity   = restoreIdentity
 

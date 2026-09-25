@@ -608,12 +608,14 @@ end
 -- HITMARKER
 -- Four diagonal ticks around the crosshair when our shots
 -- register a hit on a live target. Red for head hits.
+-- (The overlay UI lives in uilib: UILib.makeHitmarker)
 -- ============================================================
 do
-    local hm = { gui = nil, frame = nil, ticks = {}, token = 0 }
+    local hm = nil
+    local hmGui = nil
 
     local function ensureHitmarker()
-        if hm.gui and hm.gui.Parent then return end
+        if hm and hmGui and hmGui.Parent then return end
 
         local gui = Instance.new("ScreenGui")
         gui.Name = "HavocHitmarker"
@@ -624,63 +626,24 @@ do
         local ok = pcall(function() gui.Parent = CoreGui end)
         if not ok then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        local frame = Instance.new("Frame")
-        frame.AnchorPoint = Vector2.new(0.5, 0.5)
-        frame.Position = UDim2.new(0.5, 0, 0.5, 0)
-        frame.Size = UDim2.new(0, 36, 0, 36)
-        frame.BackgroundTransparency = 1
-        frame.Parent = gui
-
-        for i = 1, 4 do
-            local tick_ = Instance.new("Frame")
-            tick_.AnchorPoint = Vector2.new(0.5, 0.5)
-            tick_.Size = UDim2.new(0, 11, 0, 2)
-            tick_.BorderSizePixel = 0
-            tick_.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-            tick_.BackgroundTransparency = 1
-            local dx = (i == 1 or i == 3) and -8 or 8
-            local dy = (i <= 2) and -8 or 8
-            tick_.Position = UDim2.new(0.5, dx, 0.5, dy)
-            tick_.Rotation = (i == 1 or i == 4) and 45 or -45
-            tick_.Parent = frame
-            corner(tick_, 1)
-            hm.ticks[i] = tick_
-        end
-
-        hm.gui = gui
-        hm.frame = frame
+        hmGui = gui
+        hm = UILib and UILib.makeHitmarker and UILib.makeHitmarker(gui) or nil
     end
 
     function showHitmarker(headshot)
         if not Config.Misc.Hitmarker then return end
-        if not hm.gui or not hm.gui.Parent then
+        if not hm or not hmGui or not hmGui.Parent then
             local ok = pcall(ensureHitmarker)
-            if not ok or not hm.gui then return end
+            if not ok or not hm then return end
         end
-
-        local col = headshot and Color3.fromRGB(255, 90, 90) or Color3.fromRGB(255, 255, 255)
-        for _, t in ipairs(hm.ticks) do
-            t.BackgroundColor3 = col
-            t.BackgroundTransparency = 0
-        end
-
-        hm.token = hm.token + 1
-        local token = hm.token
-        task.spawn(function()
-            for i = 1, 12 do
-                if hm.token ~= token then return end
-                local a = i / 12
-                for _, t in ipairs(hm.ticks) do
-                    t.BackgroundTransparency = a
-                end
-                task.wait(0.02)
-            end
-        end)
+        hm.hit(headshot)
     end
 
     state.destroyHitmarker = function()
-        if hm.gui then pcall(function() hm.gui:Destroy() end) end
-        hm.gui = nil
+        if hm then pcall(hm.destroy) end
+        if hmGui then pcall(function() hmGui:Destroy() end) end
+        hm = nil
+        hmGui = nil
     end
 end
 
@@ -1389,12 +1352,11 @@ state.isModerator = isModerator
 -- ============================================================
 do
     local bannerGui = nil
-    local bannerFrame = nil
-    local bannerText = nil
+    local banner = nil
     local bannerVisible = false
 
     local function ensureBanner()
-        if bannerGui and bannerGui.Parent then return end
+        if banner and bannerGui and bannerGui.Parent then return end
 
         bannerGui = Instance.new("ScreenGui")
         bannerGui.Name = "HavocModBanner"
@@ -1405,52 +1367,24 @@ do
         local ok = pcall(function() bannerGui.Parent = CoreGui end)
         if not ok then bannerGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        local frame = Instance.new("Frame")
-        frame.Name = "Banner"
-        frame.Size = UDim2.new(1, 0, 0, 44)
-        frame.Position = UDim2.new(0, 0, 0, 0)
-        frame.BackgroundColor3 = Color3.fromRGB(180, 20, 30)
-        frame.BorderSizePixel = 0
-        frame.Visible = false
-        frame.Parent = bannerGui
-        bannerFrame = frame
-
-        local stripe = Instance.new("Frame")
-        stripe.Size = UDim2.new(1, 0, 0, 2)
-        stripe.Position = UDim2.new(0, 0, 1, -2)
-        stripe.BackgroundColor3 = Color3.fromRGB(255, 60, 70)
-        stripe.BorderSizePixel = 0
-        stripe.Parent = frame
-
-        local text = Instance.new("TextLabel")
-        text.Size = UDim2.new(1, -40, 1, 0)
-        text.Position = UDim2.new(0, 20, 0, 0)
-        text.BackgroundTransparency = 1
-        text.TextColor3 = Color3.fromRGB(255, 255, 255)
-        text.TextStrokeTransparency = 0.4
-        text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-        text.TextSize = 16
-        text.Font = Enum.Font.GothamBold
-        text.TextXAlignment = Enum.TextXAlignment.Center
-        text.Text = ""
-        text.Parent = frame
-        bannerText = text
+        banner = UILib and UILib.makeBanner and UILib.makeBanner(bannerGui) or nil
     end
 
     local function updateBanner()
         if not Config.Players.ModEnabled or not Config.Players.ModBanner then
-            if bannerVisible and bannerFrame then bannerFrame.Visible = false end
+            if bannerVisible and banner then banner.hide() end
             bannerVisible = false
             return
         end
         local count = state.modCount or 0
         if count == 0 then
-            if bannerVisible and bannerFrame then bannerFrame.Visible = false end
+            if bannerVisible and banner then banner.hide() end
             bannerVisible = false
             return
         end
 
         ensureBanner()
+        if not banner then return end
         local names = {}
         for uid, p in pairs(state.modPlayers) do
             local role = state.modSet[uid] or "?"
@@ -1458,14 +1392,13 @@ do
         end
         table.sort(names)
 
-        bannerText.Text = string.format(
-            -- Plain ASCII: U+26A0 has no coverage in the game fonts either, so
-            -- this would have shown as a box the first time a mod joined.
+        -- Plain ASCII: U+26A0 has no coverage in the game fonts either, so
+        -- this would have shown as a box the first time a mod joined.
+        banner.set(string.format(
             "!!  MODERATOR IN SERVER  !!   %s",
             table.concat(names, "  ·  ")
-        )
+        ))
         if not bannerVisible then
-            bannerFrame.Visible = true
             bannerVisible = true
             if notify then notify("Moderator detected in server") end
         end
@@ -1483,6 +1416,7 @@ do
     state.destroyModBanner = function()
         if bannerGui then pcall(function() bannerGui:Destroy() end) end
         bannerGui = nil
+        banner = nil
     end
 end
 
