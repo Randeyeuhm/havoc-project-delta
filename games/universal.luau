@@ -607,6 +607,8 @@ local function buildMenu()
         size = UDim2.new(0, 540, 0, 360),
         position = UDim2.new(0, 30, 0, 40),
         tabs = { "Aimbot", "ESP", "Movement", "Misc" },
+        controls = guiControls,
+        footerHint = "RightShift — show / hide this menu",
         -- The X hides the whole GUI (RightShift brings it back); the
         -- window itself stays visible inside it.
         onClose = function()

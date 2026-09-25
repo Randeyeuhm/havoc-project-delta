@@ -67,7 +67,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w6-callback-identity"
+UILib.VERSION = "w7-delta-shell"
 
 -- ============================================================
 -- UI THEME
@@ -1606,23 +1606,37 @@ end
 
 -- makeWindow{ parent, title, subtitle?, size?, position?, zindex?,
 --             name?, closable? (default true), draggable? (default true),
---             tabs? (list of names), onClose? }
--- Without `tabs` no pages are created (use the frame directly for
--- single-purpose windows like the ESP preview). Returns a handle:
+--             tabs? (list of names), onClose?,
+--             controls? (widget handle list - adds the search bar),
+--             footerHint? (string - adds the footer with this hint) }
+-- The Project Delta shell: dot + title header with a drawn-X close button,
+-- optional search bar (filters the `controls` list live), a left category
+-- rail for the tabs, scrolling content, and an optional footer with the
+-- hint + live status. Without `tabs` no rail/pages are created (use the
+-- frame directly for single-purpose windows like the ESP preview).
+-- Returns a handle:
 --   w.frame      - the window frame
 --   w.header     - the title bar
 --   w.popupLayer - pass as makeDropdown's overlayParent
---   w.tab(index or name) -> ScrollingFrame page
+--   w.tab(index or name) -> Frame page
 --   w.setTab(i)  - switch the active page
+--   w.setControls(list) - hand the search bar a control list later
 --   w.show() / w.hide() / w.toggle() / w.isVisible()
 --   w.destroy()
 local function makeWindow(opts)
     opts = opts or {}
     local W = {}
 
+    local function autoSize()
+        local vp = Vector2.new(1920, 1080)
+        local ok, cam = pcall(function() return workspace.CurrentCamera end)
+        if ok and cam then vp = cam.ViewportSize end
+        return UDim2.new(0, math.clamp(vp.X - 60, 420, 560), 0, math.clamp(vp.Y - 80, 380, 720))
+    end
+
     local frame = create("Frame", {
         Name = opts.name or "UILibWindow",
-        Size = opts.size or UDim2.new(0, 540, 0, 400),
+        Size = opts.size or autoSize(),
         Position = opts.position or UDim2.new(0, 30, 0, 40),
         BackgroundColor3 = THEME.BG,
         BorderSizePixel = 0,
@@ -1634,7 +1648,7 @@ local function makeWindow(opts)
     corner(frame, 10); stroke(frame, THEME.STROKE)
 
     -- Header: rounded top (a square lower strip covers the bottom corners),
-    -- accent rule underneath.
+    -- accent dot + title, accent rule underneath.
     local header = create("Frame", {
         Size = UDim2.new(1, 0, 0, 36),
         BackgroundColor3 = THEME.HEADER,
@@ -1657,9 +1671,17 @@ local function makeWindow(opts)
         ZIndex = 2,
         Parent = frame,
     })
+    local dot = create("Frame", {
+        Size = UDim2.fromOffset(8, 8),
+        Position = UDim2.new(0, 14, 0.5, -4),
+        BackgroundColor3 = THEME.ACCENT,
+        BorderSizePixel = 0,
+        Parent = header,
+    })
+    corner(dot, 4)
     textLabel({
-        Size = UDim2.new(1, -60, 1, 0),
-        Position = UDim2.fromOffset(14, 0),
+        Size = UDim2.new(1, -220, 1, 0),
+        Position = UDim2.fromOffset(30, 0),
         Text = opts.title or "",
         TextColor3 = THEME.TEXT,
         TextSize = 13,
@@ -1670,7 +1692,7 @@ local function makeWindow(opts)
     if opts.subtitle then
         textLabel({
             Size = UDim2.fromOffset(160, 12),
-            Position = UDim2.new(1, -208, 0.5, -6),
+            Position = UDim2.new(1, -198, 0.5, -6),
             Text = tostring(opts.subtitle),
             TextColor3 = THEME.TEXT_DIM,
             TextSize = 10,
@@ -1691,6 +1713,19 @@ local function makeWindow(opts)
             Parent = header,
         })
         corner(closeBtn, 6)
+        -- X drawn from two frames: the Gotham "×" glyph renders off-centre.
+        for i = 1, 2 do
+            local arm = create("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, 0, 0.5, 0),
+                Size = UDim2.fromOffset(12, 2),
+                BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+                BorderSizePixel = 0,
+                Rotation = (i == 1) and 45 or -45,
+                Parent = closeBtn,
+            })
+            corner(arm, 1)
+        end
         closeBtn.MouseEnter:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED_HI }) end)
         closeBtn.MouseLeave:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = THEME.RED }) end)
         closeBtn.MouseButton1Click:Connect(function()
@@ -1704,90 +1739,298 @@ local function makeWindow(opts)
         end)
     end
 
-    -- Tabs: rail buttons + one scrolling page each.
     local names = opts.tabs
-    local pages, tabButtons = {}, {}
+    local controls = type(opts.controls) == "table" and opts.controls or nil
+    local hasSearch = controls ~= nil
+    local hasFooter = opts.footerHint ~= nil
+    local topPad = hasSearch and 82 or 48
+    local bottomPad = hasFooter and 50 or 12
+    local footerStatus = nil
+    local searchResults, noResults, searchBox
+
+    -- Search bar (only when a controls list was given).
+    if hasSearch then
+        local searchFrame = create("Frame", {
+            Size = UDim2.new(1, -24, 0, 30),
+            Position = UDim2.new(0, 12, 0, 44),
+            BackgroundColor3 = THEME.PANEL,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        corner(searchFrame, 6); stroke(searchFrame, THEME.STROKE)
+        local lens = create("Frame", {
+            Size = UDim2.fromOffset(10, 10),
+            Position = UDim2.fromOffset(14, 10),
+            BackgroundTransparency = 1,
+            Parent = searchFrame,
+        })
+        corner(lens, 5)
+        local lensRing = stroke(lens, THEME.TEXT_DIM)
+        lensRing.Thickness = 1.5
+        local lensHandle = create("Frame", {
+            Size = UDim2.fromOffset(6, 2),
+            AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.fromOffset(22, 19),
+            Rotation = 45,
+            BackgroundColor3 = THEME.TEXT_DIM,
+            BorderSizePixel = 0,
+            Parent = searchFrame,
+        })
+        corner(lensHandle, 1)
+        searchBox = create("TextBox", {
+            Size = UDim2.new(1, -44, 1, 0),
+            Position = UDim2.fromOffset(38, 0),
+            BackgroundTransparency = 1,
+            Text = "",
+            PlaceholderText = "Search settings…",
+            PlaceholderColor3 = THEME.TEXT_DIM,
+            TextColor3 = THEME.TEXT,
+            TextSize = 12,
+            Font = FONTS.REGULAR,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ClearTextOnFocus = false,
+            Parent = searchFrame,
+        })
+    end
+
+    -- Content area (only when something can go in it: tab pages or search).
+    local scroll
+    if names or hasSearch then
+        local content = create("Frame", {
+            Size = UDim2.new(1, -152, 1, -(topPad + bottomPad)),
+            Position = UDim2.new(0, 140, 0, topPad),
+            BackgroundTransparency = 1,
+            Parent = frame,
+        })
+        scroll = create("ScrollingFrame", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ScrollBarThickness = 6,
+            ScrollBarImageColor3 = THEME.STROKE,
+            ScrollBarImageTransparency = 0.1,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Parent = content,
+        })
+        create("UIPadding", { PaddingRight = UDim.new(0, 12), Parent = scroll })
+    end
+
+    if hasSearch then
+        searchResults = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 0),
+            BackgroundTransparency = 1,
+            AutomaticSize = Enum.AutomaticSize.Y,
+            Visible = false,
+            Parent = scroll,
+        })
+        create("UIListLayout", {
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder,
+            Parent = searchResults,
+        })
+        noResults = create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 44),
+            BackgroundColor3 = THEME.PANEL,
+            BorderSizePixel = 0,
+            Text = "No settings match your search.",
+            TextColor3 = THEME.TEXT_DIM,
+            TextSize = 12,
+            Font = FONTS.REGULAR,
+            Visible = false,
+            LayoutOrder = -1,
+            Parent = searchResults,
+        })
+        corner(noResults, 6); stroke(noResults, THEME.STROKE)
+    end
+
+    -- Footer (only when a hint was given).
+    if hasFooter then
+        local footer = create("Frame", {
+            Size = UDim2.new(1, -24, 0, 30),
+            Position = UDim2.new(0, 12, 1, -42),
+            BackgroundColor3 = THEME.RAIL,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        corner(footer, 8); stroke(footer, THEME.STROKE)
+        textLabel({
+            Size = UDim2.new(1, -162, 1, 0),
+            Position = UDim2.fromOffset(12, 0),
+            Text = tostring(opts.footerHint),
+            TextColor3 = THEME.TEXT_DIM,
+            TextSize = 11,
+            Font = FONTS.REGULAR,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = footer,
+        })
+        footerStatus = textLabel({
+            Size = UDim2.new(0, 130, 1, 0),
+            Position = UDim2.new(1, -142, 0, 0),
+            Text = "",
+            TextColor3 = THEME.ACCENT_HI,
+            TextSize = 11,
+            Font = FONTS.BOLD,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Parent = footer,
+        })
+    end
+
+    -- Tabs: left rail buttons + one page each.
+    local pages, tabButtons, tabBars, tabLabels = {}, {}, {}, {}
     local activeTab = 0
 
     if names then
         local rail = create("Frame", {
-            Size = UDim2.new(1, -24, 0, 30),
-            Position = UDim2.new(0, 12, 0, 46),
+            Size = UDim2.new(0, 116, 1, -(topPad + bottomPad)),
+            Position = UDim2.new(0, 12, 0, topPad),
             BackgroundColor3 = THEME.RAIL,
             BorderSizePixel = 0,
             Parent = frame,
         })
         corner(rail, 8); stroke(rail, THEME.STROKE)
         create("UIListLayout", {
-            FillDirection = Enum.FillDirection.Horizontal,
             Padding = UDim.new(0, 4),
-            VerticalAlignment = Enum.VerticalAlignment.Center,
             SortOrder = Enum.SortOrder.LayoutOrder,
             Parent = rail,
         })
-        create("UIPadding", { PaddingLeft = UDim.new(0, 4), Parent = rail })
+        create("UIPadding", {
+            PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+            Parent = rail,
+        })
 
         for i, name in ipairs(names) do
-            local page = create("ScrollingFrame", {
-                Size = UDim2.new(1, -24, 1, -104),
-                Position = UDim2.new(0, 12, 0, 84),
+            local page = create("Frame", {
+                Size = UDim2.new(1, 0, 0, 0),
                 BackgroundTransparency = 1,
-                BorderSizePixel = 0,
-                ScrollBarThickness = 5,
-                ScrollBarImageColor3 = THEME.STROKE,
-                ScrollBarImageTransparency = 0.2,
-                CanvasSize = UDim2.new(0, 0, 0, 0),
-                AutomaticCanvasSize = Enum.AutomaticSize.Y,
+                AutomaticSize = Enum.AutomaticSize.Y,
                 Visible = false,
-                Parent = frame,
+                Parent = scroll,
             })
             create("UIListLayout", {
                 Padding = UDim.new(0, 6),
                 SortOrder = Enum.SortOrder.LayoutOrder,
                 Parent = page,
             })
-            create("UIPadding", { PaddingBottom = UDim.new(0, 10), Parent = page })
             pages[i] = page
 
             local btn = create("TextButton", {
-                Size = UDim2.fromOffset(84, 22),
+                Size = UDim2.new(1, 0, 0, 32),
                 LayoutOrder = i,
                 BackgroundColor3 = THEME.PANEL,
                 BorderSizePixel = 0,
+                Text = "",
                 AutoButtonColor = false,
-                Text = name,
-                TextColor3 = THEME.TEXT,
-                TextSize = 11,
-                Font = FONTS.MEDIUM,
                 Parent = rail,
             })
             corner(btn, 6)
+
+            -- Left accent bar marks the selected tab (anchor keeps its 3px
+            -- width pinned to the vertical centre of the 32px button).
+            local bar = create("Frame", {
+                Size = UDim2.fromOffset(3, 18),
+                AnchorPoint = Vector2.new(0, 0.5),
+                Position = UDim2.new(0, 10, 0.5, 0),
+                BackgroundColor3 = THEME.ACCENT,
+                BorderSizePixel = 0,
+                Visible = false,
+                Parent = btn,
+            })
+            corner(bar, 2)
+            tabBars[i] = bar
+
+            -- The name is a child label, not the button's own Text: padding
+            -- offsets children but not an object's text.
+            local lbl = create("TextLabel", {
+                Size = UDim2.new(1, -34, 1, 0),
+                Position = UDim2.fromOffset(22, 0),
+                BackgroundTransparency = 1,
+                Text = name,
+                TextColor3 = THEME.TEXT_DIM,
+                TextSize = 12,
+                Font = FONTS.MEDIUM,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                TextTruncate = Enum.TextTruncate.AtEnd,
+                Parent = btn,
+            })
+            tabLabels[i] = lbl
             tabButtons[i] = btn
         end
+    end
 
-        local function setTab(idx)
-            activeTab = idx
-            for i, page in ipairs(pages) do page.Visible = (i == idx) end
-            for i, btn in ipairs(tabButtons) do
-                btn.BackgroundColor3 = (i == idx) and THEME.ACCENT or THEME.PANEL
+    local function setTab(idx)
+        activeTab = idx
+        for i, page in ipairs(pages) do page.Visible = (i == idx) end
+        for i, btn in ipairs(tabButtons) do
+            btn.BackgroundColor3 = (i == idx) and THEME.PANEL_HI or THEME.PANEL
+            tabLabels[i].TextColor3 = (i == idx) and Color3.fromRGB(255, 255, 255) or THEME.TEXT_DIM
+            tabBars[i].Visible = (i == idx)
+        end
+        if footerStatus and names then footerStatus.Text = names[idx] or "" end
+    end
+
+    for i, btn in ipairs(tabButtons) do
+        btn.MouseEnter:Connect(function()
+            if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end
+        end)
+        btn.MouseLeave:Connect(function()
+            if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL }) end
+        end)
+        btn.MouseButton1Click:Connect(function() setTab(i) end)
+    end
+
+    -- Search: reparent matching control rows into the results list; clearing
+    -- the box puts every row back where it was built.
+    local function setSearchActive(active)
+        if not hasSearch then return end
+        searchResults.Visible = active
+        if active then
+            for i, page in ipairs(pages) do page.Visible = false end
+        else
+            for _, ctrl in ipairs(W._controls or controls or {}) do
+                if ctrl.row and ctrl.homeParent then
+                    ctrl.row.Parent = ctrl.homeParent
+                    ctrl.row.Visible = true
+                end
+            end
+            setTab(activeTab > 0 and activeTab or 1)
+        end
+    end
+
+    local function applySearch(query)
+        if not hasSearch then return end
+        query = tostring(query or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+        if query == "" then
+            setSearchActive(false)
+            return
+        end
+        setSearchActive(true)
+        local matches = 0
+        for _, ctrl in ipairs(W._controls or controls or {}) do
+            if ctrl.row and ctrl.searchText then
+                if ctrl.homeParent == nil then ctrl.homeParent = ctrl.row.Parent end
+                local match = ctrl.searchText:lower():find(query, 1, true) ~= nil
+                if match then
+                    ctrl.row.Parent = searchResults
+                    matches = matches + 1
+                end
+                ctrl.row.Visible = match
             end
         end
-        for i, btn in ipairs(tabButtons) do
-            btn.MouseEnter:Connect(function()
-                if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end
-            end)
-            btn.MouseLeave:Connect(function()
-                if activeTab ~= i then tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL }) end
-            end)
-            btn.MouseButton1Click:Connect(function() setTab(i) end)
+        noResults.Visible = (matches == 0)
+        if footerStatus then
+            footerStatus.Text = ("%d result%s"):format(matches, matches == 1 and "" or "s")
         end
-        setTab(1)
-        W.setTab = setTab
-        W.activeTab = function() return activeTab end
-    else
-        W.setTab = function() end
-        W.activeTab = function() return 0 end
     end
+
+    if searchBox then
+        searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+            applySearch(searchBox.Text)
+        end)
+    end
+
+    if names then setTab(1) end
 
     -- Popup layer - created last so it tops everything in the window.
     local popupLayer = create("Frame", {
@@ -1810,6 +2053,13 @@ local function makeWindow(opts)
             end
         end
         return nil
+    end
+    W.setTab = function(idx)
+        if names then setTab(idx) end
+    end
+    W.activeTab = function() return activeTab end
+    W.setControls = function(list)
+        if type(list) == "table" then W._controls = list end
     end
     W.show = function() frame.Visible = true end
     W.hide = function() frame.Visible = false end

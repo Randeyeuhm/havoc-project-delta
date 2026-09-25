@@ -64,7 +64,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's wo
 | `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
 | `games/3351674303.luau` | Driving Empire (vehicle performance, teleports, speedometer HUD) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
-| `uilib.luau` | Shared UI toolkit — window base, widgets, toasts, rebind capture, popup management |
+| `uilib.luau` | Shared UI toolkit — Project Delta-style window shell (dot header, drawn-X close, searchable left-rail tabs, footer), widgets, toasts, rebind capture, popup management |
 | `espui.luau` | ESP schema, Drawing renderer and two-window customizer (preview + settings) used by every script |
 | `StructureDumper.Luau` | Dev tool — dumps a game's structure for keeping detection logic up to date |
 | `Libraries_Im_Using.txt` | Reference list of the executor APIs this project relies on |
