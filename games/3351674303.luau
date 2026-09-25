@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v17"
+local SCRIPT_VERSION = "de-v18"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
-    Race     = { HopDelay = 0.1, ServerWait = 0.6, SweepDist = 12 },
+    Race     = { HopDelay = 0.1, ServerWait = 0.6, SweepDist = 12, PayoutBuffer = 3 },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -190,6 +190,7 @@ Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.1, 0, 5)
 Config.Race.ServerWait = math.clamp(tonumber(Config.Race.ServerWait) or 0.6, 0.1, 5)
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
+Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 3, 0, 60)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -297,6 +298,7 @@ end)()
 
 local ChassisUtils, ClientVehicles, VehicleController
 local Remotes, RaceUtil, RaceController, TeleportDetection
+local ClientRaceHelper
 
 local function waitPath(root, segments)
     local node = root
@@ -385,6 +387,37 @@ local function installInvokeProbe()
     end
 end
 
+-- RACE CLOCK: every racing-loop tick the client pushes the race's elapsed
+-- time (tick() - raceStart) through ClientRaceHelper.updateTrackInfo.
+-- Wrapping it gives the assist a live, exact race timer, so it can hold at
+-- the finish line until the track's payout minimum time has passed.
+local raceClock = { time = nil, at = nil }
+local function installRaceClockHook()
+    if not ClientRaceHelper or type(ClientRaceHelper.updateTrackInfo) ~= "function" then return end
+    if type(vehicleHooks.origUpdateTrackInfo) ~= "function" then
+        vehicleHooks.origUpdateTrackInfo = ClientRaceHelper.updateTrackInfo
+    end
+    local orig = vehicleHooks.origUpdateTrackInfo
+    ClientRaceHelper.updateTrackInfo = function(info, ...)
+        if type(info) == "table" and tonumber(info.Time) then
+            raceClock.time = tonumber(info.Time)
+            raceClock.at = os.clock()
+        end
+        return orig(info, ...)
+    end
+end
+
+-- Current race time in seconds (nil when no live reading is available).
+local function raceElapsed()
+    if raceClock.time and raceClock.at then
+        local extra = os.clock() - raceClock.at
+        if extra >= 0 and extra < 300 then
+            return raceClock.time + extra
+        end
+    end
+    return nil
+end
+
 local function initVehicleModules()
     if not ChassisUtils then
         local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Vehicles", "ChassisUtils" })
@@ -435,7 +468,15 @@ local function initVehicleModules()
             if ok and type(res) == "table" then TeleportDetection = res end
         end
     end
+    if not ClientRaceHelper then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Races", "ClientRaceHelper" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then ClientRaceHelper = res end
+        end
+    end
     installInvokeProbe()
+    installRaceClockHook()
     if ChassisUtils then
         if not vehicleHooks.origSpeed then
             vehicleHooks.origSpeed = ChassisUtils.GetSpeedMult
@@ -1239,8 +1280,8 @@ local function trackEntryPart(entry)
     return entry.PrimaryPart or entry:FindFirstChildWhichIsA("BasePart")
 end
 
-local function raceLaps(model)
-    if not RaceUtil then return nil end
+local function raceTrackInfo(model)
+    if not RaceUtil then return nil, nil end
     local names = { model.Name }
     if RaceController then
         local ok, decoded = pcall(function()
@@ -1253,11 +1294,37 @@ local function raceLaps(model)
     end
     for _, nm in ipairs(names) do
         local ok, res = pcall(function() return RaceUtil.getTrackInfo(nm) end)
-        if ok and res and tonumber(res.MaxLaps) then
-            return tonumber(res.MaxLaps)
+        if ok and res then
+            local laps = tonumber(res.MaxLaps)
+            local minTime = tonumber(res.MinTimeSeconds)
+            if laps or minTime then
+                return laps, minTime
+            end
         end
     end
-    return nil
+    return nil, nil
+end
+
+-- Finishing too fast skips the payout - the server checks the total race
+-- time against the track's payout minimum. Park at the last checkpoint
+-- until the race clock clears it (+ the buffer).
+local function waitForPayout(minTime, startClock)
+    if not minTime or minTime <= 0 then return end
+    local elapsed = raceElapsed()
+    if not elapsed and startClock then
+        elapsed = os.clock() - startClock  -- fallback: since the assist started
+    end
+    if not elapsed then return end
+    local target = minTime + (Config.Race.PayoutBuffer or 3)
+    if elapsed >= target then return end
+    local waitFor = math.min(target - elapsed, 600)
+    if waitFor > 1 then
+        notify(("Race assist: holding %.0fs before the finish - this race pays out after %ds"):format(waitFor, math.floor(minTime)))
+    end
+    local t0 = os.clock()
+    while os.clock() - t0 < waitFor do
+        task.wait(0.5)
+    end
 end
 
 -- One sweep: appear just before the gate, then just past it - the game's
@@ -1354,14 +1421,16 @@ local function runRaceRoutine()
         notify("Race assist: couldn't read this race's checkpoints")
         return
     end
-    local lapsKnown = raceLaps(trackModel)
+    local lapsKnown, minTime = raceTrackInfo(trackModel)
     local laps = math.clamp(lapsKnown or 4, 1, 8)
+    local startClock = os.clock()
     raceBusy = true
     task.spawn(function()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
-        notify(("Race assist: taking %d checkpoints x%d lap(s)"):format(#cps, laps))
+        local minTxt = minTime and (" - payout after %ds"):format(math.floor(minTime)) or ""
+        notify(("Race assist: taking %d checkpoints x%d lap(s)%s"):format(#cps, laps, minTxt))
         local ok, err = pcall(function()
             local function dirBetween(fromPart, toPart)
                 local d = (toPart.Position - fromPart.Position) * Vector3.new(1, 0, 1)
@@ -1432,6 +1501,7 @@ local function runRaceRoutine()
                 -- take the finish line too: after the final lap, or every lap
                 -- when the lap count couldn't be read
                 if pass == laps or not lapsKnown then
+                    waitForPayout(minTime, startClock)
                     local fres = tryFinish(finish, finishDir, false)
                     if fres == "ok" then
                         notify("Race assist: race finished!")
@@ -1445,6 +1515,7 @@ local function runRaceRoutine()
             -- final finish-line rounds (progress is kept, so a retry only has
             -- to land the finish crossing)
             for _ = 1, 2 do
+                waitForPayout(minTime, startClock)
                 local fres = tryFinish(finish, finishDir, true)
                 if fres == "ok" then
                     notify("Race assist: race finished!")
@@ -1758,9 +1829,14 @@ local function buildMenu()
     slider(p7, "Sweep distance",
         function() return Config.Race.SweepDist end,
         function(v) Config.Race.SweepDist = v end, 1, 6, 60)
+    slider(p7, "Payout buffer (s)",
+        function() return Config.Race.PayoutBuffer end,
+        function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
     note(p7, "Hop delay: pause between checkpoints. Server wait: how long " ..
         "each crossing waits for the server's answer. Sweep distance: how far " ..
-        "before/after each gate the car is placed. Defaults: 0.1 / 0.6 / 12.")
+        "before/after each gate the car is placed. Payout buffer: extra wait " ..
+        "at the finish so the race clears the track's payout minimum time. " ..
+        "Defaults: 0.1 / 0.6 / 12 / 3.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it loops back through the previous checkpoint and retries " ..
