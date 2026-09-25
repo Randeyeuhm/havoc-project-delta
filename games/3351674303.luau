@@ -37,7 +37,15 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v40"
+local SCRIPT_VERSION = "de-v41"
+
+-- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
+-- before loading the hub, and the hub itself sets it - so even if several
+-- payload copies are queued (or a same-client teleport fires one while the
+-- hub is already running) the hub never starts twice in one client.
+if type(getgenv) == "function" then
+    pcall(function() getgenv().HAVOC_HUB_TELEPORT_EXEC = true end)
+end
 
 local Connections = {}
 local function track(conn)
@@ -2075,6 +2083,18 @@ local function resolveTeleportQueue()
     return teleportPersist.fn
 end
 
+local function clearTeleportQueue()
+    local g = type(getgenv) == "function" and getgenv() or nil
+    if g and type(g.clearteleportqueue) == "function" then
+        if pcall(g.clearteleportqueue) then return true end
+    end
+    local ok, fn = pcall(function() return clearteleportqueue end)
+    if ok and type(fn) == "function" then
+        return (pcall(fn))
+    end
+    return false
+end
+
 local function refreshTeleportQueue(force)
     if Config.Misc.TeleportExec ~= true then return end
     local fn = resolveTeleportQueue()
@@ -2086,24 +2106,16 @@ local function refreshTeleportQueue(force)
         return
     end
     if not force and (os.clock() - teleportPersist.queuedAt) < 45 then return end
-    local code = ('loadstring(game:HttpGet(%q .. "?t=" .. tostring(os.time())))()'):format(HUB_LOADER_URL)
+    -- wipe the executor's queue first, then arm exactly ONE payload; the
+    -- payload carries its own one-per-client guard - so no matter how often
+    -- this re-arms, the next teleport runs the hub exactly once
+    local code = ([[if not (getgenv and getgenv().HAVOC_HUB_TELEPORT_EXEC) then getgenv().HAVOC_HUB_TELEPORT_EXEC = true; loadstring(game:HttpGet(%q .. "?t=" .. tostring(os.time())))() end]]):format(HUB_LOADER_URL)
+    local cleared = clearTeleportQueue()
     local ok = pcall(fn, code)
     teleportPersist.queuedAt = os.clock()
     if force then
-        print(("[driving-empire] teleport persistence: re-exec queued (ok=%s)"):format(tostring(ok)))
+        print(("[driving-empire] teleport persistence: re-exec queued (ok=%s, old copies cleared=%s)"):format(tostring(ok), tostring(cleared)))
     end
-end
-
-local function clearTeleportQueue()
-    local g = type(getgenv) == "function" and getgenv() or nil
-    if g and type(g.clearteleportqueue) == "function" then
-        if pcall(g.clearteleportqueue) then return true end
-    end
-    local ok, fn = pcall(function() return clearteleportqueue end)
-    if ok and type(fn) == "function" then
-        return (pcall(fn))
-    end
-    return false
 end
 
 -- A race ended before we got teleported out? The requeue flag carries that
@@ -2122,12 +2134,6 @@ pcall(function()
 end)
 
 refreshTeleportQueue(true)
-task.spawn(function()
-    while true do
-        task.wait(30)
-        refreshTeleportQueue()
-    end
-end)
 
 -- ============================================================
 -- INPUT
