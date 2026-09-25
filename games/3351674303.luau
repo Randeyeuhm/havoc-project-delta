@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v38"
+local SCRIPT_VERSION = "de-v39"
 
 local Connections = {}
 local function track(conn)
@@ -59,7 +59,7 @@ local DEFAULTS = {
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
-    Misc     = { Fullbright = false, AntiAFK = true },
+    Misc     = { Fullbright = false, AntiAFK = true, TeleportExec = true },
 }
 
 local function copyDefaults()
@@ -193,6 +193,7 @@ Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0
 Config.Race.CarLimitPad = math.clamp(tonumber(Config.Race.CarLimitPad) or 1.25, 1, 3)
 Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
+Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1953,6 +1954,7 @@ local function queueJoinNow()
         elseif not pok then
             notify("Queue join error - see console")
         elseif v1 == true then
+            pcall(function() if isfile("driving_empire_requeue.txt") then delfile("driving_empire_requeue.txt") end end)
             notify(("Queued for %s - waiting for the race"):format(tostring(track)))
         else
             notify(("Queue refused: %s"):format(tostring(v2 or v1)))
@@ -2007,6 +2009,12 @@ task.spawn(function()
         else
             if Config.Race.AutoRequeue and farmRace.wasRacing then
                 farmRace.pendingAt = os.clock() + 20  -- let results + teleports settle
+                -- remember the requeue ACROSS the teleport back: the next
+                -- place re-execs this script (teleport persistence) and
+                -- picks the flag up to keep the farm looping
+                pcall(function()
+                    writefile("driving_empire_requeue.txt", ("%s|%d"):format(tostring(farmRace.lastTrack or "Circuit"), os.time()))
+                end)
             end
             if Config.Race.AutoRequeue and farmRace.pendingAt and not raceBusy
                 and os.clock() >= farmRace.pendingAt then
@@ -2021,6 +2029,103 @@ task.spawn(function()
             end
         end
         farmRace.wasRacing = racing
+    end
+end)
+
+-- ============================================================
+-- TELEPORT PERSISTENCE (auto re-exec after getting teleported)
+-- ============================================================
+-- The race queue teleports you into the game's matchmaking place - a fresh
+-- client where this script doesn't exist. queueonteleport (Potassium;
+-- alias queue_on_teleport) runs a code string after the next teleport, so
+-- we queue the hub LOADER: it maps every Driving Empire place back to this
+-- same script, which re-queues itself for the hop after that - the farm
+-- survives place hops on its own.
+local HUB_LOADER_URL = "https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"
+local teleportPersist = { fn = nil, queuedAt = 0, warned = false }
+
+local function resolveTeleportQueue()
+    if teleportPersist.fn then return teleportPersist.fn end
+    local g = type(getgenv) == "function" and getgenv() or nil
+    if g then
+        for _, name in ipairs({ "queueonteleport", "queue_on_teleport" }) do
+            if type(g[name]) == "function" then
+                teleportPersist.fn = g[name]
+                break
+            end
+        end
+        if not teleportPersist.fn then
+            for _, nsName in ipairs({ "syn", "fluxus", "krnl", "delta" }) do
+                local ns = g[nsName]
+                if type(ns) == "table" and type(ns.queue_on_teleport) == "function" then
+                    teleportPersist.fn = function(code) return ns.queue_on_teleport(code) end
+                    break
+                end
+            end
+        end
+    end
+    if not teleportPersist.fn then
+        local ok, fn = pcall(function() return queueonteleport end)
+        if ok and type(fn) == "function" then teleportPersist.fn = fn end
+    end
+    if not teleportPersist.fn then
+        local ok, fn = pcall(function() return queue_on_teleport end)
+        if ok and type(fn) == "function" then teleportPersist.fn = fn end
+    end
+    return teleportPersist.fn
+end
+
+local function refreshTeleportQueue(force)
+    if Config.Misc.TeleportExec ~= true then return end
+    local fn = resolveTeleportQueue()
+    if not fn then
+        if not teleportPersist.warned then
+            teleportPersist.warned = true
+            print("[driving-empire] teleport persistence: no queueonteleport function found in this executor")
+        end
+        return
+    end
+    if not force and (os.clock() - teleportPersist.queuedAt) < 45 then return end
+    local code = ('loadstring(game:HttpGet(%q .. "?t=" .. tostring(os.time())))()'):format(HUB_LOADER_URL)
+    local ok = pcall(fn, code)
+    teleportPersist.queuedAt = os.clock()
+    if force then
+        print(("[driving-empire] teleport persistence: re-exec queued (ok=%s)"):format(tostring(ok)))
+    end
+end
+
+local function clearTeleportQueue()
+    local g = type(getgenv) == "function" and getgenv() or nil
+    if g and type(g.clearteleportqueue) == "function" then
+        if pcall(g.clearteleportqueue) then return true end
+    end
+    local ok, fn = pcall(function() return clearteleportqueue end)
+    if ok and type(fn) == "function" then
+        return (pcall(fn))
+    end
+    return false
+end
+
+-- A race ended before we got teleported out? The requeue flag carries that
+-- across the place hop - pick it up and continue the farm loop here.
+pcall(function()
+    if isfile("driving_empire_requeue.txt") then
+        local data = readfile("driving_empire_requeue.txt")
+        local track, at = tostring(data):match("^(.-)|(%d+)$")
+        if track and at and (os.time() - tonumber(at)) < 900 and Config.Race.AutoRequeue then
+            farmRace.lastTrack = track
+            farmRace.pendingAt = os.clock() + 8
+            notify(("Race auto-farm: continuing the loop - re-queuing %s"):format(track))
+        end
+        delfile("driving_empire_requeue.txt")
+    end
+end)
+
+refreshTeleportQueue(true)
+task.spawn(function()
+    while true do
+        task.wait(30)
+        refreshTeleportQueue()
     end
 end)
 
@@ -2322,6 +2427,29 @@ local function buildMenu()
         notify("Rejoining...")
         pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
     end, { confirm = true, confirmText = "Click again to rejoin" })
+    section(p6, "Teleport persistence")
+    toggle(p6, "Auto re-exec after teleport",
+        function() return Config.Misc.TeleportExec end,
+        function(v)
+            Config.Misc.TeleportExec = v
+            if v then
+                refreshTeleportQueue(true)
+                notify("Teleport persistence on - the hub re-runs after every teleport")
+            else
+                local cleared = clearTeleportQueue()
+                notify(cleared and "Teleport persistence off - queued re-exec cleared"
+                    or "Teleport persistence off (no clear function in this executor - the next hop still re-runs once)")
+            end
+        end)
+    button(p6, "Queue re-exec now", function()
+        refreshTeleportQueue(true)
+        notify(teleportPersist.fn and "Re-exec queued - runs after your next teleport" or "This executor has no queueonteleport function")
+    end)
+    note(p6, "Queues the hub loader with the executor's queueonteleport so " ..
+        "the script survives teleports: it re-runs automatically when the " ..
+        "race queue drops you into the matchmaking place, and re-queues for " ..
+        "the hop back. This is what keeps the auto-farm looping without " ..
+        "touching the executor. Turn off to stop the chain.")
     section(p6, "Menu")
     bindrow(p6, hotkeyById.ToggleMenu, {
         locked = true,
