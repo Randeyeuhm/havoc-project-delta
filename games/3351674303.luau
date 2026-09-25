@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v36"
+local SCRIPT_VERSION = "de-v37"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
-    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25 },
+    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -191,6 +191,8 @@ Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
 Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0, 60)
 Config.Race.CarLimitPad = math.clamp(tonumber(Config.Race.CarLimitPad) or 1.25, 1, 3)
+Config.Race.AutoFarm = Config.Race.AutoFarm == true
+Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -448,7 +450,7 @@ end
 -- ClientRaceHelper.updateTrackInfo. Wrapping it gives the assist an exact
 -- race timer (for the payout hold) plus the authoritative lap count and lap
 -- position (for correct floors, and for restarting mid-race).
-local raceClock = { time = nil, at = nil, laps = nil, lap = nil, nextCp = nil }
+local raceClock = { time = nil, at = nil, laps = nil, lap = nil, nextCp = nil, epoch = 0 }
 local function installRaceClockHook()
     if not ClientRaceHelper or type(ClientRaceHelper.updateTrackInfo) ~= "function" then return end
     if type(vehicleHooks.origUpdateTrackInfo) ~= "function" then
@@ -470,10 +472,17 @@ local function installRaceClockHook()
             -- the race UI got torn down (race over / left) - forget it all
             raceClock.time, raceClock.at = nil, nil
             raceClock.laps, raceClock.lap, raceClock.nextCp = nil, nil, nil
+            raceClock.epoch = (raceClock.epoch or 0) + 1
         end
         return orig(info, ...)
     end
 end
+
+-- AUTO-FARM shared state ("Race auto-farm" in the Money tab): the farm
+-- loop near the race systems reads it; watchRacePayout marks done runs.
+local farmRace = { epoch = -1, attempts = 0, lastAttempt = 0, finished = false,
+    wasRacing = false, raceSeenAt = nil, pendingAt = nil, lastJoinAt = 0,
+    rejoinTries = 0, lastTrack = nil, lastMode = nil }
 
 -- Current race time in seconds (nil when no live reading is available).
 local function raceElapsed()
@@ -1461,6 +1470,7 @@ end
 -- whether the server FINALIZED our result - RaceFinished never arriving is
 -- the "TBD" results screen (and why a withheld payout never lands).
 local function watchRacePayout()
+    farmRace.finished = true  -- the auto-farm loop knows this race is done
     local before = getCash()
     local here = #Players:GetPlayers()
     local uploads0, chunks0 = raceReport.uploads, raceReport.chunks
@@ -1906,6 +1916,100 @@ local function printPayoutTable()
 end
 
 -- ============================================================
+-- RACE AUTO-FARM (Money tab)
+-- ============================================================
+-- "Auto-run" starts the normal race assist (same routine as the button,
+-- same Race tab timing settings) whenever a race goes live. "Auto-queue"
+-- re-joins the same track + mode after each race using the game's own
+-- queue call: Remotes.fireServer("RaceQueue", track, mode, "Join").
+local function farmRaceMode()
+    if MatchmakingUtil and type(MatchmakingUtil.isMatchmakingPlace) == "function" then
+        local okG, isG = pcall(MatchmakingUtil.isMatchmakingPlace)
+        if okG and isG == true then return "GlobalMultiplayer" end
+    end
+    return "Exhibition"
+end
+
+local function queueJoinNow()
+    local track = farmRace.lastTrack or "Circuit"
+    local mode = farmRace.lastMode or "GlobalMultiplayer"
+    if not Remotes or type(Remotes.fireServer) ~= "function" then
+        notify("Queue join failed - game remotes not loaded")
+        return false
+    end
+    local ok = pcall(Remotes.fireServer, "RaceQueue", track, mode, "Join")
+    print(("[driving-empire] auto-queue: RaceQueue Join track=%s mode=%s ok=%s"):format(tostring(track), tostring(mode), tostring(ok)))
+    return ok
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if not vehicleHooks.farmJoinedConn then
+            local ev = waitPath(ReplicatedStorage, { "Remotes", "RaceJoined" })
+            if ev and ev.OnClientEvent then
+                vehicleHooks.farmJoinedConn = ev.OnClientEvent:Connect(function(...)
+                    local a = table.pack(...)
+                    farmRace.pendingAt, farmRace.rejoinTries = nil, 0
+                    print(("[driving-empire] RaceJoined: %s %s"):format(tostring(a[1]), tostring(a[2])))
+                    if Config.Race.AutoFarm or Config.Race.AutoRequeue then
+                        notify("Race auto-farm: joined a race - assist starts at GO")
+                    end
+                end)
+            end
+        end
+        if farmRace.epoch ~= raceClock.epoch then
+            farmRace.epoch = raceClock.epoch
+            farmRace.attempts, farmRace.finished, farmRace.raceSeenAt = 0, false, nil
+        end
+        local live = raceClock.at and (os.clock() - raceClock.at) < 1.5
+        local racing = (live and (tonumber(raceClock.time) or 0) > 1.5) and true or false
+        if racing then
+            farmRace.pendingAt = nil
+            farmRace.rejoinTries = 0
+            if not farmRace.raceSeenAt then farmRace.raceSeenAt = os.clock() end
+            if raceResult.mine and raceResult.at and raceResult.at >= farmRace.raceSeenAt then
+                farmRace.finished = true
+            end
+            if Config.Race.AutoFarm and not farmRace.finished and not raceBusy and farmRace.attempts < 5 then
+                local trackModel = findRaceTrackModel()
+                if trackModel then
+                    local nm = select(3, raceTrackInfo(trackModel))
+                    if nm then farmRace.lastTrack = nm end
+                    farmRace.lastMode = farmRaceMode()
+                    if (os.clock() - farmRace.lastAttempt) > 12 then
+                        farmRace.attempts = farmRace.attempts + 1
+                        farmRace.lastAttempt = os.clock()
+                        notify(farmRace.attempts == 1 and "Race auto-farm: race live - running the assist"
+                            or ("Race auto-farm: retry %d/5"):format(farmRace.attempts))
+                        pcall(runRaceRoutine)
+                    end
+                end
+            end
+        else
+            if Config.Race.AutoRequeue and farmRace.wasRacing then
+                farmRace.pendingAt = os.clock() + 20  -- let results + teleports settle
+            end
+            if Config.Race.AutoRequeue and farmRace.pendingAt and not raceBusy
+                and os.clock() >= farmRace.pendingAt then
+                if farmRace.rejoinTries >= 3 then
+                    farmRace.pendingAt = nil
+                elseif (os.clock() - farmRace.lastJoinAt) > 55 then
+                    farmRace.rejoinTries = farmRace.rejoinTries + 1
+                    farmRace.lastJoinAt = os.clock()
+                    farmRace.pendingAt = os.clock() + 45  -- retry window
+                    if queueJoinNow() then
+                        notify(("Race auto-farm: queued %s (%s) - waiting for the race"
+                            ):format(tostring(farmRace.lastTrack or "?"), tostring(farmRace.lastMode or "?")))
+                    end
+                end
+            end
+        end
+        farmRace.wasRacing = racing
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -2156,6 +2260,35 @@ local function buildMenu()
     note(p5, "Sky plate: a personal plate 10,000 studs above the map - nothing " ..
         "to crash into, first gear to top speed, u-turns itself at the edges. " ..
         "Teleporting high up is exactly what anti-cheat watches for; your call.")
+
+    section(p5, "Race auto-farm  (money loop)")
+    toggle(p5, "Auto-run the race assist",
+        function() return Config.Race.AutoFarm end,
+        function(v)
+            Config.Race.AutoFarm = v
+            notify(v and "Race auto-farm on - races run themselves (Race tab settings apply)"
+                or "Race auto-farm off")
+        end)
+    toggle(p5, "Auto-queue the next race",
+        function() return Config.Race.AutoRequeue end,
+        function(v)
+            Config.Race.AutoRequeue = v
+            notify(v and "Auto-queue on - re-queues the last track + mode after each race"
+                or "Auto-queue off")
+        end)
+    button(p5, "Queue now (last track)", function()
+        local track = farmRace.lastTrack or "Circuit"
+        local mode = farmRace.lastMode or "GlobalMultiplayer"
+        if queueJoinNow() then
+            notify(("Queued %s (%s)"):format(tostring(track), tostring(mode)))
+        end
+    end)
+    note(p5, "Auto-run: every race you enter is finished automatically - it " ..
+        "watches for GO and runs the same routine as the Race tab button " ..
+        "with your Race timing settings (hop, sweep, payout buffer, car " ..
+        "time pad). Auto-queue: after a race it re-joins the same track + " ..
+        "mode with the game's own queue call, so the loop keeps farming " ..
+        "until you toggle it off. Works wherever the game lets you queue.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[6]
