@@ -38,7 +38,7 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v2"
+local SCRIPT_VERSION = "de-v3"
 
 local Connections = {}
 local function track(conn)
@@ -55,6 +55,7 @@ local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true, AutoDrops = false },
+    Farm     = { Enabled = false, Steer = 0 },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -180,6 +181,7 @@ Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
 Config.HUD.YOffset = math.clamp(tonumber(Config.HUD.YOffset) or 40, 0, 600)
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
+Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -736,6 +738,73 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- FEATURES: AUTO FARM  (driving income - scales with speed)
+-- ============================================================
+-- The chassis physics ask InputController.Get() for throttle/steer every
+-- frame. Replacing that module field with a wrapper lets the farm hold full
+-- throttle (plus an optional steer bias for circling). The true original is
+-- kept in the getgenv hook registry, so re-executing can't stack wrappers.
+local InputController
+local farmState = { cashStart = 0, stuckSince = nil, recoverUntil = 0 }
+
+local function farmInputOverride()
+    if not Config.Farm.Enabled then return nil end
+    if os.clock() < farmState.recoverUntil then
+        return -1, -Config.Farm.Steer
+    end
+    return 1, Config.Farm.Steer
+end
+
+local function initFarmHook()
+    if not InputController then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Vehicles", "InputController" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then InputController = res end
+        end
+    end
+    if not InputController then return false end
+    if not vehicleHooks.origInputGet then
+        vehicleHooks.origInputGet = InputController.Get
+    end
+    local orig = vehicleHooks.origInputGet
+    InputController.Get = function()
+        local throttle, steer = orig()
+        local by, bs = farmInputOverride()
+        if by then return by, bs end
+        return throttle, steer
+    end
+    return true
+end
+
+-- Stuck detection: no movement for a few seconds while farming -> reverse
+-- for 2s (with reversed steer) so the car backs off whatever it hit.
+local function farmTick(chassis)
+    if not Config.Farm.Enabled then
+        farmState.stuckSince = nil
+        return
+    end
+    local speed = chassis and chassis.Speed or 0
+    if chassis and speed < 5 then
+        farmState.stuckSince = farmState.stuckSince or os.clock()
+        if (os.clock() - farmState.stuckSince) > 3.5 and os.clock() > farmState.recoverUntil then
+            farmState.recoverUntil = os.clock() + 2
+            farmState.stuckSince = nil
+        end
+    else
+        farmState.stuckSince = nil
+    end
+end
+
+initFarmHook()
+task.spawn(function()
+    for _ = 1, 30 do
+        if initFarmHook() then break end
+        task.wait(1)
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -905,6 +974,28 @@ local function buildMenu()
     note(p5, "Drops only spawn during the NASCAR World event (tagged 'CashDrop'). " ..
         "We fire the same remote the game fires on touch - if the server wants " ..
         "you nearby it may ignore distant calls.")
+    section(p5, "Auto farm  (driving income)")
+    toggle(p5, "Auto farm (auto drive)",
+        function() return Config.Farm.Enabled end,
+        function(v)
+            Config.Farm.Enabled = v
+            if v then
+                initFarmHook()
+                farmState.cashStart = getCash() or 0
+                farmState.recoverUntil = 0
+                notify(getLocalVehicleModel() and "Auto farm on - driving" or "Auto farm on - get in a car")
+            else
+                local delta = (getCash() or 0) - farmState.cashStart
+                notify(delta > 0 and ("Auto farm off - earned %s"):format(formatCash(delta)) or "Auto farm off")
+            end
+        end)
+    slider(p5, "Farm steer bias",
+        function() return Config.Farm.Steer end,
+        function(v) Config.Farm.Steer = v end, 0.05, -1, 1)
+    note(p5, "Holds full throttle for you - income scales with speed, so pair it " ..
+        "with a speed multiplier. 0 steer drives straight (aim down a long road " ..
+        "first); about 0.3 steers in circles (wide open areas). Auto-reverses for " ..
+        "2s when it gets stuck.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[6]
@@ -965,6 +1056,7 @@ track(RunService.RenderStepped:Connect(function()
             end
         end
         updateHud(chassis)
+        farmTick(chassis)
     end)
 
     pcall(renderESP, cam)
