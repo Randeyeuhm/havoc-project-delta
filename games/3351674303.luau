@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v33"
+local SCRIPT_VERSION = "de-v34"
 
 local Connections = {}
 local function track(conn)
@@ -409,6 +409,40 @@ local function installFireProbe()
     end
 end
 
+-- RACE RESULT PROBE: when the server finalizes a racer it fires RaceFinished
+-- on ReplicatedStorage.Remotes (decoded from the game's own client code,
+-- tbl.ReceivedFinishTime): raceId uuid, userId, final time, best lap, racer
+-- count, extra cash, placement, metadata. The results screen row and the
+-- victory sound are driven by this event - a row stuck on "TBD" means it
+-- never arrived for you, and the server withholds the payout for runs it
+-- refuses to finalize. Capturing it makes the post-race report conclusive.
+local raceResult = { at = nil, userId = nil, time = nil, bestLap = nil, racers = nil, extra = nil, place = nil, mine = false }
+local raceResultToast = nil  -- assigned lower down, once notify() exists
+local function installRaceFinishedProbe()
+    local ev = waitPath(ReplicatedStorage, { "Remotes", "RaceFinished" })
+    if not ev or not ev.OnClientEvent then return end
+    if vehicleHooks.raceFinishedConn then
+        pcall(function() vehicleHooks.raceFinishedConn:Disconnect() end)
+    end
+    vehicleHooks.raceFinishedConn = ev.OnClientEvent:Connect(function(...)
+        local a = table.pack(...)
+        raceResult.at = os.clock()
+        raceResult.userId = a[2]
+        raceResult.time = tonumber(a[3])
+        raceResult.bestLap = tonumber(a[4])
+        raceResult.racers = tonumber(a[5])
+        raceResult.extra = tonumber(a[6])
+        raceResult.place = tonumber(a[7])
+        raceResult.mine = (LocalPlayer ~= nil and a[2] == LocalPlayer.UserId)
+        print(("[driving-empire] RaceFinished: race=%s user=%s final=%ss bestLap=%ss racers=%s extraCash=%s place=%s meta=%s"):format(
+            tostring(a[1]), tostring(a[2]), tostring(a[3]), tostring(a[4]),
+            tostring(a[5]), tostring(a[6]), tostring(a[7]), tostring(a[8])))
+        if raceResult.mine and raceResultToast then
+            pcall(raceResultToast, raceResult.time, raceResult.bestLap, raceResult.racers, raceResult.place)
+        end
+    end)
+end
+
 -- RACE CLOCK: every racing-loop tick the client pushes the race's elapsed
 -- time (tick() - raceStart) through ClientRaceHelper.updateTrackInfo.
 -- Wrapping it gives the assist a live, exact race timer, so it can hold at
@@ -513,6 +547,7 @@ local function initVehicleModules()
     end
     installInvokeProbe()
     installFireProbe()
+    installRaceFinishedProbe()
     installRaceClockHook()
     if ChassisUtils then
         if not vehicleHooks.origSpeed then
@@ -1398,21 +1433,35 @@ local function legitimizeVehicleStats(chassis)
     end
 end
 
+-- Toast hook for the RaceFinished probe (installed at load; assigned
+-- here because notify() only exists from this point down).
+raceResultToast = function(time, bestLap, racers, place)
+    notify(("Server finalized your result: place %s, %ss (best lap %ss, %s racers)"):format(
+        tostring(place or "?"), fmtSecs(time or 0), fmtSecs(bestLap or 0), tostring(racers or "?")))
+end
+
 -- Watch leaderstats.Cash after a finished race and report when the payout
 -- actually lands (or that it never came). Also reports whether the game
--- uploaded its race recording and how many players were in the session.
+-- uploaded its race recording, how many players were in the session, and
+-- whether the server FINALIZED our result - RaceFinished never arriving is
+-- the "TBD" results screen (and why a withheld payout never lands).
 local function watchRacePayout()
     local before = getCash()
     local here = #Players:GetPlayers()
     local uploads0, chunks0 = raceReport.uploads, raceReport.chunks
+    local result0 = raceResult.at
     task.spawn(function()
         task.wait(15)  -- the recording upload fires right after the finish
         local uploads = raceReport.uploads - uploads0
         local chunks = raceReport.chunks - chunks0
         local uploaded = uploads > 0 and ("yes (%d chunks)"):format(chunks) or "NO"
-        print(("[driving-empire] race report: players here=%d, game uploaded a recording: %s, cash before=%s"):format(
-            here, uploaded, before and tostring(before) or "?"))
-        notify(("Race report: %d players in the session, game uploaded a recording: %s"):format(here, uploaded))
+        local gotResult = raceResult.at ~= result0 and raceResult.mine == true
+        local finalized = gotResult
+            and ("yes (place %s, %ss, %s racers)"):format(tostring(raceResult.place), fmtSecs(raceResult.time or 0), tostring(raceResult.racers))
+            or "not yet - watch the console for 'RaceFinished' (if it never comes, the run was never finalized = the TBD screen + no money)"
+        print(("[driving-empire] race report: players here=%d, game uploaded a recording: %s, server finalized your result: %s, cash before=%s"):format(
+            here, uploaded, finalized, before and tostring(before) or "?"))
+        notify(("Race report: %d players, recording uploaded: %s, result finalized: %s"):format(here, uploaded, gotResult and "yes" or "not yet"))
         if not before then
             notify("Couldn't read your cash - watch it manually after returning to the main server")
             return
@@ -1427,7 +1476,7 @@ local function watchRacePayout()
                 return
             end
         end
-        notify("No race payout within 5 minutes - the server withheld it. Stay on the server until the race fully ends + teleport back, and check the results screen cash value")
+        notify("No race payout within 5 minutes - the server withheld it. If no 'RaceFinished' line for you appeared in the console, your result was never finalized (the TBD screen); stay on the server until the session fully ends")
     end)
 end
 
@@ -2106,7 +2155,10 @@ local function buildMenu()
         "The assist computes that floor and holds at the last checkpoint " ..
         "until it passes; Car time pad is the safety multiplier (default " ..
         "1.25 - raise it if a fast finish still doesn't pay). Cash pays by " ..
-        "finishing place x extra-racer bonus x event multipliers.")
+        "finishing place x extra-racer bonus x event multipliers. The " ..
+        "console prints the server's RaceFinished line (place, time, racers) " ..
+        "the moment it finalizes you - no line for your run = the server " ..
+        "never accepted it (the 'TBD' screen) and no money will come.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
