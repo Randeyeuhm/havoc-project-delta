@@ -358,8 +358,9 @@ local LINE_TEMPLATE = {
 }
 
 -- Shared chams updater: creates the Highlight on first use, then keeps its
--- colour / opacity / filled in sync every frame.
-local function applyCham(d, cfg, field, name, adornee, parent)
+-- colour / opacity / filled in sync every frame. colorOverride (optional,
+-- host-set via d.color) tints the cham, e.g. the friend / mod colours.
+local function applyCham(d, cfg, field, name, adornee, parent, colorOverride)
     local hl = d[field]
     if not hl then
         hl = Instance.new("Highlight")
@@ -369,8 +370,9 @@ local function applyCham(d, cfg, field, name, adornee, parent)
         d[field] = hl
     end
     local t = guiT(cfg.ChamsTransparency)
-    hl.FillColor = rgb(cfg.ChamsR, cfg.ChamsG, cfg.ChamsB)
-    hl.OutlineColor = hl.FillColor
+    local col = colorOverride or rgb(cfg.ChamsR, cfg.ChamsG, cfg.ChamsB)
+    hl.FillColor = col
+    hl.OutlineColor = col
     -- The opacity slider fades only the INSIDE (fill); the outline stays
     -- solid so the chams stay readable at any fill opacity.
     hl.FillTransparency = (cfg.ChamsFilled ~= false) and t or 1
@@ -402,7 +404,11 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
 
     local distance = math.huge
     if localRoot then distance = (localRoot.Position - root.Position).Magnitude end
-    if distance > maxDist then hideData(d); return true end
+    -- Per-target cap (d.maxDistance, set by the host - e.g. landmine ranges)
+    -- can only tighten the global range.
+    local cap = tonumber(d.maxDistance) or maxDist
+    if cap > maxDist then cap = maxDist end
+    if distance > cap then hideData(d); return true end
 
     -- Projection: Project Delta's fixed world-size box (4.5 x 6.5 studs)
     -- through the camera's real vertical FOV and viewport height.
@@ -419,7 +425,9 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
     if cfg.Box then
         local cornerLen = math.min(tonumber(cfg.BoxCornerLength) or 6, math.min(width, height) * 0.3)
         local th = tonumber(cfg.BoxThickness) or 2
-        local color = rgb(cfg.BoxR, cfg.BoxG, cfg.BoxB)
+        -- d.color (host-set, optional) tints the box + chams, e.g. the
+        -- friend / moderator colours; labels keep their own colours.
+        local color = d.color or rgb(cfg.BoxR, cfg.BoxG, cfg.BoxB)
         local transp = drawT(cfg.BoxTransparency)
         local L = LINE_TEMPLATE
         L[1][2], L[1][3], L[1][4], L[1][5] = boxX, boxY + cornerLen, boxX, boxY
@@ -452,12 +460,12 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
     -- Chams (Highlight): the multi-select decides which part(s) get
     -- highlighted - any combination; colour, opacity and filled are shared.
     if cfg.ChamsHead == true then
-        applyCham(d, cfg, "HeadHighlight", "HavocESPHeadCham", head, head)
+        applyCham(d, cfg, "HeadHighlight", "HavocESPHeadCham", head, head, d.color)
     elseif d.HeadHighlight then
         d.HeadHighlight.Enabled = false
     end
     if cfg.ChamsBody == true then
-        applyCham(d, cfg, "BodyHighlight", "HavocESPBodyCham", model, model)
+        applyCham(d, cfg, "BodyHighlight", "HavocESPBodyCham", model, model, d.color)
     elseif d.BodyHighlight then
         d.BodyHighlight.Enabled = false
     end
