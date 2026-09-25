@@ -1062,6 +1062,159 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
     return { update = update, row = row, searchText = label }
 end
 
+-- Multi-select list: a row that expands into checkable items - any number of
+-- them can be on at once (unlike a dropdown, which picks one). isOn(item)
+-- reads the state, setOn(item, v) writes it. Returns { update, row,
+-- searchText } like every other control.
+local function makeMultiSelect(parent, label, items, isOn, setOn, opts)
+    opts = opts or {}
+    local row = makeRow(parent, 30)
+
+    -- Holds the expanded list and hides it while the row animates open.
+    local body = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        ClipsDescendants = true,
+        Parent = row,
+    })
+
+    textLabel({
+        Size = UDim2.new(1, -96, 0, 30),
+        Position = UDim2.fromOffset(12, 0),
+        Text = label,
+        Parent = row,
+    })
+
+    local summary = textLabel({
+        Size = UDim2.new(0, 60, 0, 30),
+        Position = UDim2.new(1, -74, 0, 0),
+        Text = "",
+        TextColor3 = THEME.TEXT_DIM,
+        TextSize = 11,
+        Font = FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = row,
+    })
+
+    local chevron = textLabel({
+        Size = UDim2.fromOffset(12, 30),
+        Position = UDim2.new(1, -18, 0, 0),
+        Text = "▼",
+        TextSize = 8,
+        TextColor3 = THEME.TEXT_DIM,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = row,
+    })
+
+    -- Covers the top strip only, so item clicks pass through to the list.
+    local expandBtn = hitButton({ Size = UDim2.new(1, 0, 0, 30), Parent = row })
+
+    local list = create("Frame", {
+        Size = UDim2.new(1, -24, 0, #items * 27),
+        Position = UDim2.fromOffset(12, 34),
+        BackgroundTransparency = 1,
+        Parent = body,
+    })
+    create("UIListLayout", {
+        Padding = UDim.new(0, 3),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = list,
+    })
+
+    local checks = {}
+    local expanded = false
+
+    local function paint()
+        local on = {}
+        for _, item in ipairs(items) do
+            local c = checks[item]
+            local active = (isOn and isOn(item)) == true
+            c.box.BackgroundColor3 = active and THEME.ACCENT or THEME.PANEL_HI
+            c.tickA.Visible = active
+            c.tickB.Visible = active
+            if active then table.insert(on, item) end
+        end
+        summary.Text = #on > 0 and table.concat(on, ", ") or (opts.emptyText or "None")
+        summary.TextColor3 = #on > 0 and THEME.TEXT or THEME.TEXT_DIM
+    end
+
+    for i, item in ipairs(items) do
+        local irow = create("Frame", {
+            Size = UDim2.new(1, 0, 0, 24),
+            LayoutOrder = i,
+            BackgroundColor3 = THEME.PANEL,
+            BorderSizePixel = 0,
+            Parent = list,
+        })
+        corner(irow, 4)
+
+        local box = create("Frame", {
+            Size = UDim2.fromOffset(14, 14),
+            Position = UDim2.fromOffset(6, 5),
+            BackgroundColor3 = THEME.PANEL_HI,
+            BorderSizePixel = 0,
+            Parent = irow,
+        })
+        corner(box, 3); stroke(box, THEME.STROKE)
+
+        -- Tick drawn from two frames: font glyphs are unreliable here.
+        local tickA = create("Frame", {
+            Size = UDim2.fromOffset(6, 2),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, -2, 0.5, 1),
+            Rotation = 45,
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            BorderSizePixel = 0,
+            Parent = box,
+        })
+        corner(tickA, 1)
+        local tickB = create("Frame", {
+            Size = UDim2.fromOffset(10, 2),
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 2, 0.5, -2),
+            Rotation = -45,
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            BorderSizePixel = 0,
+            Parent = box,
+        })
+        corner(tickB, 1)
+
+        textLabel({
+            Size = UDim2.new(1, -30, 1, 0),
+            Position = UDim2.fromOffset(26, 0),
+            Text = item,
+            Parent = irow,
+        })
+
+        local ihit = hitButton({ Parent = irow })
+        ihit.MouseButton1Click:Connect(function()
+            local wasOn = (isOn and isOn(item)) == true
+            if setOn then setOn(item, not wasOn) end
+            hooks.saveDebounced()
+            paint()
+        end)
+        checks[item] = { box = box, tickA = tickA, tickB = tickB }
+    end
+
+    local function setExpanded(state)
+        expanded = state
+        tween(row, 0.18, { Size = UDim2.new(1, 0, 0, state and (34 + #items * 27 + 8) or 30) })
+        tween(chevron, 0.18, { Rotation = state and 180 or 0 })
+        if not state then paint() end
+    end
+
+    hoverTint(expandBtn, row, "PANEL", "PANEL_HI")
+    expandBtn.MouseButton1Click:Connect(function() setExpanded(not expanded) end)
+
+    local function update()
+        if not expanded then paint() end
+    end
+
+    paint()
+    return { update = update, row = row, searchText = label }
+end
+
 -- Keybind row: label + current key + Rebind button + on/off pill.
 -- entry needs `.Desc`, `.Key` and `.Enabled` fields. opts (optional):
 --   locked   - true to refuse toggling (e.g. the menu key)
@@ -2767,6 +2920,7 @@ UILib.makeSlider        = makeSlider
 UILib.makeColorPicker   = makeColorPicker
 UILib.makeKeybindRow    = makeKeybindRow
 UILib.makeDropdown      = makeDropdown
+UILib.makeMultiSelect   = makeMultiSelect
 UILib.makeButton        = makeButton
 UILib.makeInput         = makeInput
 UILib.makeWindow        = makeWindow

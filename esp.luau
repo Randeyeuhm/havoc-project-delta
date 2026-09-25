@@ -24,8 +24,8 @@
       - corner box: 8 Line segments, fixed corner length capped at 30% of
         the box's short side
       - name / health / distance labels (outlined Text)
-      - Highlights (chams) - one picker chooses the part (Head / Body /
-        Both), with shared colour, opacity and hollow settings
+      - Highlights (chams) - a multi-select chooses any parts (Head /
+        Body), with shared colour, opacity and hollow settings
 
     Health works for player rigs (Humanoid) AND vehicle-style NPCs that
     keep health as an attribute on the model / PrimaryPart / Chassis.
@@ -92,7 +92,8 @@ local DEFAULTS = {
 
     -- chams (Highlight) - ONE picker decides what gets highlighted; the
     -- colour/opacity/hollow settings are shared by whatever part(s) are on
-    ChamsPart = "None",   -- None | Head | Body | Both
+    ChamsHead = false,     -- multi-select: any combination of parts
+    ChamsBody = false,
     ChamsHollow = false,
     ChamsTransparency = 0.7,
     ChamsR = 255, ChamsG = 80, ChamsB = 80,
@@ -101,7 +102,6 @@ ESP.DEFAULTS = DEFAULTS
 
 local CHOICES = {
     NameSource = { ["Username"] = true, ["DisplayName"] = true },
-    ChamsPart = { ["None"] = true, ["Head"] = true, ["Body"] = true, ["Both"] = true },
 }
 
 -- Old espui schema fields. The customizer no longer reads them, so they
@@ -134,7 +134,8 @@ local LEGACY_KEYS = {
     "Chams", "ChamsAlwaysOnTop", "ChamsFillTransparency",
     "ChamsOutlineTransparency", "ChamsFillR", "ChamsFillG", "ChamsFillB",
     "ChamsOutlineR", "ChamsOutlineG", "ChamsOutlineB",
-    -- the split head/body chams of esp-v1/v2 (migrated into ChamsPart in fill)
+    -- the split head/body chams of esp-v1/v2 (migrated into ChamsHead/
+    -- ChamsBody in fill)
     "HeadHighlight", "HeadHighlightHollow", "HeadHighlightTransparency",
     "HeadHighlightR", "HeadHighlightG", "HeadHighlightB",
     "BodyHighlight", "BodyHighlightHollow", "BodyHighlightTransparency",
@@ -143,30 +144,34 @@ local LEGACY_KEYS = {
     -- booleans above are migrated from it in fill)
     "ShowCornerBox", "CornerBoxLength", "CornerBoxTransparency",
     "ShowName", "ShowDistance", "ShowHealth",
-    "ShowHeadHighlight", "ShowBodyHighlight",
+    "ShowHeadHighlight", "ShowBodyHighlight", "ChamsPart",
 }
 
 function ESP.fill(cfg)
     if type(cfg) ~= "table" then return cfg end
-    -- Migrate the old split head/body chams into the single ChamsPart picker
-    -- (must run BEFORE the defaults injection below). Project Delta's
-    -- in-script class used the longer ShowHeadHighlight/ShowBodyHighlight
-    -- names - treat those as the same booleans.
-    if cfg.ChamsPart == nil
-       and (cfg.HeadHighlight ~= nil or cfg.BodyHighlight ~= nil
-            or cfg.ShowHeadHighlight ~= nil or cfg.ShowBodyHighlight ~= nil) then
-        local wasHead = cfg.HeadHighlight == true or cfg.ShowHeadHighlight == true
-        local wasBody = cfg.BodyHighlight == true or cfg.ShowBodyHighlight == true
-        if wasHead and wasBody then cfg.ChamsPart = "Both"
-        elseif wasHead then cfg.ChamsPart = "Head"
-        elseif wasBody then cfg.ChamsPart = "Body"
-        else cfg.ChamsPart = "None" end
-        local src = wasBody and "Body" or "Head"
-        cfg.ChamsHollow = cfg[src .. "HighlightHollow"] == true
-        cfg.ChamsTransparency = cfg[src .. "HighlightTransparency"] or 0.7
-        cfg.ChamsR = cfg[src .. "HighlightR"] or 255
-        cfg.ChamsG = cfg[src .. "HighlightG"] or 80
-        cfg.ChamsB = cfg[src .. "HighlightB"] or 80
+    -- Migrate any older chams shape into the independent part toggles:
+    -- esp-v3's single ChamsPart pick, esp-v1/v2's split Head/BodyHighlight
+    -- booleans, and Project Delta's in-script ShowHeadHighlight/
+    -- ShowBodyHighlight names. Colours are only carried over when the old
+    -- props exist, so esp-v3 configs keep the colour they already had.
+    if cfg.ChamsHead == nil and cfg.ChamsBody == nil then
+        local part = cfg.ChamsPart
+        if part ~= nil
+           or cfg.HeadHighlight ~= nil or cfg.BodyHighlight ~= nil
+           or cfg.ShowHeadHighlight ~= nil or cfg.ShowBodyHighlight ~= nil then
+            local wasHead = part == "Head" or part == "Both"
+                or cfg.HeadHighlight == true or cfg.ShowHeadHighlight == true
+            local wasBody = part == "Body" or part == "Both"
+                or cfg.BodyHighlight == true or cfg.ShowBodyHighlight == true
+            cfg.ChamsHead = wasHead
+            cfg.ChamsBody = wasBody
+            local src = (wasBody and "Body" or "Head") .. "Highlight"
+            if cfg[src .. "Hollow"] ~= nil then cfg.ChamsHollow = cfg[src .. "Hollow"] == true end
+            if cfg[src .. "Transparency"] ~= nil then cfg.ChamsTransparency = cfg[src .. "Transparency"] end
+            if cfg[src .. "R"] ~= nil then cfg.ChamsR = cfg[src .. "R"] end
+            if cfg[src .. "G"] ~= nil then cfg.ChamsG = cfg[src .. "G"] end
+            if cfg[src .. "B"] ~= nil then cfg.ChamsB = cfg[src .. "B"] end
+        end
     end
     for k, v in pairs(DEFAULTS) do
         if cfg[k] == nil then cfg[k] = v end
@@ -196,7 +201,8 @@ function ESP.sanitize(cfg)
     cfg.DistanceTransparency = num(cfg.DistanceTransparency, 0, 1, 1)
     cfg.ChamsTransparency = num(cfg.ChamsTransparency, 0, 1, 0.7)
     if CHOICES.NameSource[cfg.NameSource] ~= true then cfg.NameSource = "Username" end
-    if CHOICES.ChamsPart[cfg.ChamsPart] ~= true then cfg.ChamsPart = "None" end
+    cfg.ChamsHead = cfg.ChamsHead == true
+    cfg.ChamsBody = cfg.ChamsBody == true
     return cfg
 end
 
@@ -431,15 +437,14 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
         end
     end
 
-    -- Chams (Highlight): ONE picker (ChamsPart) decides which part(s) get
-    -- highlighted; colour, opacity and hollow are shared.
-    local chams = cfg.ChamsPart
-    if chams == "Head" or chams == "Both" then
+    -- Chams (Highlight): the multi-select decides which part(s) get
+    -- highlighted - any combination; colour, opacity and hollow are shared.
+    if cfg.ChamsHead == true then
         applyCham(d, cfg, "HeadHighlight", "HavocESPHeadCham", head, head)
     elseif d.HeadHighlight then
         d.HeadHighlight.Enabled = false
     end
-    if chams == "Body" or chams == "Both" then
+    if cfg.ChamsBody == true then
         applyCham(d, cfg, "BodyHighlight", "HavocESPBodyCham", model, model)
     elseif d.BodyHighlight then
         d.BodyHighlight.Enabled = false
@@ -1074,6 +1079,16 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
                 end, popupLayer)
         end)
     end
+    local function multiselect(page, text, items, prefix)
+        guard("multiselect " .. text, function()
+            return UILib.makeMultiSelect(page, text, items,
+                function(item) return cfg[prefix .. item] == true end,
+                function(item, on)
+                    cfg[prefix .. item] = on
+                    persist()
+                end)
+        end)
+    end
     local function colorpicker(page, label, prefix)
         guard("colour " .. label, function()
             return UILib.makeColorPicker(page, label, cfg, prefix, persist)
@@ -1147,11 +1162,11 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     -- ---------------- Chams ----------------
     local p6 = pages[6]
     section(p6, "Chams (Highlight)")
-    dropdown(p6, "Part to highlight", "ChamsPart", { "None", "Head", "Body", "Both" })
+    multiselect(p6, "Parts to highlight", { "Head", "Body" }, "Chams")
     toggle(p6, "Hollow (outline only)", "ChamsHollow")
     slider(p6, "Opacity", "ChamsTransparency", 0.05, 0, 1)
     colorpicker(p6, "Chams colour", "Chams")
-    note(p6, "Chams can't render in the preview window - check them in-game.")
+    note(p6, "Tick any parts. Chams can't render in the preview window - check them in-game.")
 
     win.setTab(1)
     print("[esp] settings built (" .. tostring(#controls) .. " controls)")
