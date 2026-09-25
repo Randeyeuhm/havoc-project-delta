@@ -569,18 +569,15 @@ end
 -- ============================================================
 -- TOAST NOTIFICATIONS
 -- ============================================================
+-- The toast UI itself lives in uilib (makeToaster); this is only the host
+-- wiring: one container ScreenGui, the ShowToasts gate and a print
+-- fallback when uilib is missing.
 do
     toastGui = nil
-    local toastOrder = 0
+    local toaster = nil
 
-    -- Used to size each toast to its message. Guarded so a missing service
-    -- cannot take the whole script down at load.
-    local TextService
-    pcall(function() TextService = game:GetService("TextService") end)
-
-    function notify(text)
-        if not Config.Misc.ShowToasts then return end
-        if not toastGui then
+    local function toastParent()
+        if not toastGui or not toastGui.Parent then
             local g = Instance.new("ScreenGui")
             g.Name = "HavocToasts"
             g.ResetOnSpawn = false
@@ -588,104 +585,22 @@ do
             g.DisplayOrder = 10
             local ok = pcall(function() g.Parent = CoreGui end)
             if not ok then g.Parent = LocalPlayer:WaitForChild("PlayerGui") end
-
-            -- Stack container so simultaneous toasts queue vertically instead
-            -- of being drawn on top of one another.
-            local stack = Instance.new("Frame")
-            stack.Name = "Stack"
-            stack.AnchorPoint = Vector2.new(0.5, 0)
-            stack.Position = UDim2.new(0.5, 0, 0.12, 0)
-            -- Wide enough that the widest toast still fits and stays centred
-            -- by the layout below, rather than hanging off one side.
-            stack.Size = UDim2.new(0, 480, 0, 0)
-            stack.AutomaticSize = Enum.AutomaticSize.Y
-            stack.BackgroundTransparency = 1
-            stack.Parent = g
-
-            local lay = Instance.new("UIListLayout")
-            lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
-            lay.SortOrder = Enum.SortOrder.LayoutOrder
-            lay.Padding = UDim.new(0, 6)
-            lay.Parent = stack
-
             toastGui = g
         end
+        return toastGui
+    end
 
-        local stack = toastGui:FindFirstChild("Stack")
-        if not stack then return end
-
-        toastOrder = toastOrder + 1
-
-        -- Measure the message so the pill hugs its content. A fixed-width pill
-        -- left the text stranded on the left of a mostly empty box.
-        local textW = 240
-        if TextService then
-            local ok, bounds = pcall(function()
-                return TextService:GetTextSize(text, 13, Enum.Font.GothamMedium, Vector2.new(400, 1000))
-            end)
-            if ok and bounds then textW = bounds.X end
+    function notify(text)
+        if not Config.Misc.ShowToasts then return end
+        if UILib and UILib.makeToaster then
+            if not toastGui or not toastGui.Parent then
+                toastGui = nil
+                toaster = UILib.makeToaster(toastParent())
+            end
+            toaster(text)
+        else
+            print("[Havoc]", tostring(text))
         end
-
-        local LABEL_X, LABEL_PAD = 22, 14
-        local toastW = math.clamp(textW + LABEL_X + LABEL_PAD + 4, 160, 460)
-
-        local toast = Instance.new("Frame")
-        toast.Size = UDim2.new(0, toastW, 0, 34)
-        toast.BackgroundColor3 = THEME.PANEL
-        toast.BackgroundTransparency = 0.05
-        toast.BorderSizePixel = 0
-        toast.LayoutOrder = toastOrder
-        toast.Parent = stack
-        corner(toast, 8)
-        local border = stroke(toast, THEME.STROKE)
-
-        local accent = Instance.new("Frame")
-        accent.Size = UDim2.new(0, 3, 0, 20)
-        accent.AnchorPoint = Vector2.new(0, 0.5)
-        accent.Position = UDim2.new(0, 10, 0.5, 0)
-        accent.BackgroundColor3 = THEME.ACCENT
-        accent.BorderSizePixel = 0
-        accent.Parent = toast
-        corner(accent, 2)
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(0, toastW - LABEL_X - LABEL_PAD, 1, 0)
-        lbl.Position = UDim2.new(0, LABEL_X, 0, 0)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = text
-        lbl.Font = Enum.Font.GothamMedium
-        lbl.TextSize = 13
-        lbl.TextColor3 = THEME.TEXT
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.TextTruncate = Enum.TextTruncate.AtEnd
-        lbl.Parent = toast
-
-        -- Fade in, hold, fade out - everything fades together so the stroke and
-        -- accent bar do not linger after the panel has gone.
-        toast.BackgroundTransparency = 1
-        lbl.TextTransparency = 1
-        border.Transparency = 1
-        accent.BackgroundTransparency = 1
-        task.spawn(function()
-            for i = 1, 8 do
-                local a = i / 8
-                toast.BackgroundTransparency = 0.05 + (1 - a) * 0.95
-                border.Transparency          = 1 - a
-                accent.BackgroundTransparency = 1 - a
-                lbl.TextTransparency         = 1 - a
-                task.wait(0.015)
-            end
-            task.wait(1.4)
-            for i = 1, 10 do
-                local a = i / 10
-                toast.BackgroundTransparency  = 0.05 + a * 0.95
-                border.Transparency           = a
-                accent.BackgroundTransparency = a
-                lbl.TextTransparency          = a
-                task.wait(0.02)
-            end
-            toast:Destroy()
-        end)
     end
 end
 
