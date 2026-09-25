@@ -457,8 +457,11 @@ local function dragMove(pos)
     local gui = drag.gui
     local size = gui.AbsoluteSize
     if size.X <= 0 or size.Y <= 0 then return end
-    local rel = (pos - gui.AbsolutePosition) / size
-    drag.move(math.clamp(rel.X, 0, 1), math.clamp(rel.Y, 0, 1))
+    local dx = pos.X - gui.AbsolutePosition.X
+    local dy = pos.Y - gui.AbsolutePosition.Y
+    -- rx/ry stay clamped 0..1 for the widgets; dx/dy are the raw pointer
+    -- offsets (the window resize grip needs unclamped growth).
+    drag.move(math.clamp(dx / size.X, 0, 1), math.clamp(dy / size.Y, 0, 1), dx, dy)
 end
 
 local function endDrag()
@@ -2625,6 +2628,42 @@ local function makeWindow(opts)
             TextXAlignment = Enum.TextXAlignment.Right,
             Parent = footer,
         })
+    end
+
+    -- Resize grip (bottom-right): drag to resize the window. The raw
+    -- pointer offset from the frame's AbsolutePosition IS the new size -
+    -- the same coordinate rule the sliders/pickers use on this client.
+    if opts.resizable ~= false then
+        local grip = hitButton({
+            Size = UDim2.fromOffset(18, 18),
+            Position = UDim2.new(1, -7, 1, -7),
+            AnchorPoint = Vector2.new(1, 1),
+            ZIndex = (opts.zindex or 20) + 5,
+            Parent = frame,
+        })
+        for i = 1, 3 do
+            local bar = create("Frame", {
+                Size = UDim2.fromOffset(4 + (i - 1) * 4, 2),
+                Position = UDim2.new(1, -2, 0, 2 + (i - 1) * 5),
+                AnchorPoint = Vector2.new(1, 0),
+                BackgroundColor3 = THEME.TEXT_DIM,
+                BorderSizePixel = 0,
+                ZIndex = (opts.zindex or 20) + 5,
+                Parent = grip,
+            })
+            corner(bar, 1)
+        end
+        grip.InputBegan:Connect(function(input)
+            if not isPointerDown(input) then return end
+            beginDrag(input, frame, function(_, _, dx, dy)
+                local vp = Vector2.new(1920, 1080)
+                local ok, cam = pcall(function() return workspace.CurrentCamera end)
+                if ok and cam then vp = cam.ViewportSize end
+                local w = math.clamp(dx, 320, math.max(320, vp.X - 16))
+                local h = math.clamp(dy, 240, math.max(240, vp.Y - 16))
+                frame.Size = UDim2.fromOffset(math.floor(w), math.floor(h))
+            end)
+        end)
     end
 
     -- Tabs: left rail buttons + one page each.
