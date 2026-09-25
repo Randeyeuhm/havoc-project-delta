@@ -1,1071 +1,258 @@
 --[[
     ============================================
-    ESP CUSTOMIZER + RENDERER  (espui.luau)
+    ESP CUSTOMIZER  (espui.luau)  - v17 "PD core"
     ============================================
 
-    Shared by every Havoc Hub script. Two parts:
+    Thin customizer + host adapter around esp.luau - the shared engine
+    ported from Project Delta's ESP. All drawing lives in the engine;
+    this file only customizes and adapts it:
 
-    • RENDERER - ESPUI.newRenderer(getCfg) returns a renderer that draws a
-      full player ESP (boxes, fills, corners, names, health bars/text,
-      distance, tracers, head dots, skeletons, look lines, off-screen
-      arrows and Highlight chams) from a flat config table. Hosts build a
-      target list each frame and call render(targets, cam, mouse).
+      - ESPUI.newRenderer(getCfg) -> { render(targets, cam, mouse) }
+        Hosts keep their existing target loops (they still handle the
+        raycast "Visible only" filter etc.); the adapter syncs the target
+        models into the engine and renders one frame.
 
-    • CUSTOMIZER UI - ESPUI.open{ cfg, uilib, screenGui, save?, notify? }
-      opens two windows: a PREVIEW window (a real clone of the local
-      character in a ViewportFrame with every ESP element drawn over it,
-      scaled and positioned exactly like in-game) and a SETTINGS window
-      (Box / Name / Health / Distance / Extras / Filters tabs, every option
-      a live row, colour pickers and offsets included).
+      - ESPUI.open{ cfg, uilib, screenGui, save?, notify? }
+        Two windows: a PREVIEW (local character clone + the exact same
+        corner/label maths as the engine) and the SETTINGS window
+        (General / Box / Name / Health / Distance / Highlights).
 
-    Hosts own persistence: ESPUI.fill(cfg) injects defaults for missing
-    keys and ESPUI.sanitize(cfg) repairs invalid enum values.
+    The schema lives in esp.luau: corner box (length/thickness/opacity/
+    colour), name (source/size/opacity/colour), health number, distance in
+    metres, head/body Highlight chams, team check, max distance.
 
-    Target spec (per frame):
-      { key = <unique>, model = <Model|nil>, name = <string>,
-        health = <number>, maxHealth = <number>,
-        headPos/topPos/bottomPos = <Vector3>, distance = <number>,
-        teamColor = <Color3|nil>, lookDir = <Vector3|nil>,
-        skel = { Head=, Torso=, LeftHand=, RightHand=, LeftFoot=, RightFoot= } }
+    Opacity convention everywhere: 1 = fully visible.
 ]]
 
 local Players    = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
 
 local ESPUI = {}
-
--- Bumped whenever behaviour changes. Printed here on load and reported by
--- the loader, so "is my copy actually the new one?" is always answerable
--- from the console.
-ESPUI.VERSION = "v16-callback-id"
+ESPUI.VERSION = "v17-pd-core"
 
 -- ============================================================
--- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
--- makeColorPicker can edit them directly via prefix)
+-- SHARED ENGINE (esp.luau)
 -- ============================================================
--- NOTE: every "*Transparency" field below is OPACITY (1 = fully visible,
--- 0 = invisible). The converters handle the two rendering systems: this
--- executor's Drawing "Transparency" is inverted (1 = visible - see the
--- renderer note), while GUI frames / Highlights use standard transparency.
-local DEFAULTS = {
-    -- master + filters
+-- Same source lookup the game scripts use: the hub loader stashes every
+-- module source in getgenv().HAVOC_HUB_SOURCES; readfile covers manual
+-- runs.
+local function moduleSource(name)
+    local genv = type(getgenv) == "function" and getgenv() or nil
+    local stash = genv and genv.HAVOC_HUB_SOURCES
+    if type(stash) == "table" and type(stash[name]) == "string" and stash[name] ~= "" then
+        return stash[name]
+    end
+    if type(readfile) == "function" then
+        local ok, src = pcall(readfile, name)
+        if ok and type(src) == "string" and src ~= "" then return src end
+    end
+    return nil
+end
+
+local ESP
+do
+    local ok, res = pcall(function()
+        local src = moduleSource("esp.luau")
+        if not src then error("no source (loader stash empty, no local file)") end
+        local chunk, compileErr = loadstring(src, "@esp.luau")
+        if not chunk then error("compile error: " .. tostring(compileErr)) end
+        return chunk()
+    end)
+    if ok and type(res) == "table" then
+        ESP = res
+    else
+        warn("[espui] esp.luau not loaded (" .. tostring(res) .. ") - ESP rendering disabled")
+    end
+end
+
+-- Fallback covers exactly the fields the host scripts read directly, so
+-- their render loops keep working even if the engine failed to load.
+local FALLBACK_DEFAULTS = {
     Enabled = false, TeamCheck = false, VisibleOnly = false,
-    MaxDistance = 2000, UpdateRate = 1, RainbowSpeed = 1,
-
-    -- box
-    Box = true, BoxStyle = "Full", BoxOutline = true, BoxFill = false,
-    BoxThickness = 1, BoxTransparency = 1, BoxFillTransparency = 0.65,
-    BoxCornerLength = 6,
-    BoxColorMode = "Static", BoxR = 255, BoxG = 80, BoxB = 80,
-
-    -- name
-    Name = true, NameAnchor = "Above", NameOffsetX = 0, NameOffsetY = 0,
-    NameSize = 13, NameSource = "Username", NameOutline = true,
-    NameColorMode = "Static", NameR = 235, NameG = 235, NameB = 245,
-
-    -- health
-    Health = true, HealthStyle = "Both",
-    HealthBarAnchor = "Left", HealthBarWidth = 2, HealthBarHeight = 0,
-    HealthBarOutline = true, HealthBarTransparency = 1,
-    HealthColorMode = "Gradient", HealthR = 82, HealthG = 202, HealthB = 128,
-    HealthTextAnchor = "Name", HealthTextOffsetX = 0, HealthTextOffsetY = 0,
-    HealthTextSize = 11, HealthTextFormat = "Value", HealthTextOutline = true,
-    HealthTextColorMode = "Gradient", HealthTextR = 255, HealthTextG = 255, HealthTextB = 255,
-
-    -- distance
-    Distance = true, DistanceAnchor = "Below", DistanceOffsetX = 0, DistanceOffsetY = 0,
-    DistanceSize = 12, DistanceUnit = "Meters", DistanceDecimals = 0, DistanceOutline = true,
-    DistanceColorMode = "Static", DistanceR = 180, DistanceG = 180, DistanceB = 195,
-
-    -- tracers
-    Tracers = false, TracerOrigin = "Bottom", TracerOffsetX = 0, TracerOffsetY = 0,
-    TracerThickness = 1, TracerTransparency = 0.65,
-    TracerColorMode = "Static", TracerR = 255, TracerG = 80, TracerB = 80,
-
-    -- extras
-    HeadDot = false, HeadDotSize = 4,
-    HeadDotColorMode = "Static", HeadDotR = 255, HeadDotG = 255, HeadDotB = 255,
-
-    Skeleton = false, SkeletonThickness = 1, SkeletonTransparency = 0.8,
-    SkeletonColorMode = "Static", SkeletonR = 255, SkeletonG = 255, SkeletonB = 255,
-
-    LookLine = false, LookLineLength = 60, LookLineThickness = 1, LookLineTransparency = 0.5,
-    LookLineColorMode = "Static", LookLineR = 96, LookLineG = 132, LookLineB = 218,
-
-    Arrow = false, ArrowSize = 10, ArrowRadius = 170, ArrowThickness = 1, ArrowTransparency = 0.7,
-    ArrowColorMode = "Static", ArrowR = 255, ArrowG = 80, ArrowB = 80,
-
-    Chams = false, ChamsAlwaysOnTop = true,
-    ChamsFillTransparency = 0.4, ChamsOutlineTransparency = 0.7,
-    ChamsFillR = 255, ChamsFillG = 80, ChamsFillB = 80,
-    ChamsOutlineR = 255, ChamsOutlineG = 120, ChamsOutlineB = 120,
-}
-ESPUI.DEFAULTS = DEFAULTS
-
-local CHOICES = {
-    BoxStyle = { ["Full"] = true, ["Corners"] = true },
-    BoxColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    NameAnchor = { ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
-    NameSource = { ["Username"] = true, ["DisplayName"] = true },
-    NameColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    HealthStyle = { ["Bar"] = true, ["Text"] = true, ["Both"] = true },
-    HealthBarAnchor = { ["Left"] = true, ["Right"] = true, ["Top"] = true, ["Bottom"] = true },
-    HealthColorMode = { ["Gradient"] = true, ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    HealthTextAnchor = { ["Name"] = true, ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
-    HealthTextFormat = { ["Value"] = true, ["Percent"] = true, ["Value/Max"] = true },
-    HealthTextColorMode = { ["Gradient"] = true, ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    DistanceAnchor = { ["Above"] = true, ["Below"] = true, ["Inside"] = true, ["Left"] = true, ["Right"] = true },
-    DistanceUnit = { ["Meters"] = true, ["Studs"] = true, ["Km"] = true },
-    DistanceColorMode = { ["Static"] = true, ["Rainbow"] = true },
-    TracerOrigin = { ["Bottom"] = true, ["Top"] = true, ["Left"] = true, ["Right"] = true, ["Mouse"] = true },
-    TracerColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    HeadDotColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    SkeletonColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    LookLineColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
-    ArrowColorMode = { ["Static"] = true, ["Team"] = true, ["Rainbow"] = true },
+    MaxDistance = 2000, NameSource = "Username",
 }
 
--- Injects any schema key the config is missing (existing values are kept,
--- so older configs migrate in place).
+ESPUI.DEFAULTS = (ESP and ESP.DEFAULTS) or FALLBACK_DEFAULTS
+
 function ESPUI.fill(cfg)
-    for k, v in pairs(DEFAULTS) do
-        if cfg[k] == nil then cfg[k] = v end
+    if ESP then return ESP.fill(cfg) end
+    if type(cfg) == "table" then
+        for k, v in pairs(FALLBACK_DEFAULTS) do
+            if cfg[k] == nil then cfg[k] = v end
+        end
     end
     return cfg
 end
 
--- Repairs invalid enum values (e.g. a hand-edited config).
 function ESPUI.sanitize(cfg)
-    -- The Name tab's "Show health suffix" moved into the Health tab
-    -- (health text position "Name"). Old configs migrate to keep the look.
-    if cfg.NameShowHealth ~= nil then
-        if cfg.NameShowHealth == true then
-            if not cfg.Health then
-                cfg.Health = true
-                cfg.HealthStyle = "Text"
-            elseif cfg.HealthStyle == "Bar" then
-                cfg.HealthStyle = "Both"
-            end
-            cfg.HealthTextAnchor = "Name"
-        end
-        cfg.NameShowHealth = nil
-    end
-    -- The "Fill" style was removed (redundant with the Fill toggle) -
-    -- saved configs migrate to Full + Fill on so the look is unchanged.
-    if cfg.BoxStyle == "Fill" then
-        cfg.BoxStyle = "Full"
-        cfg.BoxFill = true
-    end
-    for field, allowed in pairs(CHOICES) do
-        if not allowed[cfg[field]] then cfg[field] = DEFAULTS[field] end
+    if ESP then return ESP.sanitize(cfg) end
+    if type(cfg) == "table" then
+        cfg.MaxDistance = math.clamp(tonumber(cfg.MaxDistance) or 2000, 100, 10000)
     end
     return cfg
 end
 
--- ============================================================
--- SHARED COLOUR / FORMAT HELPERS  (renderer + preview use the same ones,
--- so the preview matches the game pixel-for-pixel)
--- ============================================================
 function ESPUI.healthColor(frac)
-    frac = math.clamp(frac or 1, 0, 1)
+    if ESP and ESP.healthColor then return ESP.healthColor(frac) end
+    frac = tonumber(frac) or 1
+    if frac > 0.75 then return Color3.fromRGB(82, 202, 128)
+    elseif frac > 0.5 then return Color3.fromRGB(230, 210, 60)
+    elseif frac > 0.25 then return Color3.fromRGB(240, 150, 50)
+    else return Color3.fromRGB(235, 70, 70) end
+end
+
+local function rgb(r, g, b)
     return Color3.fromRGB(
-        math.floor((1 - frac) * 255 + 0.5),
-        math.floor(frac * 255 + 0.5),
-        60
-    )
+        math.clamp(tonumber(r) or 255, 0, 255),
+        math.clamp(tonumber(g) or 255, 0, 255),
+        math.clamp(tonumber(b) or 255, 0, 255))
 end
 
--- Config opacity (1 = fully visible, 0 = invisible) -> per-renderer value:
---   drawT - this executor's Drawing "Transparency" is inverted (1 = fully
---           visible; see the renderer note), so opacity passes through 1:1.
---   guiT  - GUI frames / Highlights use standard transparency (1 = invisible).
-local function drawT(opacity)
-    return math.clamp(opacity or 1, 0, 1)
-end
-
+-- GUI frames / Highlights use standard alpha; the engine's Drawing
+-- converter is its own business (see esp.luau header).
 local function guiT(opacity)
-    return 1 - math.clamp(opacity or 1, 0, 1)
-end
-
--- mode: "Static" | "Team" | "Rainbow" | "Gradient"
--- hue: current rainbow hue (caller adds a per-element offset)
--- frac: health fraction for Gradient mode
-function ESPUI.colorFor(mode, r, g, b, teamColor, hue, frac)
-    if mode == "Team" and teamColor then return teamColor end
-    if mode == "Rainbow" and hue then return Color3.fromHSV(hue % 1, 0.85, 1) end
-    if mode == "Gradient" then return ESPUI.healthColor(frac) end
-    return Color3.fromRGB(r or 255, g or 255, b or 255)
-end
-
-local function formatHealthText(fmt, health, max)
-    health = math.floor((health or 0) + 0.5)
-    if fmt == "Percent" then
-        local pct = (max and max > 0) and (health / max * 100) or 0
-        return tostring(math.floor(pct + 0.5)) .. "%"
-    elseif fmt == "Value/Max" then
-        return tostring(health) .. "/" .. tostring(math.floor((max or 0) + 0.5))
-    end
-    return tostring(health)
-end
-
-local function formatDistance(cfg, dist)
-    dist = dist or 0
-    if cfg.DistanceUnit == "Km" then
-        return string.format("%.2f km", dist / 1000)
-    end
-    local dec = math.clamp(math.floor(cfg.DistanceDecimals or 0), 0, 2)
-    local num = string.format("%." .. tostring(dec) .. "f", dist)
-    return num .. (cfg.DistanceUnit == "Studs" and " studs" or "m")
-end
-
--- Manual offsets are tuned at this reference box height; scaling them with
--- the actual box keeps placements proportional at every distance - a value
--- that looks right up close keeps looking right across the map. The preview
--- uses the same maths, so what you tune there is what the game shows.
-local OFFSET_REF_H = 150
-
-local function offsetScale(h)
-    return math.clamp(h / OFFSET_REF_H, 0.3, 3)
-end
-
--- Corner bracket length: PURE linear scaling (no clamps) so the preview
--- and every in-game distance show the exact same proportions. The slider
--- value is pixels at the 150px reference box; a 1px floor keeps tiny
--- distant boxes from losing their brackets entirely.
-local function cornerLen(value, h)
-    return math.max(value * h / OFFSET_REF_H, 1)
-end
-
--- Text centre point for an anchor around box rect r (text elements use
--- Center=true / AnchorPoint 0.5,0.5, so this returns the centre).
-local function textCenter(anchor, r, offX, offY)
-    local cx, cy = r.x + r.w / 2, r.y + r.h / 2
-    local s = offsetScale(r.h)
-    offX, offY = (offX or 0) * s, (offY or 0) * s
-    if anchor == "Above" then return cx + offX, r.y - 13 + offY end
-    if anchor == "Below" then return cx + offX, r.y + r.h + 5 + offY end
-    if anchor == "Inside" then return cx + offX, r.y + 9 + offY end
-    if anchor == "Left" then return r.x - 40 + offX, cy + offY end
-    if anchor == "Right" then return r.x + r.w + 40 + offX, cy + offY end
-    return cx + offX, r.y - 9 + offY
-end
-
--- Background + fill rectangles for the health bar. Returns bg, fill.
-local function healthBarRects(cfg, r, frac)
-    local vertical = (cfg.HealthBarAnchor == "Left" or cfg.HealthBarAnchor == "Right")
-    local w, h
-    if vertical then
-        w = cfg.HealthBarWidth
-        h = (cfg.HealthBarHeight and cfg.HealthBarHeight > 0) and cfg.HealthBarHeight or r.h
-    else
-        w = r.w
-        h = cfg.HealthBarWidth
-    end
-    local x, y
-    if cfg.HealthBarAnchor == "Left" then x = r.x - 4 - w; y = r.y
-    elseif cfg.HealthBarAnchor == "Right" then x = r.x + r.w + 4; y = r.y
-    elseif cfg.HealthBarAnchor == "Top" then x = r.x; y = r.y - 4 - h
-    else x = r.x; y = r.y + r.h + 4 end
-
-    frac = math.clamp(frac or 1, 0, 1)
-    local fx, fy, fw, fh
-    if vertical then
-        fh = h * frac; fw = w; fx = x; fy = y + (h - fh)
-    else
-        fw = w * frac; fh = h; fx = x; fy = y
-    end
-    return { x = x, y = y, w = w, h = h }, { x = fx, y = fy, w = fw, h = fh }
-end
-
--- The eight bar segments for the "Corners" box style: {x, y, w, h} each,
--- in TL, TR, BL, BR order (horizontal bar then vertical bar per corner).
-local function cornerSpecs(r, cl, t)
-    return {
-        { r.x, r.y, cl, t }, { r.x, r.y, t, cl },
-        { r.x + r.w - cl, r.y, cl, t }, { r.x + r.w - t, r.y, t, cl },
-        { r.x, r.y + r.h - t, cl, t }, { r.x, r.y + r.h - cl, t, cl },
-        { r.x + r.w - cl, r.y + r.h - t, cl, t }, { r.x + r.w - t, r.y + r.h - cl, t, cl },
-    }
+    return 1 - math.clamp(tonumber(opacity) or 1, 0, 1)
 end
 
 -- ============================================================
--- RENDERER
+-- HOST ADAPTER
 -- ============================================================
-local HIDE_FIELDS = {
-    "boxFill", "name", "dist",
-    "boxEdge1", "boxEdge2", "boxEdge3", "boxEdge4",
-    "healthBg", "healthFill", "healthText",
-    "healthEdge1", "healthEdge2", "healthEdge3", "healthEdge4",
-    "headDot", "tracer", "lookLine", "arrow",
-    "corner1", "corner2", "corner3", "corner4",
-    "corner5", "corner6", "corner7", "corner8",
-}
-local SKEL_PAIRS = {
-    { "Head", "Torso" }, { "Torso", "LeftHand" }, { "Torso", "RightHand" },
-    { "Torso", "LeftFoot" }, { "Torso", "RightFoot" },
-}
-
+-- Hosts keep building their target lists each frame ({key, model, ...});
+-- everything visual is derived by the engine from the model itself.
 function ESPUI.newRenderer(getCfg)
-    local R = { cfg = getCfg, cache = {}, broken = false, frame = 0 }
+    local engine = ESP and ESP.new(getCfg) or nil
+    local R = { cfg = getCfg, engine = engine }
 
-    local function hideDrawing(o)
-        if o and o.Visible ~= nil then o.Visible = false end
-    end
-
-    local function hideEntry(e)
-        for _, f in ipairs(HIDE_FIELDS) do hideDrawing(e[f]) end
-        if e.skel then
-            for _, o in ipairs(e.skel) do hideDrawing(o) end
+    function R:render(targets, cam, mouse)
+        if not engine then return end
+        local cfg = getCfg and getCfg() or nil
+        if type(cfg) ~= "table" or not cfg.Enabled then
+            engine:HideAll()
+            return
         end
-    end
-
-    local function destroyEntry(e)
-        for _, f in ipairs(HIDE_FIELDS) do
-            local o = e[f]
-            if o and o.Remove then pcall(function() o:Remove() end) end
-        end
-        if e.skel then
-            for _, o in ipairs(e.skel) do
-                if o and o.Remove then pcall(function() o:Remove() end) end
+        targets = targets or {}
+        local seen = {}
+        for i = 1, #targets do
+            local m = targets[i] and targets[i].model
+            if typeof(m) == "Instance" and m.Parent then
+                seen[m] = true
+                engine:Ensure(m)
             end
         end
-        if e.highlight then pcall(function() e.highlight:Destroy() end) end
+        engine:Prune(seen)
+        engine:Render(cam or workspace.CurrentCamera)
     end
 
     function R:release(key)
-        local e = R.cache[key]
-        if e then
-            destroyEntry(e)
-            R.cache[key] = nil
-        end
-    end
-
-    local function getObj(e, field, ctor)
-        if R.broken then return nil end
-        if e[field] then return e[field] end
-        local ok, obj = pcall(ctor)
-        if not ok then
-            R.broken = true
-            warn("[espui] Drawing failed: " .. tostring(obj))
-            return nil
-        end
-        e[field] = obj
-        return obj
-    end
-
-    -- NOTE: on this executor, Drawing "Transparency" is inverted - 1 renders
-    -- fully visible, 0 renders nothing at all (opacity reaches here via
-    -- drawT). Optional zindex pins render order: box fills pass 0 so the
-    -- brackets/edges always draw on top of them.
-    local function applySquare(e, field, x, y, w, h, color, transparency, filled, thickness, zindex)
-        local o = getObj(e, field, function() return Drawing.new("Square") end)
-        if not o then return end
-        o.Visible = true
-        o.Position = Vector2.new(x, y)
-        o.Size = Vector2.new(math.max(w, 0), math.max(h, 0))
-        o.Color = color
-        o.Transparency = transparency
-        o.Filled = filled and true or false
-        o.Thickness = thickness or 1
-        if zindex then o.ZIndex = zindex end
-    end
-
-    local function applyText(e, field, x, y, text, size, color, outline)
-        local o = getObj(e, field, function()
-            local lbl = Drawing.new("Text")
-            lbl.Center = true
-            lbl.OutlineColor = Color3.new(0, 0, 0)
-            return lbl
-        end)
-        if not o then return end
-        o.Visible = true
-        o.Text = text
-        o.Size = size
-        o.Color = color
-        o.Outline = outline and true or false
-        o.Position = Vector2.new(x, y)
-    end
-
-    local function applyLine(e, field, ax, ay, bx, by, color, thickness, transparency)
-        local o = getObj(e, field, function() return Drawing.new("Line") end)
-        if not o then return end
-        o.Visible = true
-        o.From = Vector2.new(ax, ay)
-        o.To = Vector2.new(bx, by)
-        o.Color = color
-        o.Thickness = thickness or 1
-        o.Transparency = transparency or 1
-    end
-
-    local function updateChams(e, model, cfg)
-        if cfg.Chams and model and model.Parent then
-            if not e.highlight then
-                local ok, hl = pcall(function()
-                    local h = Instance.new("Highlight")
-                    h.Name = "HavocHubCham"
-                    return h
-                end)
-                if not ok then return end
-                e.highlight = hl
-            end
-            local hl = e.highlight
-            hl.Adornee = model
-            if hl.Parent ~= model then hl.Parent = model end
-            hl.FillColor = Color3.fromRGB(cfg.ChamsFillR, cfg.ChamsFillG, cfg.ChamsFillB)
-            hl.FillTransparency = guiT(cfg.ChamsFillTransparency)
-            hl.OutlineColor = Color3.fromRGB(cfg.ChamsOutlineR, cfg.ChamsOutlineG, cfg.ChamsOutlineB)
-            hl.OutlineTransparency = guiT(cfg.ChamsOutlineTransparency)
-            hl.DepthMode = cfg.ChamsAlwaysOnTop
-                and Enum.HighlightDepthMode.AlwaysOnTop
-                or Enum.HighlightDepthMode.Occluded
-        elseif e.highlight then
-            pcall(function() e.highlight:Destroy() end)
-            e.highlight = nil
-        end
-    end
-
-    -- targets: list of target tables (see header). cam: workspace.CurrentCamera.
-    function R:render(targets, cam, mouse)
-        local cfg = R.cfg()
-        if R.broken then return end
-        if not cfg or not cfg.Enabled then
-            for _, e in pairs(R.cache) do
-                hideEntry(e)
-                updateChams(e, nil, { Chams = false })
-            end
-            return
-        end
-
-        R.frame = R.frame + 1
-        local rate = math.clamp(math.floor(cfg.UpdateRate or 1), 1, 4)
-        if rate > 1 and R.frame % rate ~= 0 then return end
-
-        local now = os.clock() * 0.18 * (cfg.RainbowSpeed or 1)
-        local viewport = cam.ViewportSize
-        local seen = {}
-        local style = cfg.BoxStyle
-
-        for i, t in ipairs(targets) do
-            local e = R.cache[t.key]
-            if not e then
-                e = {}
-                R.cache[t.key] = e
-            end
-            seen[t.key] = true
-            e.misses = 0
-
-            local hue = now + i * 0.07
-            updateChams(e, t.model, cfg)
-
-            local tp, onTop = cam:WorldToViewportPoint(t.topPos)
-            local bp, onBot = cam:WorldToViewportPoint(t.bottomPos)
-            local onScreen = tp.Z > 0 and bp.Z > 0 and (onTop or onBot)
-
-            if not onScreen then
-                -- Off-screen: hide everything but the direction arrow.
-                hideEntry(e)
-                if cfg.Arrow then
-                    local rel = cam.CFrame:PointToObjectSpace(t.topPos)
-                    local dir = Vector2.new(rel.X, -rel.Y)
-                    if dir.Magnitude > 0.001 then
-                        dir = dir.Unit
-                        local maxR = math.min(viewport.X, viewport.Y) / 2 - 12
-                        local radius = math.clamp(cfg.ArrowRadius, 30, math.max(maxR, 40))
-                        local center = Vector2.new(viewport.X / 2, viewport.Y / 2) + dir * radius
-                        local perp = Vector2.new(-dir.Y, dir.X)
-                        local size = cfg.ArrowSize
-                        local arrowColor = ESPUI.colorFor(cfg.ArrowColorMode,
-                            cfg.ArrowR, cfg.ArrowG, cfg.ArrowB, t.teamColor, hue)
-                        local o = getObj(e, "arrow", function()
-                            local a = Drawing.new("Triangle")
-                            a.Filled = true
-                            return a
-                        end)
-                        if o then
-                            o.Visible = true
-                            o.PointA = center + dir * size
-                            o.PointB = center - dir * size * 0.4 + perp * size * 0.7
-                            o.PointC = center - dir * size * 0.4 - perp * size * 0.7
-                            o.Color = arrowColor
-                            o.Transparency = drawT(cfg.ArrowTransparency)
-                            o.Thickness = cfg.ArrowThickness
-                        end
-                    end
-                end
-            else
-                local topY = math.min(tp.Y, bp.Y)
-                local botY = math.max(tp.Y, bp.Y)
-                local height = math.max(botY - topY, 8)
-                local width = math.max(height * 0.55, 6)
-                local rect = { x = (tp.X + bp.X) / 2 - width / 2, y = topY, w = width, h = height }
-
-                local boxColor = ESPUI.colorFor(cfg.BoxColorMode,
-                    cfg.BoxR, cfg.BoxG, cfg.BoxB, t.teamColor, hue)
-                local frac = t.maxHealth and t.maxHealth > 0
-                    and math.clamp(t.health / t.maxHealth, 0, 1) or 1
-
-                -- Box: hide every variant first, then draw what the style needs.
-                -- Outlines are LINE objects: outline-mode Squares don't render on
-                -- every client, while lines always do (the same approach Project
-                -- Delta's own boxes use). Fills stay as filled Squares.
-                hideDrawing(e.boxFill)
-                for i = 1, 4 do hideDrawing(e["boxEdge" .. i]) end
-                for c = 1, 8 do hideDrawing(e["corner" .. c]) end
-
-                if cfg.Box then
-                    if style == "Corners" then
-                        -- Fill works with the corners style too - drawn at
-                        -- ZIndex 0 so the brackets always sit on top.
-                        if cfg.BoxFill then
-                            applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, drawT(cfg.BoxFillTransparency), true, 1, 0)
-                        end
-                        -- Corner length scales linearly with box height -
-                        -- exactly the same maths as the preview, so brackets
-                        -- are 1:1 at every distance.
-                        local cl, th = cornerLen(cfg.BoxCornerLength, rect.h), cfg.BoxThickness
-                        local specs = cornerSpecs(rect, cl, th)
-                        local edgeT = drawT(cfg.BoxTransparency)
-                        for c = 1, 8 do
-                            local s = specs[c]
-                            if s[3] >= s[4] then
-                                applyLine(e, "corner" .. c, s[1], s[2] + s[4] / 2, s[1] + s[3], s[2] + s[4] / 2,
-                                    boxColor, th, edgeT)
-                            else
-                                applyLine(e, "corner" .. c, s[1] + s[3] / 2, s[2], s[1] + s[3] / 2, s[2] + s[4],
-                                    boxColor, th, edgeT)
-                            end
-                        end
-                    else
-                        if cfg.BoxFill then
-                            applySquare(e, "boxFill", rect.x, rect.y, rect.w, rect.h,
-                                boxColor, drawT(cfg.BoxFillTransparency), true, 1, 0)
-                        end
-                        if cfg.BoxOutline then
-                            local th = cfg.BoxThickness
-                            local edgeT = drawT(cfg.BoxTransparency)
-                            local x0, y0, x1, y1 = rect.x, rect.y, rect.x + rect.w, rect.y + rect.h
-                            applyLine(e, "boxEdge1", x0, y0, x1, y0, boxColor, th, edgeT)
-                            applyLine(e, "boxEdge2", x0, y1, x1, y1, boxColor, th, edgeT)
-                            applyLine(e, "boxEdge3", x0, y0, x0, y1, boxColor, th, edgeT)
-                            applyLine(e, "boxEdge4", x1, y0, x1, y1, boxColor, th, edgeT)
-                        end
-                    end
-                end
-
-                -- Name (health next to it is drawn by the health text block
-                -- below when its position is "Name")
-                if cfg.Name then
-                    local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
-                    local nameColor = ESPUI.colorFor(cfg.NameColorMode,
-                        cfg.NameR, cfg.NameG, cfg.NameB, t.teamColor, hue)
-                    applyText(e, "name", nx, ny, t.name or "?", cfg.NameSize, nameColor, cfg.NameOutline)
-                else
-                    hideDrawing(e.name)
-                end
-
-                -- Health bar + text
-                if cfg.Health and (cfg.HealthStyle == "Bar" or cfg.HealthStyle == "Both") then
-                    local bg, fill = healthBarRects(cfg, rect, frac)
-                    local barColor = ESPUI.colorFor(cfg.HealthColorMode,
-                        cfg.HealthR, cfg.HealthG, cfg.HealthB, t.teamColor, hue, frac)
-                    applySquare(e, "healthBg", bg.x, bg.y, bg.w, bg.h,
-                        Color3.new(0, 0, 0), 0.5, true, 1)
-                    applySquare(e, "healthFill", fill.x, fill.y, fill.w, fill.h,
-                        barColor, drawT(cfg.HealthBarTransparency), true, 1)
-                    if cfg.HealthBarOutline then
-                        local bt = 0.4
-                        local bx, by, bx1, by1 = bg.x, bg.y, bg.x + bg.w, bg.y + bg.h
-                        applyLine(e, "healthEdge1", bx, by, bx1, by, Color3.new(0, 0, 0), 1, bt)
-                        applyLine(e, "healthEdge2", bx, by1, bx1, by1, Color3.new(0, 0, 0), 1, bt)
-                        applyLine(e, "healthEdge3", bx, by, bx, by1, Color3.new(0, 0, 0), 1, bt)
-                        applyLine(e, "healthEdge4", bx1, by, bx1, by1, Color3.new(0, 0, 0), 1, bt)
-                    else
-                        for i = 1, 4 do hideDrawing(e["healthEdge" .. i]) end
-                    end
-                else
-                    hideDrawing(e.healthBg); hideDrawing(e.healthFill)
-                    for i = 1, 4 do hideDrawing(e["healthEdge" .. i]) end
-                end
-
-                if cfg.Health and (cfg.HealthStyle == "Text" or cfg.HealthStyle == "Both") then
-                    local text = formatHealthText(cfg.HealthTextFormat, t.health, t.maxHealth)
-                    local txtColor = ESPUI.colorFor(cfg.HealthTextColorMode,
-                        cfg.HealthTextR, cfg.HealthTextG, cfg.HealthTextB, t.teamColor, hue, frac)
-                    if cfg.HealthTextAnchor == "Name" then
-                        -- Sits right after the name label (the slot the old
-                        -- "show health suffix" used); centres at the name
-                        -- anchor point when the name itself is hidden.
-                        local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
-                        applyText(e, "healthText", nx, ny, text, cfg.HealthTextSize, txtColor, cfg.HealthTextOutline)
-                        local nameW, textW = 0, 0
-                        if cfg.Name and e.name then
-                            local okb, b = pcall(function() return e.name.TextBounds end)
-                            if okb and b then nameW = b.X end
-                        end
-                        if nameW <= 0 and cfg.Name then nameW = #(t.name or "?") * cfg.NameSize * 0.55 end
-                        if e.healthText then
-                            local okb, b = pcall(function() return e.healthText.TextBounds end)
-                            if okb and b then textW = b.X end
-                        end
-                        if textW <= 0 then textW = #text * cfg.HealthTextSize * 0.55 end
-                        local hx = nx
-                        if cfg.Name then hx = nx + nameW / 2 + 6 + textW / 2 end
-                        if e.healthText then e.healthText.Position = Vector2.new(hx, ny) end
-                    else
-                        local hx, hy = textCenter(cfg.HealthTextAnchor, rect,
-                            cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
-                        applyText(e, "healthText", hx, hy, text, cfg.HealthTextSize, txtColor, cfg.HealthTextOutline)
-                    end
-                else
-                    hideDrawing(e.healthText)
-                end
-
-                -- Distance
-                if cfg.Distance then
-                    local dx, dy = textCenter(cfg.DistanceAnchor, rect, cfg.DistanceOffsetX, cfg.DistanceOffsetY)
-                    local distColor = ESPUI.colorFor(cfg.DistanceColorMode,
-                        cfg.DistanceR, cfg.DistanceG, cfg.DistanceB, nil, hue)
-                    applyText(e, "dist", dx, dy, formatDistance(cfg, t.distance),
-                        cfg.DistanceSize, distColor, cfg.DistanceOutline)
-                else
-                    hideDrawing(e.dist)
-                end
-
-                -- Tracer
-                if cfg.Tracers then
-                    local origin
-                    if cfg.TracerOrigin == "Mouse" and mouse then
-                        origin = mouse
-                    elseif cfg.TracerOrigin == "Top" then
-                        origin = Vector2.new(viewport.X / 2, 0)
-                    elseif cfg.TracerOrigin == "Left" then
-                        origin = Vector2.new(0, viewport.Y / 2)
-                    elseif cfg.TracerOrigin == "Right" then
-                        origin = Vector2.new(viewport.X, viewport.Y / 2)
-                    else
-                        origin = Vector2.new(viewport.X / 2, viewport.Y)
-                    end
-                    origin = origin + Vector2.new(cfg.TracerOffsetX, cfg.TracerOffsetY)
-                    local tracerColor = ESPUI.colorFor(cfg.TracerColorMode,
-                        cfg.TracerR, cfg.TracerG, cfg.TracerB, t.teamColor, hue)
-                    applyLine(e, "tracer", origin.X, origin.Y,
-                        rect.x + rect.w / 2, rect.y + rect.h,
-                        tracerColor, cfg.TracerThickness, drawT(cfg.TracerTransparency))
-                else
-                    hideDrawing(e.tracer)
-                end
-
-                -- Head dot
-                if cfg.HeadDot then
-                    local hp = cam:WorldToViewportPoint(t.headPos)
-                    local o = getObj(e, "headDot", function()
-                        local c = Drawing.new("Circle")
-                        c.Filled = true
-                        c.NumSides = 20
-                        return c
-                    end)
-                    if o then
-                        if hp.Z > 0 then
-                            o.Visible = true
-                            o.Position = Vector2.new(hp.X, hp.Y)
-                            o.Radius = cfg.HeadDotSize
-                            o.Color = ESPUI.colorFor(cfg.HeadDotColorMode,
-                                cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB, t.teamColor, hue)
-                            o.Transparency = 1
-                        else
-                            o.Visible = false
-                        end
-                    end
-                else
-                    hideDrawing(e.headDot)
-                end
-
-                -- Skeleton
-                if cfg.Skeleton and t.skel then
-                    local joints = {}
-                    for j, world in pairs(t.skel) do
-                        local sp = cam:WorldToViewportPoint(world)
-                        if sp.Z > 0 then joints[j] = sp end
-                    end
-                    e.skel = e.skel or {}
-                    local skelColor = ESPUI.colorFor(cfg.SkeletonColorMode,
-                        cfg.SkeletonR, cfg.SkeletonG, cfg.SkeletonB, t.teamColor, hue)
-                    for li, pair in ipairs(SKEL_PAIRS) do
-                        local a, b = joints[pair[1]], joints[pair[2]]
-                        if a and b then
-                            local ln = e.skel[li]
-                            if not ln then
-                                ln = getObj(e, "skelLine" .. li, function()
-                                    return Drawing.new("Line")
-                                end)
-                                e.skel[li] = ln
-                            end
-                            if ln then
-                                ln.Visible = true
-                                ln.From = Vector2.new(a.X, a.Y)
-                                ln.To = Vector2.new(b.X, b.Y)
-                                ln.Color = skelColor
-                                ln.Thickness = cfg.SkeletonThickness
-                                ln.Transparency = drawT(cfg.SkeletonTransparency)
-                            end
-                        elseif e.skel[li] then
-                            hideDrawing(e.skel[li])
-                        end
-                    end
-                elseif e.skel then
-                    for _, o in ipairs(e.skel) do hideDrawing(o) end
-                end
-
-                -- Look line
-                if cfg.LookLine and t.lookDir and t.headPos then
-                    local a = cam:WorldToViewportPoint(t.headPos)
-                    local b = cam:WorldToViewportPoint(t.headPos + t.lookDir * cfg.LookLineLength)
-                    if a.Z > 0 and b.Z > 0 then
-                        local lookColor = ESPUI.colorFor(cfg.LookLineColorMode,
-                            cfg.LookLineR, cfg.LookLineG, cfg.LookLineB, t.teamColor, hue)
-                        applyLine(e, "lookLine", a.X, a.Y, b.X, b.Y,
-                            lookColor, cfg.LookLineThickness, drawT(cfg.LookLineTransparency))
-                    else
-                        hideDrawing(e.lookLine)
-                    end
-                else
-                    hideDrawing(e.lookLine)
-                end
-
-                hideDrawing(e.arrow)
-            end
-        end
-
-        -- Anything not in this frame's list: hide, and recycle after a while.
-        for key, e in pairs(R.cache) do
-            if not seen[key] then
-                hideEntry(e)
-                updateChams(e, nil, { Chams = false })
-                e.misses = (e.misses or 0) + 1
-                if e.misses > 300 then R:release(key) end
-            end
-        end
+        if engine then engine:Remove(key) end
     end
 
     function R:clear()
-        for key in pairs(R.cache) do R:release(key) end
+        if engine then engine:Clear() end
     end
 
     return R
 end
 
 -- ============================================================
--- INLINE SELECTOR  (replaces floating dropdowns: the option list expands
--- INSIDE the row, so its clicks can never fall through to the window below)
+-- DIAGNOSTICS
 -- ============================================================
-local openSelector = nil  -- { close = fn } of the currently expanded one
-
--- File-scope local so the customizer below can call it directly; exported
--- on the table as well for host scripts (a bare call to a table-defined
--- function would be a nil global - that exact bug hid here once).
-local function makeSelector(uilib, parent, label, getItems, getSelected, onSelect)
-    local create, corner, stroke, tween = uilib.create, uilib.corner, uilib.stroke, uilib.tween
-    local THEME, FONTS = uilib.THEME, uilib.FONTS
-    local ITEM_H, GAP = 24, 2
-
-    -- Build on uilib's own row: correct styling and page layout order for
-    -- free, with no probe/destroy tricks in between.
-    local row = uilib.makeRow(parent, 30)
-
-    create("TextLabel", {
-        Size = UDim2.new(1, -164, 1, 0),
-        Position = UDim2.fromOffset(12, 0),
-        BackgroundTransparency = 1,
-        Text = label,
-        TextColor3 = THEME.TEXT,
-        TextSize = 12,
-        Font = FONTS.MEDIUM,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd,
-        Parent = row,
-    })
-
-    local valueChip = create("Frame", {
-        Size = UDim2.fromOffset(128, 22),
-        Position = UDim2.new(1, -140, 0.5, -11),
-        BackgroundColor3 = THEME.PANEL_HI,
-        BorderSizePixel = 0,
-        Parent = row,
-    })
-    corner(valueChip, 4); stroke(valueChip, THEME.STROKE)
-    local valueLbl = create("TextLabel", {
-        Size = UDim2.new(1, -26, 1, 0),
-        Position = UDim2.fromOffset(8, 0),
-        BackgroundTransparency = 1,
-        Text = "—",
-        TextColor3 = THEME.TEXT,
-        TextSize = 11,
-        Font = FONTS.MEDIUM,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd,
-        Parent = valueChip,
-    })
-    local arrow = create("TextLabel", {
-        Size = UDim2.fromOffset(12, 22),
-        Position = UDim2.new(1, -18, 0, 0),
-        BackgroundTransparency = 1,
-        Text = "▼",
-        TextColor3 = THEME.TEXT_DIM,
-        TextSize = 8,
-        TextXAlignment = Enum.TextXAlignment.Center,
-        Parent = valueChip,
-    })
-
-    -- The expanding list, clipped by this body while the row tweens open.
-    local body = create("Frame", {
-        Size = UDim2.new(1, -16, 0, 0),
-        Position = UDim2.fromOffset(8, 34),
-        BackgroundTransparency = 1,
-        ClipsDescendants = true,
-        Visible = false,
-        Parent = row,
-    })
-    create("UIListLayout", {
-        Padding = UDim.new(0, GAP),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = body,
-    })
-
-    local headHit = create("TextButton", {
-        Size = UDim2.new(1, 0, 0, 30),
-        BackgroundTransparency = 1,
-        AutoButtonColor = false,
-        Text = "",
-        Parent = row,
-    })
-
-    local itemButtons, itemNames = {}, {}
-    local open = false
-    local collapse
-
-    local function update()
-        local sel = getSelected()
-        local text = (sel ~= nil and sel ~= "") and tostring(sel) or "—"
-        if valueLbl.Text ~= text then valueLbl.Text = text end
-        if open then
-            for i, b in ipairs(itemButtons) do
-                b.BackgroundColor3 = (itemNames[i] == sel) and THEME.ACCENT or THEME.PANEL_HI
-            end
-        end
-    end
-
-    local function buildItems()
-        for _, b in ipairs(itemButtons) do b:Destroy() end
-        itemButtons, itemNames = {}, {}
-        local items = getItems() or {}
-        for i, name in ipairs(items) do
-            local isSel = (name == getSelected())
-            local b = create("TextButton", {
-                Size = UDim2.new(1, 0, 0, ITEM_H),
-                LayoutOrder = i,
-                BackgroundColor3 = isSel and THEME.ACCENT or THEME.PANEL_HI,
-                BorderSizePixel = 0,
-                AutoButtonColor = false,
-                Text = tostring(name),
-                TextColor3 = THEME.TEXT,
-                TextSize = 11,
-                Font = FONTS.MEDIUM,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                TextTruncate = Enum.TextTruncate.AtEnd,
-                Parent = body,
-            })
-            corner(b, 4)
-            create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 6), Parent = b })
-            b.MouseButton1Click:Connect(function()
-                onSelect(name)
-                collapse()
-                update()
-            end)
-            itemButtons[i] = b
-            itemNames[i] = name
-        end
-        return #items
-    end
-
-    collapse = function()
-        if not open then return end
-        open = false
-        body.Visible = false
-        tween(row, 0.15, { Size = UDim2.new(1, 0, 0, 30) })
-        tween(arrow, 0.12, { Rotation = 0 })
-        if openSelector and openSelector.close == collapse then openSelector = nil end
-    end
-
-    local function expand()
-        if openSelector and openSelector.close ~= collapse then
-            openSelector.close()
-        end
-        local n = buildItems()
-        if n == 0 then return end
-        local h = n * ITEM_H + math.max(n - 1, 0) * GAP + 8
-        body.Size = UDim2.new(1, -16, 0, h)
-        body.Visible = true
-        open = true
-        openSelector = { close = collapse }
-        tween(row, 0.15, { Size = UDim2.new(1, 0, 0, 40 + h) })
-        tween(arrow, 0.12, { Rotation = 180 })
-    end
-
-    headHit.MouseButton1Click:Connect(function()
-        if open then collapse() else expand() end
-    end)
-    headHit.MouseEnter:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL_HI }) end)
-    headHit.MouseLeave:Connect(function() tween(row, 0.1, { BackgroundColor3 = THEME.PANEL }) end)
-
-    pcall(update)
-    return { update = update, row = row, searchText = label }
-end
-ESPUI.makeSelector = makeSelector
-
--- ============================================================
--- DRAWING PRIMITIVE TEST  (diagnostics)
--- ============================================================
--- Draws one of each Drawing primitive with a number label for ~12 seconds.
--- Whatever is missing from the screen is exactly what this client cannot
--- render - the preview window uses GUI frames so it can look fine while an
--- in-game Drawing shape silently draws nothing (this bit us with box
--- outlines: the fix is to build outlines from Lines, which always render).
+-- Draws one of each shape with a number for 12 seconds - whatever is
+-- missing from the screenshot is what this client cannot render.
 function ESPUI.primitiveTest()
-    print(("[espui] primitive test drawn (build %s) - screenshot the numbered shapes"):format(ESPUI.VERSION))
     local objs = {}
     local function keep(o)
-        table.insert(objs, o)
-        return o
+        if o then table.insert(objs, o) end
     end
-    local function item(n, fn)
-        local ok, err = pcall(fn)
-        if not ok then
-            warn(("[espui] primitive test #%d failed: %s"):format(n, tostring(err)))
-        end
-    end
-    local function label(n, text, x, y)
-        item(n, function()
-            local t = keep(Drawing.new("Text"))
-            t.Text = tostring(n) .. " " .. text
-            t.Size = 14
-            t.Center = false
-            t.Outline = true
-            t.Color = Color3.new(1, 1, 1)
-            t.Position = Vector2.new(x, y)
-            t.Visible = true
-        end)
-    end
-
-    local x0, y0, w, h, gap = 70, 60, 84, 44, 62
-    local lx = x0 + w + 14
-
-    item(1, function()
-        label(1, "filled Square", lx, y0 + h / 2 - 9)
-        local s = keep(Drawing.new("Square"))
-        s.Position = Vector2.new(x0, y0)
-        s.Size = Vector2.new(w, h)
-        s.Filled = true
-        s.Color = Color3.fromRGB(255, 60, 60)
-        s.Transparency = 1
-        s.Visible = true
-    end)
-
-    item(2, function()
-        label(2, "outline Square", lx, y0 + gap + h / 2 - 9)
-        local s = keep(Drawing.new("Square"))
-        s.Position = Vector2.new(x0, y0 + gap)
-        s.Size = Vector2.new(w, h)
-        s.Filled = false
-        s.Thickness = 2
-        s.Color = Color3.fromRGB(60, 255, 60)
-        s.Transparency = 1
-        s.Visible = true
-    end)
-
-    item(3, function()
-        label(3, "Line rectangle", lx, y0 + gap * 2 + h / 2 - 9)
-        local ly = y0 + gap * 2
-        local edges = {
-            { x0, ly, x0 + w, ly },
-            { x0 + w, ly, x0 + w, ly + h },
-            { x0 + w, ly + h, x0, ly + h },
-            { x0, ly + h, x0, ly },
-        }
-        for _, e in ipairs(edges) do
-            local ln = keep(Drawing.new("Line"))
-            ln.From = Vector2.new(e[1], e[2])
-            ln.To = Vector2.new(e[3], e[4])
-            ln.Thickness = 2
-            ln.Color = Color3.fromRGB(80, 140, 255)
-            ln.Transparency = 1
-            ln.Visible = true
-        end
-    end)
-
-    item(4, function()
-        label(4, "filled Quad", lx, y0 + gap * 3 + h / 2 - 9)
-        local q = keep(Drawing.new("Quad"))
-        local qy = y0 + gap * 3
-        q.PointA = Vector2.new(x0, qy)
-        q.PointB = Vector2.new(x0 + w, qy)
-        q.PointC = Vector2.new(x0 + w, qy + h)
-        q.PointD = Vector2.new(x0, qy + h)
-        q.Filled = true
-        q.Color = Color3.fromRGB(255, 220, 60)
-        q.Transparency = 1
-        q.Visible = true
-    end)
-
-    item(5, function()
-        label(5, "outline Quad", lx, y0 + gap * 4 + h / 2 - 9)
-        local q = keep(Drawing.new("Quad"))
-        local qy = y0 + gap * 4
-        q.PointA = Vector2.new(x0, qy)
-        q.PointB = Vector2.new(x0 + w, qy)
-        q.PointC = Vector2.new(x0 + w, qy + h)
-        q.PointD = Vector2.new(x0, qy + h)
-        q.Filled = false
-        q.Thickness = 2
-        q.Color = Color3.fromRGB(255, 130, 60)
-        q.Transparency = 1
-        q.Visible = true
-    end)
-
-    item(6, function()
-        label(6, "filled Circle", lx, y0 + gap * 5 + h / 2 - 9)
-        local c = keep(Drawing.new("Circle"))
-        c.Position = Vector2.new(x0 + w / 2, y0 + gap * 5 + h / 2)
-        c.Radius = h / 2
-        c.NumSides = 24
-        c.Filled = true
-        c.Color = Color3.fromRGB(80, 220, 220)
-        c.Transparency = 1
-        c.Visible = true
-    end)
-
-    item(7, function()
-        label(7, "filled Triangle", lx, y0 + gap * 6 + h / 2 - 9)
-        local t = keep(Drawing.new("Triangle"))
-        local ty = y0 + gap * 6
-        t.PointA = Vector2.new(x0 + w / 2, ty)
-        t.PointB = Vector2.new(x0 + w, ty + h)
-        t.PointC = Vector2.new(x0, ty + h)
-        t.Filled = true
-        t.Color = Color3.fromRGB(255, 80, 220)
-        t.Transparency = 1
+    local function numLabel(text, x, y)
+        local ok, t = pcall(Drawing.new, "Text")
+        if not ok or not t then return end
+        t.Text = text
+        t.Size = 16
+        t.Color = Color3.fromRGB(255, 255, 255)
+        t.Position = Vector2.new(x, y)
+        t.Outline = true
+        t.Center = false
         t.Visible = true
-    end)
+        keep(t)
+    end
+    local white = Color3.fromRGB(255, 255, 255)
+    local y = math.max(140, math.floor((workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize.Y or 600) * 0.22))
 
-    task.delay(12, function()
-        for _, o in ipairs(objs) do
+    do -- 1: filled Square
+        local ok, sq = pcall(Drawing.new, "Square")
+        if ok and sq then
+            sq.Filled = true
+            sq.Size = Vector2.new(60, 60)
+            sq.Position = Vector2.new(60, y)
+            sq.Color = Color3.fromRGB(255, 80, 80)
+            sq.Transparency = 1
+            sq.Visible = true
+            keep(sq)
+        end
+        numLabel("1 square", 60, y - 22)
+    end
+    do -- 2: line rectangle (4 Line objects)
+        local pts = {
+            { 160, y, 220, y }, { 220, y, 220, y + 60 },
+            { 220, y + 60, 160, y + 60 }, { 160, y + 60, 160, y },
+        }
+        for i = 1, 4 do
+            local ok, l = pcall(Drawing.new, "Line")
+            if ok and l then
+                l.From = Vector2.new(pts[i][1], pts[i][2])
+                l.To = Vector2.new(pts[i][3], pts[i][4])
+                l.Color = white
+                l.Thickness = 2
+                l.Transparency = 1
+                l.Visible = true
+                keep(l)
+            end
+        end
+        numLabel("2 lines", 160, y - 22)
+    end
+    do -- 3: filled Circle
+        local ok, c = pcall(Drawing.new, "Circle")
+        if ok and c then
+            c.Filled = true
+            c.NumSides = 64
+            c.Radius = 30
+            c.Position = Vector2.new(320, y + 30)
+            c.Color = Color3.fromRGB(80, 180, 255)
+            c.Transparency = 1
+            c.Visible = true
+            keep(c)
+        end
+        numLabel("3 circle", 290, y - 22)
+    end
+    do -- 4: filled Triangle
+        local ok, tr = pcall(Drawing.new, "Triangle")
+        if ok and tr then
+            tr.PointA = Vector2.new(400, y)
+            tr.PointB = Vector2.new(370, y + 60)
+            tr.PointC = Vector2.new(430, y + 60)
+            tr.Color = Color3.fromRGB(120, 255, 120)
+            tr.Transparency = 1
+            tr.Visible = true
+            keep(tr)
+        end
+        numLabel("4 triangle", 370, y - 22)
+    end
+    numLabel("5 text + outline", 470, y)
+
+    print(("[espui] primitive test drawn (build %s) - screenshot the numbered shapes"):format(ESPUI.VERSION))
+    task.spawn(function()
+        task.wait(12)
+        for i = 1, #objs do
+            local o = objs[i]
             pcall(function() o:Remove() end)
         end
     end)
 end
 
 -- ============================================================
--- CUSTOMIZER UI  (preview window + settings window)
+-- PREVIEW WINDOW
 -- ============================================================
 local OPEN = { ui = nil }
 
@@ -1092,12 +279,13 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         ZIndex = 1,
         Parent = preview,
     })
-    corner(vp, 8); stroke(vp, THEME.STROKE)
+    corner(vp, 8)
+    stroke(vp, THEME.STROKE)
 
     local vpCam = create("Camera", {})
 
-    -- Overlay: every ESP element, drawn over the viewport like it would be
-    -- over the game.
+    -- Overlay: the same elements the engine draws in-game, laid over the
+    -- viewport so the preview reads like a live screenshot.
     local overlay = create("Frame", {
         Size = vp.Size,
         Position = vp.Position,
@@ -1110,7 +298,7 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
     -- otherwise a classic blocky stand-in.
     local model
     do
-        local char = Players.LocalPlayer.Character
+        local char = LocalPlayer.Character
         if char then
             local ok, clone = pcall(function() return char:Clone() end)
             if ok and clone then model = clone end
@@ -1151,8 +339,8 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
 
     -- Frame the dummy: measure it once, then aim a pinhole camera at its
     -- centre from the front. ViewportFrame cameras do not map their
-    -- WorldToViewportPoint to frame pixels, so the overlay projection below
-    -- is done manually with this camera instead.
+    -- WorldToViewportPoint to frame pixels, so the overlay projection
+    -- below is done manually with this camera instead.
     local modelCF, modelSize
     do
         local ok, cf, sz = pcall(function()
@@ -1181,110 +369,78 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
         )
     end
 
-    -- Element frames (positioned every update from the shared layout math).
-    local el = {}
+    -- Element frames (positioned every update with the same maths as the
+    -- engine).
+    local el = { corners = {} }
     local function mkFrame(extra)
         local f = create("Frame", extra)
         f.Visible = false
         return f
     end
-    local function mkLabel(extra)
-        local l = create("TextLabel", extra)
-        l.BackgroundTransparency = 1
-        l.AnchorPoint = Vector2.new(0.5, 0.5)
-        l.Font = FONTS.MEDIUM
+    local function mkLabel(text, size)
+        local l = create("TextLabel", {
+            Text = text,
+            TextSize = size,
+            BackgroundTransparency = 1,
+            AnchorPoint = Vector2.new(0.5, 0),
+            Font = FONTS.MEDIUM,
+            ZIndex = 6,
+            Parent = overlay,
+        })
         l.Visible = false
+        stroke(l, Color3.new(0, 0, 0))
         return l
     end
-
-    el.fill = mkFrame({ BorderSizePixel = 0, BackgroundColor3 = THEME.PANEL, Parent = overlay })
-    corner(el.fill, 2)
-    el.strokeFrame = mkFrame({ BackgroundTransparency = 1, Parent = overlay })
-    el.stroke = UILib.stroke(el.strokeFrame, THEME.TEXT)
-    el.corners = {}
     for i = 1, 8 do
-        el.corners[i] = mkFrame({ BorderSizePixel = 0, BackgroundColor3 = THEME.TEXT, Parent = overlay })
+        el.corners[i] = mkFrame({
+            BorderSizePixel = 0,
+            BackgroundColor3 = Color3.fromRGB(255, 80, 80),
+            ZIndex = 6,
+            Parent = overlay,
+        })
     end
-    el.name = mkLabel({ Text = "DemoPlayer", TextSize = 13, Parent = overlay })
-    el.nameStroke = stroke(el.name, Color3.new(0, 0, 0))
-    el.dist = mkLabel({ Text = "42m", TextSize = 12, Parent = overlay })
-    el.distStroke = stroke(el.dist, Color3.new(0, 0, 0))
-    el.healthBg = mkFrame({ BorderSizePixel = 0, BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.5, Parent = overlay })
-    el.healthFill = mkFrame({ BorderSizePixel = 0, BackgroundColor3 = THEME.GREEN, Parent = overlay })
-    el.healthBorder = mkFrame({ BackgroundTransparency = 1, Parent = overlay })
-    el.healthBorderStroke = stroke(el.healthBorder, Color3.new(0, 0, 0))
-    el.healthText = mkLabel({ Text = "72", TextSize = 11, Parent = overlay })
-    el.healthTextStroke = stroke(el.healthText, Color3.new(0, 0, 0))
-    el.dot = mkFrame({ BorderSizePixel = 0, Parent = overlay })
-    corner(el.dot, UDim.new(0.5, 0))
-    el.tracer = mkFrame({ BorderSizePixel = 0, Parent = overlay })
-    el.skel = {}
-    for i = 1, 5 do
-        el.skel[i] = mkFrame({ BorderSizePixel = 0, Parent = overlay })
-    end
-
-    local function placeLine(frame, ax, ay, bx, by, thickness, color, transparency)
-        local dx, dy = bx - ax, by - ay
-        local len = math.sqrt(dx * dx + dy * dy)
-        frame.AnchorPoint = Vector2.new(0, 0.5)
-        frame.Position = UDim2.fromOffset(ax, ay)
-        frame.Size = UDim2.fromOffset(len, thickness)
-        frame.Rotation = math.deg(math.atan2(dy, dx))
-        frame.BackgroundColor3 = color
-        frame.BackgroundTransparency = transparency
-    end
+    el.name = mkLabel("DemoPlayer", 13)
+    el.health = mkLabel("72", 11)
+    el.dist = mkLabel("42m", 12)
 
     local function updatePreview()
-        local lp = Players.LocalPlayer
-        local demoTeam = (lp.Team and lp.Team.TeamColor.Color) or Color3.fromRGB(255, 80, 80)
-        local now = os.clock() * 0.18 * (cfg.RainbowSpeed or 1)
-
         -- Box rect: project the dummy's bounding box through the preview
-        -- camera (manual pinhole projection - ViewportFrame cameras don't
-        -- map WorldToViewportPoint to frame pixels).
+        -- camera (manual pinhole projection - see projectPoint above).
         local rect
         if modelCF and modelSize then
             local top = projectPoint(modelCF.Position + Vector3.new(0, modelSize.Y / 2, 0))
             local bot = projectPoint(modelCF.Position - Vector3.new(0, modelSize.Y / 2, 0))
             if top and bot then
                 local h = math.max(bot.Y - top.Y, 40)
-                -- Fixed 0.55 aspect - the exact width rule the in-game
-                -- renderer uses, so the preview box is 1:1 with the game.
-                local w = math.max(h * 0.55, 6)
+                -- Project Delta's box proportions: 4.5 wide x 6.5 tall.
+                local w = h * (4.5 / 6.5)
                 rect = { x = (top.X + bot.X) / 2 - w / 2, y = top.Y, w = w, h = h }
             end
         end
         if not rect then
             local szp = vp.AbsoluteSize
             local h = math.max(szp.Y * 0.62, 60)
-            local w = h * 0.55
+            local w = h * (4.5 / 6.5)
             rect = { x = szp.X / 2 - w / 2, y = szp.Y * 0.16, w = w, h = h }
         end
 
-        local style = cfg.BoxStyle
-        local boxColor = ESPUI.colorFor(cfg.BoxColorMode, cfg.BoxR, cfg.BoxG, cfg.BoxB, demoTeam, now)
+        local boxColor = rgb(cfg.BoxR, cfg.BoxG, cfg.BoxB)
 
-        -- Box
-        local showFill = cfg.Box and cfg.BoxFill
-        el.fill.Visible = showFill
-        if showFill then
-            el.fill.Position = UDim2.fromOffset(rect.x, rect.y)
-            el.fill.Size = UDim2.fromOffset(rect.w, rect.h)
-            el.fill.BackgroundColor3 = boxColor
-            el.fill.BackgroundTransparency = guiT(cfg.BoxFillTransparency)
-        end
-        local showOutline = cfg.Box and cfg.BoxOutline and style ~= "Corners"
-        el.strokeFrame.Visible = showOutline
-        if showOutline then
-            el.strokeFrame.Position = UDim2.fromOffset(rect.x, rect.y)
-            el.strokeFrame.Size = UDim2.fromOffset(rect.w, rect.h)
-            el.stroke.Color = boxColor
-            el.stroke.Thickness = cfg.BoxThickness
-            el.stroke.Transparency = guiT(cfg.BoxTransparency)
-        end
-        local showCorners = cfg.Box and style == "Corners"
-        if showCorners then
-            local specs = cornerSpecs(rect, cornerLen(cfg.BoxCornerLength, rect.h), cfg.BoxThickness)
+        -- Corner box: the engine's exact 8-segment template, as pixel rects.
+        if cfg.Box then
+            local L = math.min(tonumber(cfg.BoxCornerLength) or 6, math.min(rect.w, rect.h) * 0.3)
+            local th = tonumber(cfg.BoxThickness) or 2
+            local cx, cy = rect.x + rect.w, rect.y + rect.h
+            local specs = {
+                { rect.x - th / 2, rect.y, th, L },        -- TL vertical
+                { rect.x, rect.y - th / 2, L, th },        -- TL horizontal
+                { cx - th / 2, rect.y, th, L },            -- TR vertical
+                { cx - L, rect.y - th / 2, L, th },        -- TR horizontal
+                { rect.x - th / 2, cy - L, th, L },        -- BL vertical
+                { rect.x, cy - th / 2, L, th },            -- BL horizontal
+                { cx - th / 2, cy - L, th, L },            -- BR vertical
+                { cx - L, cy - th / 2, L, th },            -- BR horizontal
+            }
             for i = 1, 8 do
                 local c = el.corners[i]
                 local s = specs[i]
@@ -1298,118 +454,32 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
             for i = 1, 8 do el.corners[i].Visible = false end
         end
 
-        -- Name (health next to it comes from the health text block below)
-        el.name.Visible = cfg.Name
+        -- Name above the box, health above the name, distance below the
+        -- box - the same anchors the engine uses.
+        local midX = rect.x + rect.w / 2
+        el.name.Visible = cfg.Name and true or false
         if cfg.Name then
             el.name.Text = "DemoPlayer"
-            el.name.TextSize = cfg.NameSize
-            el.name.TextColor3 = ESPUI.colorFor(cfg.NameColorMode,
-                cfg.NameR, cfg.NameG, cfg.NameB, demoTeam, now)
-            el.nameStroke.Enabled = cfg.NameOutline and true or false
-            local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
-            el.name.Position = UDim2.fromOffset(nx, ny)
+            el.name.TextSize = tonumber(cfg.NameSize) or 13
+            el.name.TextColor3 = rgb(cfg.NameR, cfg.NameG, cfg.NameB)
+            el.name.TextTransparency = guiT(cfg.NameTransparency)
+            el.name.Position = UDim2.fromOffset(midX, rect.y - 20)
         end
-
-        -- Health (demo: 72 / 100)
-        local frac = 0.72
-        local showBar = cfg.Health and (cfg.HealthStyle == "Bar" or cfg.HealthStyle == "Both")
-        el.healthBg.Visible = showBar
-        el.healthFill.Visible = showBar
-        el.healthBorder.Visible = showBar and cfg.HealthBarOutline
-        if showBar then
-            local bg, fill = healthBarRects(cfg, rect, frac)
-            local barColor = ESPUI.colorFor(cfg.HealthColorMode,
-                cfg.HealthR, cfg.HealthG, cfg.HealthB, demoTeam, now, frac)
-            el.healthBg.Position = UDim2.fromOffset(bg.x, bg.y)
-            el.healthBg.Size = UDim2.fromOffset(bg.w, bg.h)
-            el.healthBg.BackgroundTransparency = 0.5
-            el.healthFill.Position = UDim2.fromOffset(fill.x, fill.y)
-            el.healthFill.Size = UDim2.fromOffset(fill.w, fill.h)
-            el.healthFill.BackgroundColor3 = barColor
-            el.healthFill.BackgroundTransparency = guiT(cfg.HealthBarTransparency)
-            el.healthBorder.Position = UDim2.fromOffset(bg.x, bg.y)
-            el.healthBorder.Size = UDim2.fromOffset(bg.w, bg.h)
-            el.healthBorderStroke.Transparency = 0.3
+        el.health.Visible = cfg.Health and true or false
+        if cfg.Health then
+            el.health.Text = "72"
+            el.health.TextSize = tonumber(cfg.HealthSize) or 11
+            el.health.TextColor3 = ESPUI.healthColor(0.72)
+            el.health.TextTransparency = guiT(cfg.HealthTransparency)
+            el.health.Position = UDim2.fromOffset(midX, rect.y - 30)
         end
-        local showHealthText = cfg.Health and (cfg.HealthStyle == "Text" or cfg.HealthStyle == "Both")
-        el.healthText.Visible = showHealthText
-        if showHealthText then
-            el.healthText.Text = formatHealthText(cfg.HealthTextFormat, 72, 100)
-            el.healthText.TextSize = cfg.HealthTextSize
-            el.healthText.TextColor3 = ESPUI.colorFor(cfg.HealthTextColorMode,
-                cfg.HealthTextR, cfg.HealthTextG, cfg.HealthTextB, demoTeam, now, frac)
-            el.healthTextStroke.Enabled = cfg.HealthTextOutline and true or false
-            if cfg.HealthTextAnchor == "Name" then
-                -- Right after the name label (same maths as the renderer).
-                local nx, ny = textCenter(cfg.NameAnchor, rect, cfg.NameOffsetX, cfg.NameOffsetY)
-                local hx = nx
-                if cfg.Name then
-                    hx = nx + el.name.TextBounds.X / 2 + 6 + el.healthText.TextBounds.X / 2
-                end
-                el.healthText.Position = UDim2.fromOffset(hx, ny)
-            else
-                local hx, hy = textCenter(cfg.HealthTextAnchor, rect, cfg.HealthTextOffsetX, cfg.HealthTextOffsetY)
-                el.healthText.Position = UDim2.fromOffset(hx, hy)
-            end
-        end
-
-        -- Distance
-        el.dist.Visible = cfg.Distance
+        el.dist.Visible = cfg.Distance and true or false
         if cfg.Distance then
-            el.dist.Text = formatDistance(cfg, 42)
-            el.dist.TextSize = cfg.DistanceSize
-            el.dist.TextColor3 = ESPUI.colorFor(cfg.DistanceColorMode,
-                cfg.DistanceR, cfg.DistanceG, cfg.DistanceB, nil, now)
-            el.distStroke.Enabled = cfg.DistanceOutline and true or false
-            local dx, dy = textCenter(cfg.DistanceAnchor, rect, cfg.DistanceOffsetX, cfg.DistanceOffsetY)
-            el.dist.Position = UDim2.fromOffset(dx, dy)
-        end
-
-        -- Tracer (origin mirrors the in-game screen edges inside the preview)
-        el.tracer.Visible = cfg.Tracers
-        if cfg.Tracers then
-            local ax, ay
-            local szp = vp.AbsoluteSize
-            if cfg.TracerOrigin == "Top" then ax, ay = szp.X / 2, 0
-            elseif cfg.TracerOrigin == "Left" then ax, ay = 0, szp.Y / 2
-            elseif cfg.TracerOrigin == "Right" then ax, ay = szp.X, szp.Y / 2
-            else ax, ay = szp.X / 2, szp.Y end
-            ax, ay = ax + cfg.TracerOffsetX, ay + cfg.TracerOffsetY
-            local tracerColor = ESPUI.colorFor(cfg.TracerColorMode,
-                cfg.TracerR, cfg.TracerG, cfg.TracerB, demoTeam, now)
-            placeLine(el.tracer, ax, ay, rect.x + rect.w / 2, rect.y + rect.h,
-                cfg.TracerThickness, tracerColor, guiT(cfg.TracerTransparency))
-        end
-
-        -- Head dot
-        el.dot.Visible = cfg.HeadDot
-        if cfg.HeadDot then
-            local d = cfg.HeadDotSize
-            el.dot.Size = UDim2.fromOffset(d * 2, d * 2)
-            el.dot.Position = UDim2.fromOffset(rect.x + rect.w / 2, rect.y + rect.h * 0.08)
-            el.dot.BackgroundColor3 = ESPUI.colorFor(cfg.HeadDotColorMode,
-                cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB, demoTeam, now)
-        end
-
-        -- Skeleton (approximate joints in box space)
-        for i = 1, 5 do el.skel[i].Visible = cfg.Skeleton end
-        if cfg.Skeleton then
-            local jx = rect.x + rect.w / 2
-            local joints = {
-                Head = { jx, rect.y + rect.h * 0.08 },
-                Torso = { jx, rect.y + rect.h * 0.30 },
-                LeftHand = { rect.x + rect.w * 0.05, rect.y + rect.h * 0.52 },
-                RightHand = { rect.x + rect.w * 0.95, rect.y + rect.h * 0.52 },
-                LeftFoot = { rect.x + rect.w * 0.28, rect.y + rect.h * 0.98 },
-                RightFoot = { rect.x + rect.w * 0.72, rect.y + rect.h * 0.98 },
-            }
-            local skelColor = ESPUI.colorFor(cfg.SkeletonColorMode,
-                cfg.SkeletonR, cfg.SkeletonG, cfg.SkeletonB, demoTeam, now)
-            for i, pair in ipairs(SKEL_PAIRS) do
-                local a, b = joints[pair[1]], joints[pair[2]]
-                placeLine(el.skel[i], a[1], a[2], b[1], b[2],
-                    cfg.SkeletonThickness, skelColor, guiT(cfg.SkeletonTransparency))
-            end
+            el.dist.Text = "42m"
+            el.dist.TextSize = tonumber(cfg.DistanceSize) or 12
+            el.dist.TextColor3 = rgb(cfg.DistanceR, cfg.DistanceG, cfg.DistanceB)
+            el.dist.TextTransparency = guiT(cfg.DistanceTransparency)
+            el.dist.Position = UDim2.fromOffset(midX, rect.y + rect.h + 2)
         end
     end
 
@@ -1422,10 +492,16 @@ local function buildPreviewWindow(ctx, THEME, FONTS)
     return preview
 end
 
+-- ============================================================
+-- SETTINGS WINDOW
+-- ============================================================
 local function buildOptionsWindow(ctx, THEME, FONTS)
     local UILib = ctx.uilib
     local cfg = ctx.cfg
-    local create, corner, stroke = UILib.create, UILib.corner, UILib.stroke
+    local save = ctx.save
+    local function persist()
+        if save then pcall(save) end
+    end
 
     local win = UILib.makeWindow{
         parent = ctx.screenGui,
@@ -1436,13 +512,10 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         -- Above the preview window (20) so its popup layer beats everything
         -- when the two windows are dragged over each other.
         zindex = 21,
-        tabs = { "Box", "Name", "Health", "Distance", "Extras", "Filters" },
+        tabs = { "General", "Box", "Name", "Health", "Distance", "Highlights" },
     }
     local options = win.frame
     local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
-    -- Dropdown lists are parented to the window's popup layer (see the
-    -- `dropdown` helper below), so an open list can never be covered by any
-    -- other control - its items always win the pointer.
     local popupLayer = win.popupLayer
 
     local controls = {}
@@ -1451,13 +524,12 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
             if e.update then pcall(e.update) end
         end
     end
-    local function reg(e) table.insert(controls, e); return e end
     -- Every widget goes through a labelled pcall: one bad row must never
     -- empty a whole tab, and the console names exactly what failed.
     local function guard(what, fn)
         local ok, e = pcall(fn)
         if ok and type(e) == "table" then
-            reg(e)
+            table.insert(controls, e)
             return e
         end
         warn(("[espui] widget '%s' failed: %s"):format(what, tostring(e)))
@@ -1466,18 +538,27 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     local function section(page, text)
         guard("section " .. text, function() return UILib.makeSectionHeader(page, text) end)
     end
+    local function note(page, text)
+        pcall(function() UILib.makeNote(page, text, "auto") end)
+    end
     local function toggle(page, text, key)
         guard("toggle " .. text, function()
             return UILib.makeToggle(page, text,
                 function() return cfg[key] end,
-                function(v) cfg[key] = v end)
+                function(v)
+                    cfg[key] = v
+                    persist()
+                end)
         end)
     end
-    local function slider(page, text, key, step, min, max)
+    local function slider(page, text, key, step, mn, mx)
         guard("slider " .. text, function()
             return UILib.makeSlider(page, text,
                 function() return cfg[key] end,
-                function(v) cfg[key] = v end, step, min, max)
+                function(v)
+                    cfg[key] = v
+                    persist()
+                end, step, mn, mx)
         end)
     end
     local function dropdown(page, text, key, items)
@@ -1487,173 +568,94 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
                 function() return cfg[key] end,
                 function(v)
                     cfg[key] = v
-                    -- uilib dropdowns don't auto-save (host-owned, unlike
-                    -- toggles and sliders) - persist the pick here.
-                    if ctx.save then pcall(ctx.save) end
-                    print(("[espui] %s = %s"):format(text, tostring(v)))
-                end,
-                popupLayer)
+                    persist()
+                    refresh()
+                end, popupLayer)
         end)
     end
-    local function colorpicker(page, text, prefix)
-        guard("colour picker " .. text, function()
-            return UILib.makeColorPicker(page, text, cfg, prefix)
+    local function colorpicker(page, label, prefix)
+        guard("colour " .. label, function()
+            return UILib.makeColorPicker(page, label, cfg, prefix, persist)
         end)
     end
-    local function note(page, text)
-        pcall(function() UILib.makeNote(page, text, "auto") end)
+    local function button(page, text, fn, opts)
+        guard("button " .. text, function() return UILib.makeButton(page, text, fn, opts) end)
     end
 
-    local ANCHORS = { "Above", "Below", "Inside", "Left", "Right" }
-    local MODES3 = { "Static", "Team", "Rainbow" }
-    local HEALTH_MODES = { "Gradient", "Static", "Team", "Rainbow" }
+    -- ---------------- General ----------------
+    local p1 = pages[1]
+    section(p1, "Master")
+    toggle(p1, "ESP enabled", "Enabled")
+    note(p1, "Opacity sliders everywhere: 1 = fully visible.")
+    section(p1, "Targeting")
+    toggle(p1, "Team check", "TeamCheck")
+    toggle(p1, "Visible only (raycast)", "VisibleOnly")
+    slider(p1, "Max distance", "MaxDistance", 100, 100, 10000)
+    section(p1, "Reset")
+    button(p1, "Reset ESP settings to defaults", function()
+        for k, v in pairs(ESPUI.DEFAULTS) do
+            if k ~= "Enabled" then cfg[k] = v end
+        end
+        refresh()
+        persist()
+        if ctx.notify then pcall(ctx.notify, "ESP settings reset to defaults") end
+    end, { confirm = true, confirmText = "Click again to reset" })
+    section(p1, "Diagnostics")
+    button(p1, "Drawing primitive test (12s)", function()
+        ESPUI.primitiveTest()
+        if ctx.notify then pcall(ctx.notify, "Primitive test drawn - screenshot the numbered shapes") end
+    end)
 
     -- ---------------- Box ----------------
-    local p1 = pages[1]
-    section(p1, "Box")
-    toggle(p1, "Box enabled", "Box")
-    dropdown(p1, "Style", "BoxStyle", { "Full", "Corners" })
-    toggle(p1, "Outline", "BoxOutline")
-    toggle(p1, "Fill", "BoxFill")
-    slider(p1, "Thickness", "BoxThickness", 1, 1, 4)
-    slider(p1, "Outline opacity", "BoxTransparency", 0.05, 0.05, 1)
-    slider(p1, "Fill opacity", "BoxFillTransparency", 0.05, 0, 1)
-    slider(p1, "Corner length", "BoxCornerLength", 1, 2, 20)
-    dropdown(p1, "Colour mode", "BoxColorMode", MODES3)
-    colorpicker(p1, "Box colour", "Box")
-    note(p1, "Opacity: 1 = fully visible, 0 = invisible. Outline covers the box edges; Fill fills the box and works with both styles. Corner length follows the box size - preview and in-game match exactly.")
+    local p2 = pages[2]
+    section(p2, "Corner box")
+    toggle(p2, "Corner box", "Box")
+    slider(p2, "Corner length", "BoxCornerLength", 1, 0, 40)
+    slider(p2, "Thickness", "BoxThickness", 1, 1, 6)
+    slider(p2, "Opacity", "BoxTransparency", 0.05, 0, 1)
+    colorpicker(p2, "Box colour", "Box")
+    note(p2, "Corner length caps at 30% of the box's short side.")
 
     -- ---------------- Name ----------------
-    local p2 = pages[2]
-    section(p2, "Name")
-    toggle(p2, "Name enabled", "Name")
-    dropdown(p2, "Position", "NameAnchor", ANCHORS)
-    slider(p2, "Offset X", "NameOffsetX", 1, -100, 100)
-    slider(p2, "Offset Y", "NameOffsetY", 1, -100, 100)
-    slider(p2, "Text size", "NameSize", 1, 8, 20)
-    dropdown(p2, "Source", "NameSource", { "Username", "DisplayName" })
-    toggle(p2, "Outline", "NameOutline")
-    dropdown(p2, "Colour mode", "NameColorMode", MODES3)
-    colorpicker(p2, "Name colour", "Name")
-    note(p2, "Health next to the name lives in the Health tab: set its text position to 'Name'.")
+    local p3 = pages[3]
+    section(p3, "Name")
+    toggle(p3, "Name", "Name")
+    dropdown(p3, "Source", "NameSource", { "Username", "DisplayName" })
+    slider(p3, "Text size", "NameSize", 1, 8, 24)
+    slider(p3, "Opacity", "NameTransparency", 0.05, 0, 1)
+    colorpicker(p3, "Name colour", "Name")
+    note(p3, "Drawn above the box.")
 
     -- ---------------- Health ----------------
-    local p3 = pages[3]
-    section(p3, "Health")
-    toggle(p3, "Health enabled", "Health")
-    dropdown(p3, "Style", "HealthStyle", { "Bar", "Text", "Both" })
-    section(p3, "Health bar")
-    dropdown(p3, "Bar position", "HealthBarAnchor", { "Left", "Right", "Top", "Bottom" })
-    slider(p3, "Bar width", "HealthBarWidth", 1, 1, 6)
-    slider(p3, "Bar height (0 = box height)", "HealthBarHeight", 2, 0, 120)
-    toggle(p3, "Bar outline", "HealthBarOutline")
-    slider(p3, "Bar opacity", "HealthBarTransparency", 0.05, 0.05, 1)
-    dropdown(p3, "Bar colour mode", "HealthColorMode", HEALTH_MODES)
-    colorpicker(p3, "Bar colour (Static mode)", "Health")
-    section(p3, "Health text")
-    dropdown(p3, "Text position", "HealthTextAnchor", { "Name", "Above", "Below", "Inside", "Left", "Right" })
-    slider(p3, "Text offset X", "HealthTextOffsetX", 1, -100, 100)
-    slider(p3, "Text offset Y", "HealthTextOffsetY", 1, -100, 100)
-    slider(p3, "Text size", "HealthTextSize", 1, 8, 18)
-    dropdown(p3, "Text format", "HealthTextFormat", { "Value", "Percent", "Value/Max" })
-    toggle(p3, "Text outline", "HealthTextOutline")
-    dropdown(p3, "Text colour mode", "HealthTextColorMode", HEALTH_MODES)
-    colorpicker(p3, "Text colour (Static mode)", "HealthText")
-    note(p3, "'Name' position puts the health text right after the player name (offset sliders don't apply there; colour modes do - try Gradient).")
+    local p4 = pages[4]
+    section(p4, "Health")
+    toggle(p4, "Health", "Health")
+    slider(p4, "Text size", "HealthSize", 1, 8, 24)
+    slider(p4, "Opacity", "HealthTransparency", 0.05, 0, 1)
+    note(p4, "Number above the box - colour scales with HP.")
 
     -- ---------------- Distance ----------------
-    local p4 = pages[4]
-    section(p4, "Distance")
-    toggle(p4, "Distance enabled", "Distance")
-    dropdown(p4, "Position", "DistanceAnchor", ANCHORS)
-    slider(p4, "Offset X", "DistanceOffsetX", 1, -100, 100)
-    slider(p4, "Offset Y", "DistanceOffsetY", 1, -100, 100)
-    slider(p4, "Text size", "DistanceSize", 1, 8, 20)
-    dropdown(p4, "Unit", "DistanceUnit", { "Meters", "Studs", "Km" })
-    slider(p4, "Decimals", "DistanceDecimals", 1, 0, 2)
-    toggle(p4, "Outline", "DistanceOutline")
-    dropdown(p4, "Colour mode", "DistanceColorMode", { "Static", "Rainbow" })
-    colorpicker(p4, "Distance colour", "Distance")
-
-    -- ---------------- Extras ----------------
     local p5 = pages[5]
-    section(p5, "Tracers")
-    toggle(p5, "Tracers enabled", "Tracers")
-    dropdown(p5, "Origin", "TracerOrigin", { "Bottom", "Top", "Left", "Right", "Mouse" })
-    slider(p5, "Origin offset X", "TracerOffsetX", 1, -200, 200)
-    slider(p5, "Origin offset Y", "TracerOffsetY", 1, -200, 200)
-    slider(p5, "Thickness", "TracerThickness", 1, 1, 3)
-    slider(p5, "Opacity", "TracerTransparency", 0.05, 0, 1)
-    dropdown(p5, "Colour mode", "TracerColorMode", MODES3)
-    colorpicker(p5, "Tracer colour", "Tracer")
+    section(p5, "Distance")
+    toggle(p5, "Distance", "Distance")
+    slider(p5, "Text size", "DistanceSize", 1, 8, 24)
+    slider(p5, "Opacity", "DistanceTransparency", 0.05, 0, 1)
+    colorpicker(p5, "Distance colour", "Distance")
+    note(p5, "Metres, below the box.")
 
-    section(p5, "Head dot")
-    toggle(p5, "Head dot enabled", "HeadDot")
-    slider(p5, "Dot size", "HeadDotSize", 1, 2, 10)
-    dropdown(p5, "Colour mode", "HeadDotColorMode", MODES3)
-    colorpicker(p5, "Dot colour", "HeadDot")
-
-    section(p5, "Skeleton")
-    toggle(p5, "Skeleton enabled", "Skeleton")
-    slider(p5, "Thickness", "SkeletonThickness", 1, 1, 3)
-    slider(p5, "Opacity", "SkeletonTransparency", 0.05, 0, 1)
-    dropdown(p5, "Colour mode", "SkeletonColorMode", MODES3)
-    colorpicker(p5, "Skeleton colour", "Skeleton")
-
-    section(p5, "Look line")
-    toggle(p5, "Look line enabled", "LookLine")
-    slider(p5, "Length", "LookLineLength", 5, 10, 200)
-    slider(p5, "Thickness", "LookLineThickness", 1, 1, 3)
-    slider(p5, "Opacity", "LookLineTransparency", 0.05, 0, 1)
-    dropdown(p5, "Colour mode", "LookLineColorMode", MODES3)
-    colorpicker(p5, "Look line colour", "LookLine")
-
-    section(p5, "Off-screen arrows")
-    toggle(p5, "Arrows enabled", "Arrow")
-    slider(p5, "Arrow size", "ArrowSize", 1, 4, 24)
-    slider(p5, "Radius from centre", "ArrowRadius", 5, 40, 400)
-    slider(p5, "Thickness", "ArrowThickness", 1, 1, 3)
-    slider(p5, "Opacity", "ArrowTransparency", 0.05, 0, 1)
-    dropdown(p5, "Colour mode", "ArrowColorMode", MODES3)
-    colorpicker(p5, "Arrow colour", "Arrow")
-
-    section(p5, "Chams (Highlight)")
-    toggle(p5, "Chams enabled", "Chams")
-    toggle(p5, "Always on top", "ChamsAlwaysOnTop")
-    slider(p5, "Fill opacity", "ChamsFillTransparency", 0.05, 0, 1)
-    colorpicker(p5, "Fill colour", "ChamsFill")
-    slider(p5, "Outline opacity", "ChamsOutlineTransparency", 0.05, 0, 1)
-    colorpicker(p5, "Outline colour", "ChamsOutline")
-    note(p5, "Chams are see-through; opacity controls their strength. Chams can't render inside the preview window - check them in-game.")
-
-    -- ---------------- Filters ----------------
+    -- ---------------- Highlights ----------------
     local p6 = pages[6]
-    section(p6, "Targeting")
-    toggle(p6, "Team check", "TeamCheck")
-    toggle(p6, "Visible only (raycast)", "VisibleOnly")
-    slider(p6, "Max distance", "MaxDistance", 100, 100, 10000)
-    slider(p6, "Update rate (frame skip)", "UpdateRate", 1, 1, 4)
-    slider(p6, "Rainbow speed", "RainbowSpeed", 0.1, 0.1, 3)
-    section(p6, "Reset")
-    guard("reset button", function()
-        return UILib.makeButton(p6, "Reset ESP settings to defaults", function()
-            for k, v in pairs(DEFAULTS) do
-                if k ~= "Enabled" then cfg[k] = v end
-            end
-            refresh()
-            if ctx.save then pcall(ctx.save) end
-            if ctx.notify then pcall(ctx.notify, "ESP settings reset to defaults") end
-        end, { confirm = true, confirmText = "Click again to reset" })
-    end)
-    note(p6, "Every change applies live and is saved with the script's config.")
-    section(p6, "Diagnostics")
-    guard("primitive test button", function()
-        return UILib.makeButton(p6, "Drawing primitive test (12s)", function()
-            ESPUI.primitiveTest()
-            if ctx.notify then pcall(ctx.notify, "Primitive test drawn - screenshot the numbered shapes") end
-        end)
-    end)
-    note(p6, "Draws one of each Drawing shape with numbers. Whatever is missing from the screenshot is what this client cannot render.")
+    section(p6, "Head highlight")
+    toggle(p6, "Head highlight", "HeadHighlight")
+    toggle(p6, "Hollow (outline only)", "HeadHighlightHollow")
+    slider(p6, "Opacity", "HeadHighlightTransparency", 0.05, 0, 1)
+    colorpicker(p6, "Head colour", "HeadHighlight")
+    section(p6, "Body highlight")
+    toggle(p6, "Body highlight", "BodyHighlight")
+    toggle(p6, "Hollow (outline only)", "BodyHighlightHollow")
+    slider(p6, "Opacity", "BodyHighlightTransparency", 0.05, 0, 1)
+    colorpicker(p6, "Body colour", "BodyHighlight")
+    note(p6, "Chams can't render in the preview window - check them in-game.")
 
     win.setTab(1)
     print("[espui] settings built (" .. tostring(#controls) .. " controls)")
@@ -1661,6 +663,9 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     return options, refresh
 end
 
+-- ============================================================
+-- OPEN / TOGGLE
+-- ============================================================
 function ESPUI.open(ctx)
     if type(ctx) ~= "table" or not ctx.cfg or not ctx.uilib or not ctx.screenGui then
         return false, "espui.open needs { cfg, uilib, screenGui }"
@@ -1703,6 +708,5 @@ function ESPUI.open(ctx)
     return true
 end
 
-print(("[espui] %s loaded (opacity: 1 = fully visible)"):format(ESPUI.VERSION))
-
-return ESPUI
+print(("[espui] %s loaded (engine: %s, opacity: 1 = fully visible)"):format(
+    ESPUI.VERSION, (ESP and ESP.VERSION) or "MISSING"))
