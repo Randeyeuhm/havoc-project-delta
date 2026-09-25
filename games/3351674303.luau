@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v43"
+local SCRIPT_VERSION = "de-v44"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2053,7 +2053,7 @@ local function buildMenu()
     toggle(p1, "Ignore speed caps",
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
-    note(p1, "Scales the driven car's engine/grip/brakes - resets on car switch. Keep 1.0 for races you care about.")
+    note(p1, "Resets when you switch cars - keep 1.0 for races you care about.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -2061,7 +2061,7 @@ local function buildMenu()
     for _, tp in ipairs(TELEPORTS) do
         button(p2, tp.label, function() teleportTo(tp.part, tp.label) end)
     end
-    note(p2, "Moves your car (or character on foot). 'Not found' = drive closer once so the map streams in.")
+    note(p2, "If a location says 'not found', drive closer once - the map streams in.")
 
     -- ---------------- Visuals ----------------
     local p4 = pages[3]
@@ -2109,7 +2109,7 @@ local function buildMenu()
     slider(p5, "Farm steer bias",
         function() return Config.Farm.Steer end,
         function(v) Config.Farm.Steer = v end, 0.05, -1, 1)
-    note(p5, "Holds full throttle - faster car, more income. Steer 0 = straight, ~0.3 = circles. Auto-reverses when stuck.")
+    note(p5, "Income scales with speed; steer 0 = straight, ~0.3 = circles. Auto-reverses when stuck.")
 
     section(p5, "Race auto-farm  (money loop)")
     toggle(p5, "Auto-run the race assist",
@@ -2129,7 +2129,6 @@ local function buildMenu()
     button(p5, "Queue now (last track)", function()
         queueJoinNow()
     end)
-    note(p5, "Auto-run finishes any race you enter (Race tab settings apply). Auto-queue re-joins the same track after each race. Toggle off to stop.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
@@ -2169,7 +2168,7 @@ local function buildMenu()
         refreshTeleportQueue(true)
         notify(teleportPersist.fn and "Re-exec queued - runs after your next teleport" or "This executor has no queueonteleport function")
     end)
-    note(p6, "The hub re-runs itself after every teleport - keeps the farm looping. Turn off to stop the chain.")
+    note(p6, "Re-runs the hub after every teleport - the farm survives place hops.")
     section(p6, "Menu")
     bindrow(p6, hotkeyById.ToggleMenu, {
         locked = true,
@@ -2183,7 +2182,6 @@ local function buildMenu()
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
     section(p7, "Payout info")
     button(p7, "Print payout table (console)", function() printPayoutTable() end)
-    note(p7, "Prints every track's live payout table (normal + matchmaking) to the console.")
     note(p7, "No payout? Stay on the server until the race fully ends - the cash watcher reports for 5 minutes.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
@@ -2198,9 +2196,9 @@ local function buildMenu()
     slider(p7, "Car time pad",
         function() return Config.Race.CarLimitPad end,
         function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
-    note(p7, "Hop: pause between gates. Sweep: car placement around each gate. Buffer: extra seconds on top of the finish floor.")
+    note(p7, "Sweep = placement around each gate; buffer adds to the finish floor.")
     note(p7, "Server checks your finish time vs what your car can do - Car time pad is the safety margin (raise if a run doesn't pay). No 'RaceFinished' line for you = rejected run.")
-    note(p7, "Teleports gate to gate, then the finish; rejected gates are redone, and re-pressing resumes mid-race. Wait for GO. Races are monitored.")
+    note(p7, "Rejected gates are redone; re-pressing resumes mid-race. Wait for GO - races are monitored.")
     note(p7, "Tip: 'Remove tires' on the Vehicle tab stops wheel flail during jumps.")
 
     win.setTab(1)
