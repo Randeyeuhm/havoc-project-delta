@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v52"
+local SCRIPT_VERSION = "de-v53"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1939,23 +1939,60 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0 }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0 }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
     local best, bestD = nil, 300
-    local ok = pcall(function()
-        local cs = game:GetService("CollectionService")
-        for _, inst in ipairs(cs:GetTagged("DeliveryLocation")) do
-            local p = trackEntryPart(inst)
-            if p then
-                local d = (p.Position - pos).Magnitude
-                if d < bestD then best, bestD = p, d end
+    local function consider(inst)
+        local p = trackEntryPart(inst)
+        if p then
+            local d = (p.Position - pos).Magnitude
+            if d < bestD then best, bestD = inst, d end
+        end
+    end
+    pcall(function()
+        -- The instance the live client sends in DeliveryLocationInteracted:
+        -- a child of workspace.Game.Jobs.Delivery.DeliveryLocations.
+        local node = workspace
+        for _, seg in ipairs({ "Game", "Jobs", "Delivery", "DeliveryLocations" }) do
+            node = node:FindFirstChild(seg)
+            if not node then break end
+        end
+        if node then
+            for _, inst in ipairs(node:GetChildren()) do
+                consider(inst)
+            end
+        end
+        if not best then
+            local cs = game:GetService("CollectionService")
+            for _, inst in ipairs(cs:GetTagged("DeliveryLocation")) do
+                consider(inst)
             end
         end
     end)
-    if ok then return best, bestD end
-    return nil
+    return best, bestD
+end
+
+-- The game fires ONE interact when you drive into the circle and the server
+-- then releases items over time. We fire the moment we arrive, follow up
+-- with a short burst (in case the server counts the fire itself), then keep
+-- a 2s keep-alive going while sitting in the circle.
+local DELIVERY_INTERACT_EVERY = 2
+local function tryDeliveryInteract(part, target, now)
+    if not part then return false end
+    if target and deliveryFarm.interactTarget ~= target then
+        deliveryFarm.interactTarget = target
+        deliveryFarm.burstLeft = 2
+        deliveryFarm.lastInteract = 0
+    end
+    local gap = (deliveryFarm.burstLeft or 0) > 0 and 0.6 or DELIVERY_INTERACT_EVERY
+    if (now - deliveryFarm.lastInteract) < gap then return false end
+    if not (Remotes and type(Remotes.fireServer) == "function") then return false end
+    pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
+    deliveryFarm.lastInteract = now
+    deliveryFarm.burstLeft = math.max(0, (deliveryFarm.burstLeft or 0) - 1)
+    return true
 end
 
 local function deliveryTick()
@@ -2029,13 +2066,7 @@ local function deliveryTick()
             end
             return
         end
-        if (now - deliveryFarm.lastInteract) >= 5 then
-            local part = deliveryLocationPart(tgt)
-            if part and Remotes and type(Remotes.fireServer) == "function" then
-                deliveryFarm.lastInteract = now
-                pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
-            end
-        end
+        tryDeliveryInteract(deliveryLocationPart(tgt), tgt, now)
         return
     end
 
@@ -2048,13 +2079,7 @@ local function deliveryTick()
         local exhausted = rem ~= nil and rem <= 0
         local stalled = (now - deliveryFarm.itemsAt) > 12
         if atPickup and not (full or exhausted or stalled) then
-            if (now - deliveryFarm.lastInteract) >= 5 then
-                local part = deliveryLocationPart(st.PickupPosition)
-                if part and Remotes and type(Remotes.fireServer) == "function" then
-                    deliveryFarm.lastInteract = now
-                    pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
-                end
-            end
+            tryDeliveryInteract(deliveryLocationPart(st.PickupPosition), st.PickupPosition, now)
             return
         end
         if atPickup and not deliveryFarm.pickupDone then
@@ -2087,12 +2112,9 @@ local function deliveryTick()
         return
     end
 
-    if (now - deliveryFarm.lastInteract) < 5 then return end
     local part = deliveryLocationPart(target)
     if part then
-        if Remotes and type(Remotes.fireServer) == "function" then
-            pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
-            deliveryFarm.lastInteract = now
+        if tryDeliveryInteract(part, target, now) then
             if deliveryFarm.interactLabel ~= label or (now - deliveryFarm.lastInteractPrint) > 30 then
                 deliveryFarm.interactLabel = label
                 deliveryFarm.lastInteractPrint = now
