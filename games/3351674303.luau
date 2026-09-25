@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v47"
+local SCRIPT_VERSION = "de-v48"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1889,7 +1889,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0 }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -1918,20 +1918,33 @@ local function deliveryTick()
         -- no delivery assigned: make sure the shift is running (the server
         -- marks the player with a JobId attribute)
         local jobId = LocalPlayer:GetAttribute("JobId")
-        if jobId ~= "Delivery" and (now - deliveryFarm.lastStart) > 30 then
-            deliveryFarm.lastStart = now
-            if Remotes and type(Remotes.fireServer) == "function" then
-                local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
-                pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
-                print(("[driving-empire] delivery farm: requested a Delivery shift (%s)"):format(mode))
+        if jobId ~= "Delivery" then
+            if (now - deliveryFarm.lastStart) > 30 then
+                deliveryFarm.lastStart = now
+                if Remotes and type(Remotes.fireServer) == "function" then
+                    local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
+                    pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
+                    print(("[driving-empire] delivery farm: requested a Delivery shift (%s) - jobId now %s"):format(
+                        mode, tostring(LocalPlayer:GetAttribute("JobId"))))
+                end
             end
+        elseif (now - (deliveryFarm.lastDiag or 0)) > 30 then
+            deliveryFarm.lastDiag = now
+            print("[driving-empire] delivery farm: shift is active (jobId=Delivery) - waiting for a delivery assignment")
         end
         return
     end
 
     if st.IsCollecting or st.IsDropping then return end  -- server is processing
     local veh = getLocalVehicleModel()
-    if not veh then return end
+    if not veh then
+        if not deliveryFarm.noCarWarned then
+            deliveryFarm.noCarWarned = true
+            notify("Delivery auto-farm: get in a car")
+        end
+        return
+    end
+    deliveryFarm.noCarWarned = false
 
     local carrying = (tonumber(st.ItemsCarried) or 0) > 0
     local target = carrying and st.DestinationPosition or st.PickupPosition
@@ -1942,9 +1955,9 @@ local function deliveryTick()
         if (now - deliveryFarm.lastMove) > 6 then
             deliveryFarm.lastMove = now
             local cf = veh:GetPivot()
-            teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position))
-            print(("[driving-empire] delivery farm: teleporting to %s (%.0f studs away)"):format(
-                carrying and "dropoff" or "pickup", d))
+            local okTp = teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position))
+            print(("[driving-empire] delivery farm: teleport to %s ok=%s (%.0f studs away)"):format(
+                carrying and "dropoff" or "pickup", tostring(okTp), d))
         end
         return
     end
@@ -1970,7 +1983,18 @@ local function installDeliveryProbe()
         if vehicleHooks.deliveryStateConn then pcall(function() vehicleHooks.deliveryStateConn:Disconnect() end) end
         vehicleHooks.deliveryStateConn = evState.OnClientEvent:Connect(function(s)
             deliveryFarm.state = s
+            if s then
+                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s"):format(
+                    tostring(s.ItemsCarried), tostring(s.MaxCapacity),
+                    tostring(s.PickupPosition), tostring(s.DestinationPosition),
+                    tostring(s.IsCollecting), tostring(s.IsDropping)))
+            else
+                print("[driving-empire] delivery state: cleared")
+            end
         end)
+        print("[driving-empire] delivery probe: DeliveryStateChanged connected")
+    else
+        print("[driving-empire] delivery probe: DeliveryStateChanged NOT FOUND")
     end
     local evDone = waitPath(ReplicatedStorage, { "Remotes", "DeliveryCompleted" })
     if evDone and evDone.OnClientEvent then
@@ -1989,6 +2013,9 @@ local function installDeliveryProbe()
                 end
             end
         end)
+        print("[driving-empire] delivery probe: DeliveryCompleted connected")
+    else
+        print("[driving-empire] delivery probe: DeliveryCompleted NOT FOUND")
     end
 end
 
@@ -2189,6 +2216,25 @@ local function buildMenu()
             pcall(Remotes.fireServer, "RequestEndJobSession", "jobPad")
         end
         notify("Delivery shift end requested")
+    end)
+    button(p5, "Teleport to current pickup/dropoff", function()
+        local st = deliveryFarm.state
+        local target = st and (((tonumber(st.ItemsCarried) or 0) > 0) and st.DestinationPosition or st.PickupPosition)
+        if not target then
+            notify("No delivery target right now")
+            return
+        end
+        local veh = getLocalVehicleModel()
+        if not veh then
+            notify("Get in a car first")
+            return
+        end
+        local cf = veh:GetPivot()
+        if teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position)) then
+            notify("Teleported to the delivery target")
+        else
+            notify("Teleport failed")
+        end
     end)
     note(p5, "Teleports to each pickup/dropoff like the race assist - stay in a car. Hard pays more; outlaws can steal.")
 
