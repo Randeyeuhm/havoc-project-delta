@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v39"
+local SCRIPT_VERSION = "de-v40"
 
 local Connections = {}
 local function track(conn)
@@ -2238,9 +2238,7 @@ local function buildMenu()
     toggle(p1, "Ignore speed caps",
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
-    note(p1, "Multipliers scale the driven car's engine, torque, tyre grip, " ..
-        "steering and brakes - they reset when you switch cars. Speed changes " ..
-        "may stand out in races; keep 1.0 for events you care about.")
+    note(p1, "Scales the driven car's engine/grip/brakes - resets on car switch. Keep 1.0 for races you care about.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -2248,9 +2246,7 @@ local function buildMenu()
     for _, tp in ipairs(TELEPORTS) do
         button(p2, tp.label, function() teleportTo(tp.part, tp.label) end)
     end
-    note(p2, "Teleports move your car when you are driving, otherwise your " ..
-        "character. If a location says 'not found', drive closer once - the " ..
-        "map streams in around you.")
+    note(p2, "Moves your car (or character on foot). 'Not found' = drive closer once so the map streams in.")
 
     -- ---------------- HUD ----------------
     local p3 = pages[3]
@@ -2270,8 +2266,7 @@ local function buildMenu()
     slider(p3, "Screen margin Y",
         function() return Config.HUD.YOffset end,
         function(v) Config.HUD.YOffset = v end, 2, 0, 600)
-    note(p3, "Live speed, gear and RPM straight from the car's chassis " ..
-        "controller - the same numbers the game's own gauges use.")
+    note(p3, "Live speed/gear/RPM - the same numbers the game's own gauges use.")
 
     -- ---------------- Visuals ----------------
     local p4 = pages[4]
@@ -2373,13 +2368,8 @@ local function buildMenu()
         end)
         notify(ok and tp and "Teleported to the sky plate" or "Sky plate not ready")
     end)
-    note(p5, "Holds full throttle for you - income scales with speed, so pair it " ..
-        "with a speed multiplier. 0 steer drives straight (aim down a long road " ..
-        "first); about 0.3 steers in circles (wide open areas). Auto-reverses for " ..
-        "2s when it gets stuck.")
-    note(p5, "Sky plate: a personal plate 10,000 studs above the map - nothing " ..
-        "to crash into, first gear to top speed, u-turns itself at the edges. " ..
-        "Teleporting high up is exactly what anti-cheat watches for; your call.")
+    note(p5, "Holds full throttle - faster car, more income. Steer 0 = straight, ~0.3 = circles. Auto-reverses when stuck.")
+    note(p5, "Private plate 10k studs up: nothing to crash into, u-turns at the edges. Anti-cheat bait - your call.")
 
     section(p5, "Race auto-farm  (money loop)")
     toggle(p5, "Auto-run the race assist",
@@ -2399,13 +2389,7 @@ local function buildMenu()
     button(p5, "Queue now (last track)", function()
         queueJoinNow()
     end)
-    note(p5, "Auto-run: every race you enter is finished automatically - it " ..
-        "watches for GO and runs the same routine as the Race tab button " ..
-        "with your Race timing settings (hop, sweep, payout buffer, car " ..
-        "time pad). Auto-queue: after a race it re-joins the same track " ..
-        "with the game's own queue call, so the loop keeps farming until " ..
-        "you toggle it off. The queue reply (accepted or refused + reason) " ..
-        "is toasted and logged.")
+    note(p5, "Auto-run finishes any race you enter (Race tab settings apply). Auto-queue re-joins the same track after each race. Toggle off to stop.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[6]
@@ -2445,11 +2429,7 @@ local function buildMenu()
         refreshTeleportQueue(true)
         notify(teleportPersist.fn and "Re-exec queued - runs after your next teleport" or "This executor has no queueonteleport function")
     end)
-    note(p6, "Queues the hub loader with the executor's queueonteleport so " ..
-        "the script survives teleports: it re-runs automatically when the " ..
-        "race queue drops you into the matchmaking place, and re-queues for " ..
-        "the hop back. This is what keeps the auto-farm looping without " ..
-        "touching the executor. Turn off to stop the chain.")
+    note(p6, "The hub re-runs itself after every teleport - keeps the farm looping. Turn off to stop the chain.")
     section(p6, "Menu")
     bindrow(p6, hotkeyById.ToggleMenu, {
         locked = true,
@@ -2463,14 +2443,8 @@ local function buildMenu()
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
     section(p7, "Payout info")
     button(p7, "Print payout table (console)", function() printPayoutTable() end)
-    note(p7, "Prints the live payout numbers to the executor console: every " ..
-        "track's 1st-8th place cash + per-racer bonus, for the normal AND " ..
-        "matchmaking tables, pulled straight from the game's own config.")
-    note(p7, "If a finished race pays nothing: STAY on the server until " ..
-        "the race fully ends (results + teleport back) - payouts land when " ..
-        "the session wraps up, not at your finish. The cash watcher watches " ..
-        "for 5 minutes and also reports whether the game uploaded its race " ..
-        "recording (matchmaking runs are validated server-side).")
+    note(p7, "Prints every track's live payout table (normal + matchmaking) to the console.")
+    note(p7, "No payout? Stay on the server until the race fully ends - the cash watcher reports for 5 minutes.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
@@ -2484,32 +2458,10 @@ local function buildMenu()
     slider(p7, "Car time pad",
         function() return Config.Race.CarLimitPad end,
         function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
-    note(p7, "Hop delay: pause between checkpoints (0.5-1.5s). Sweep " ..
-        "distance: how far before/after each gate the car is placed. " ..
-        "Payout buffer: extra wait ADDED ON TOP of the track's minimum " ..
-        "finish time (the toast reads that minimum from the game's own " ..
-        "config - this slider never changes it). Server wait is locked at " ..
-        "0.5s. Defaults: 0.5 / 12 / 1.")
-    note(p7, "Minimum finish time comes from the game's LIVE config (~1s " ..
-        "right now) - but the server ALSO checks your finish time against " ..
-        "what your car could do on the track (track length / car top speed). " ..
-        "The assist computes that floor and holds at the last checkpoint " ..
-        "until it passes; Car time pad is the safety multiplier (default " ..
-        "1.25 - raise it if a fast finish still doesn't pay). Cash pays by " ..
-        "finishing place x extra-racer bonus x event multipliers. The " ..
-        "console prints the server's RaceFinished line (place, time, racers) " ..
-        "the moment it finalizes you - no line for your run = the server " ..
-        "never accepted it (the 'TBD' screen) and no money will come.")
-    note(p7, "Jumps your car through every checkpoint of the race you are " ..
-        "in - in order - then across the finish line. If the server rejects " ..
-        "a crossing it just redoes that checkpoint after a short pause " ..
-        "instead of giving up. Stopping and pressing again mid-race " ..
-        "resumes from the gate the race is actually waiting for. You must " ..
-        "be in a race with your car spawned; wait for the countdown (GO) " ..
-        "before pressing. Race records and leaderboards are monitored - " ..
-        "use it on tracks you don't care about.")
-    note(p7, "Tip: the Vehicle tab's 'Remove tires' toggle keeps the wheels " ..
-        "from flailing around during the jumps.")
+    note(p7, "Hop: pause between gates. Sweep: car placement around each gate. Buffer: extra seconds on top of the finish floor.")
+    note(p7, "Server checks your finish time vs what your car can do - Car time pad is the safety margin (raise if a run doesn't pay). No 'RaceFinished' line for you = rejected run.")
+    note(p7, "Teleports gate to gate, then the finish; rejected gates are redone, and re-pressing resumes mid-race. Wait for GO. Races are monitored.")
+    note(p7, "Tip: 'Remove tires' on the Vehicle tab stops wheel flail during jumps.")
 
     win.setTab(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
