@@ -26,9 +26,11 @@
     or generic UI option belongs in uilib.luau instead.
 
     What it draws (Project Delta's look):
-      - corner box: 8 Line segments, fixed corner length capped at 30% of
-        the box's short side
+      - box: Corner (8 Line segments, fixed corner length capped at 30% of
+        the box's short side) or Full (4 edge lines)
       - name / health / distance labels (outlined Text)
+      - tracers (Line from the screen origin to the target) and a head dot
+        (Circle), both with their own colour / opacity settings
       - Highlights (chams) - a multi-select chooses any parts (Head /
         Body), with shared colour, opacity and fill settings
 
@@ -71,6 +73,7 @@ local DEFAULTS = {
 
     -- corner box
     Box = true,
+    BoxStyle = "Corner",   -- Corner | Full
     BoxCornerLength = 6,   -- px, capped at 30% of the box's short side
     BoxThickness = 2,
     BoxTransparency = 1,   -- opacity
@@ -101,18 +104,33 @@ local DEFAULTS = {
     ChamsFilled = true,
     ChamsTransparency = 0.7,
     ChamsR = 255, ChamsG = 80, ChamsB = 80,
+
+    -- tracers (line from the screen origin to the target)
+    Tracers = false,
+    TracerOrigin = "Bottom",   -- Bottom | Center
+    TracerThickness = 1,
+    TracerTransparency = 0.5,  -- opacity
+    TracerR = 255, TracerG = 255, TracerB = 255,
+
+    -- head dot (small filled marker on the head)
+    HeadDot = false,
+    HeadDotSize = 4,
+    HeadDotTransparency = 0.8, -- opacity
+    HeadDotR = 255, HeadDotG = 255, HeadDotB = 255,
 }
 ESP.DEFAULTS = DEFAULTS
 
 local CHOICES = {
     NameSource = { ["Username"] = true, ["DisplayName"] = true },
+    BoxStyle = { ["Corner"] = true, ["Full"] = true },
+    TracerOrigin = { ["Bottom"] = true, ["Center"] = true },
 }
 
 -- Old espui schema fields. Nothing reads them anymore, so they
 -- are stripped on fill instead of lingering in saved configs forever.
 local LEGACY_KEYS = {
     "UpdateRate", "RainbowSpeed",
-    "BoxStyle", "BoxOutline", "BoxFill", "BoxFillTransparency",
+    "BoxOutline", "BoxFill", "BoxFillTransparency",
     "BoxColorMode",
     "NameAnchor", "NameOffsetX", "NameOffsetY", "NameOutline",
     "NameColorMode",
@@ -124,11 +142,8 @@ local LEGACY_KEYS = {
     "HealthTextColorMode", "HealthTextR", "HealthTextG", "HealthTextB",
     "DistanceAnchor", "DistanceOffsetX", "DistanceOffsetY", "DistanceUnit",
     "DistanceDecimals", "DistanceOutline", "DistanceColorMode",
-    "Tracers", "TracerOrigin", "TracerOffsetX", "TracerOffsetY",
-    "TracerThickness", "TracerTransparency", "TracerColorMode",
-    "TracerR", "TracerG", "TracerB",
-    "HeadDot", "HeadDotSize", "HeadDotColorMode",
-    "HeadDotR", "HeadDotG", "HeadDotB",
+    "TracerOffsetX", "TracerOffsetY", "TracerColorMode",
+    "HeadDotColorMode",
     "Skeleton", "SkeletonThickness", "SkeletonTransparency",
     "SkeletonColorMode", "SkeletonR", "SkeletonG", "SkeletonB",
     "LookLine", "LookLineLength", "LookLineThickness", "LookLineTransparency",
@@ -210,6 +225,14 @@ function ESP.sanitize(cfg)
     cfg.DistanceTransparency = num(cfg.DistanceTransparency, 0, 1, 1)
     cfg.ChamsTransparency = num(cfg.ChamsTransparency, 0, 1, 0.7)
     if CHOICES.NameSource[cfg.NameSource] ~= true then cfg.NameSource = "Username" end
+    if CHOICES.BoxStyle[cfg.BoxStyle] ~= true then cfg.BoxStyle = "Corner" end
+    if CHOICES.TracerOrigin[cfg.TracerOrigin] ~= true then cfg.TracerOrigin = "Bottom" end
+    cfg.TracerThickness = num(cfg.TracerThickness, 1, 5, 1)
+    cfg.TracerTransparency = num(cfg.TracerTransparency, 0, 1, 0.5)
+    cfg.HeadDotSize = num(cfg.HeadDotSize, 2, 12, 4)
+    cfg.HeadDotTransparency = num(cfg.HeadDotTransparency, 0, 1, 0.8)
+    cfg.Tracers = cfg.Tracers == true
+    cfg.HeadDot = cfg.HeadDot == true
     cfg.ChamsHead = cfg.ChamsHead == true
     cfg.ChamsBody = cfg.ChamsBody == true
     cfg.ChamsFilled = cfg.ChamsFilled ~= false
@@ -312,7 +335,7 @@ ESP.entityHealth = entityHealth
 -- ============================================================
 local LABEL_KEYS = {
     "TL_V", "TL_H", "TR_V", "TR_H", "BL_V", "BL_H", "BR_V", "BR_H",
-    "NameLabel", "DistanceLabel", "HealthLabel",
+    "NameLabel", "DistanceLabel", "HealthLabel", "Tracer", "HeadDot",
 }
 
 local function newLine()
@@ -328,6 +351,13 @@ local function newText()
     t.Visible, t.Font, t.Size = false, Drawing.Fonts.UI, 16
     t.Outline, t.OutlineColor, t.Center = true, Color3.fromRGB(0, 0, 0), false
     return t
+end
+
+local function newCircle()
+    local ok, c = pcall(Drawing.new, "Circle")
+    if not ok or not c then return nil end
+    c.Visible, c.Thickness, c.Filled, c.Transparency, c.ZIndex = false, 1, true, 1, 2
+    return c
 end
 
 local function hideData(d)
@@ -421,7 +451,8 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
     local hRight  = boxX + width
     local hBottom = boxY + height
 
-    -- Corner box (Project Delta's exact 8-segment template).
+    -- Box - Corner (Project Delta's exact 8-segment template) or Full
+    -- (4 edge lines); d.color (host-set) tints the box + chams.
     if cfg.Box then
         local cornerLen = math.min(tonumber(cfg.BoxCornerLength) or 6, math.min(width, height) * 0.3)
         local th = tonumber(cfg.BoxThickness) or 2
@@ -430,24 +461,36 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
         local color = d.color or rgb(cfg.BoxR, cfg.BoxG, cfg.BoxB)
         local transp = drawT(cfg.BoxTransparency)
         local L = LINE_TEMPLATE
-        L[1][2], L[1][3], L[1][4], L[1][5] = boxX, boxY + cornerLen, boxX, boxY
-        L[2][2], L[2][3], L[2][4], L[2][5] = boxX, boxY, boxX + cornerLen, boxY
-        L[3][2], L[3][3], L[3][4], L[3][5] = hRight, boxY + cornerLen, hRight, boxY
-        L[4][2], L[4][3], L[4][4], L[4][5] = hRight - cornerLen, boxY, hRight, boxY
-        L[5][2], L[5][3], L[5][4], L[5][5] = boxX, hBottom, boxX, hBottom - cornerLen
-        L[6][2], L[6][3], L[6][4], L[6][5] = boxX, hBottom, boxX + cornerLen, hBottom
-        L[7][2], L[7][3], L[7][4], L[7][5] = hRight, hBottom, hRight, hBottom - cornerLen
-        L[8][2], L[8][3], L[8][4], L[8][5] = hRight - cornerLen, hBottom, hRight, hBottom
+        local full = cfg.BoxStyle == "Full"
+        if full then
+            L[1][2], L[1][3], L[1][4], L[1][5] = boxX, hBottom, boxX, boxY
+            L[2][2], L[2][3], L[2][4], L[2][5] = boxX, boxY, hRight, boxY
+            L[3][2], L[3][3], L[3][4], L[3][5] = hRight, boxY, hRight, hBottom
+            L[6][2], L[6][3], L[6][4], L[6][5] = boxX, hBottom, hRight, hBottom
+        else
+            L[1][2], L[1][3], L[1][4], L[1][5] = boxX, boxY + cornerLen, boxX, boxY
+            L[2][2], L[2][3], L[2][4], L[2][5] = boxX, boxY, boxX + cornerLen, boxY
+            L[3][2], L[3][3], L[3][4], L[3][5] = hRight, boxY + cornerLen, hRight, boxY
+            L[4][2], L[4][3], L[4][4], L[4][5] = hRight - cornerLen, boxY, hRight, boxY
+            L[5][2], L[5][3], L[5][4], L[5][5] = boxX, hBottom, boxX, hBottom - cornerLen
+            L[6][2], L[6][3], L[6][4], L[6][5] = boxX, hBottom, boxX + cornerLen, hBottom
+            L[7][2], L[7][3], L[7][4], L[7][5] = hRight, hBottom, hRight, hBottom - cornerLen
+            L[8][2], L[8][3], L[8][4], L[8][5] = hRight - cornerLen, hBottom, hRight, hBottom
+        end
         for i = 1, 8 do
             local e = L[i]
             local line = d[e[1]]
             if line then
-                line.From = Vector2.new(e[2], e[3])
-                line.To = Vector2.new(e[4], e[5])
-                line.Color = color
-                line.Transparency = transp
-                line.Thickness = th
-                line.Visible = true
+                if full and (i == 4 or i == 5 or i == 7 or i == 8) then
+                    line.Visible = false
+                else
+                    line.From = Vector2.new(e[2], e[3])
+                    line.To = Vector2.new(e[4], e[5])
+                    line.Color = color
+                    line.Transparency = transp
+                    line.Thickness = th
+                    line.Visible = true
+                end
             end
         end
     else
@@ -511,6 +554,42 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
         d.HealthLabel.Visible = false
     end
 
+    -- Tracers - a line from the screen edge or centre to the target.
+    if d.Tracer then
+        if cfg.Tracers then
+            local t = d.Tracer
+            local vpX, vpY = cam.ViewportSize.X, cam.ViewportSize.Y
+            local orgY = (cfg.TracerOrigin == "Center") and vpY * 0.5 or vpY
+            t.From = Vector2.new(vpX * 0.5, orgY)
+            t.To = Vector2.new(screenX, screenY)
+            t.Color = rgb(cfg.TracerR, cfg.TracerG, cfg.TracerB)
+            t.Transparency = drawT(cfg.TracerTransparency)
+            t.Thickness = tonumber(cfg.TracerThickness) or 1
+            t.Visible = true
+        else
+            d.Tracer.Visible = false
+        end
+    end
+
+    -- Head dot - a small filled marker on the head.
+    if d.HeadDot then
+        if cfg.HeadDot then
+            local headPos, headVis = cam:WorldToViewportPoint(head.Position)
+            if headVis and headPos.Z > 0 then
+                local dot = d.HeadDot
+                dot.Position = Vector2.new(headPos.X, headPos.Y)
+                dot.Radius = tonumber(cfg.HeadDotSize) or 4
+                dot.Color = rgb(cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB)
+                dot.Transparency = drawT(cfg.HeadDotTransparency)
+                dot.Visible = true
+            else
+                d.HeadDot.Visible = false
+            end
+        else
+            d.HeadDot.Visible = false
+        end
+    end
+
     return true
 end
 
@@ -556,6 +635,8 @@ function ESPClass:Ensure(model)
         NameLabel = newText(),
         DistanceLabel = newText(),
         HealthLabel = newText(),
+        Tracer = newLine(),
+        HeadDot = newCircle(),
     }
     self.Objects[model] = d
     return d
@@ -786,6 +867,7 @@ end
 -- Anchor above the object (the same lift Project Delta's drop labels use).
 local function objectAnchor(model)
     local primary = model.PrimaryPart or model:FindFirstChild("Part") or model:FindFirstChild("Head")
+        or model:FindFirstChildWhichIsA("BasePart")
     if not primary then return nil end
     return primary.Position + Vector3.new(0, (primary.Size.Y / 2) + 0.8, 0)
 end
@@ -802,7 +884,8 @@ local function renderOneObject(cfg, model, d, cam)
         return true
     end
     local dist = (anchor - cam.CFrame.Position).Magnitude
-    local inRange = dist <= (tonumber(cfg.MaxDistance) or 2000)
+    -- Per-kind range override (e.g. the Landmine kind's own distance).
+    local inRange = dist <= (tonumber(kcfg.MaxDistance) or tonumber(cfg.MaxDistance) or 2000)
     local col = rgb(kcfg.R, kcfg.G, kcfg.B)
     local on = kcfg.Enabled ~= false and inRange
     if d.hl then

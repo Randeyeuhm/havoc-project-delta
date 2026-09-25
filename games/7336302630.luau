@@ -321,13 +321,12 @@ do
         NPC = {
             Enabled = true, MaxDistance = 4500,
             BoxColor = Color3.fromRGB(0, 255, 0),
-            ShowLandmines = false,
-            LandmineDistance = 600,
         },
         Drops = {
-            Item   = { Enabled = true, Filled = false, Opacity = 0.7, R = 0,   G = 100, B = 255 },
-            Corpse = { Enabled = true, Filled = false, Opacity = 0.7, R = 139, G = 69,  B = 19  },
-            MaxDistance = 4500, ShowItemNames = true, ShowCorpseNames = true, LabelSize = 14,
+            Item     = { Enabled = true, Filled = false, Opacity = 0.7, R = 0,   G = 100, B = 255 },
+            Corpse   = { Enabled = true, Filled = false, Opacity = 0.7, R = 139, G = 69,  B = 19  },
+            Landmine = { Enabled = false, Filled = false, Opacity = 0.7, MaxDistance = 600, R = 255, G = 0, B = 0 },
+            MaxDistance = 4500, ShowItemNames = true, ShowCorpseNames = true, ShowLandmineNames = true, LabelSize = 14,
         },
         Aimbot = {
             Enabled = true, Key = Enum.UserInputType.MouseButton2, Smoothness = 0.35,
@@ -457,12 +456,16 @@ do
     Config.Drops.MaxDistance  = math.clamp(tonumber(Config.Drops.MaxDistance)  or 4500, 100, 10000)
     -- "Hollow" became "Filled" + a per-kind opacity slider; old configs keep
     -- the exact same look (filled keeps the old 0.7 opacity).
-    for _, kind in ipairs({ "Item", "Corpse" }) do
+    for _, kind in ipairs({ "Item", "Corpse", "Landmine" }) do
         local t = Config.Drops[kind]
         if type(t) == "table" then
             if t.Filled == nil then t.Filled = t.Hollow ~= true end
             t.Hollow = nil
             t.Opacity = math.clamp(tonumber(t.Opacity) or 0.7, 0.05, 1)
+            if kind == "Landmine" then
+                t.Enabled = t.Enabled == true
+                t.MaxDistance = math.clamp(tonumber(t.MaxDistance) or 600, 50, 10000)
+            end
         end
     end
     Config.Aimbot.MaxDistance = math.max(Config.Aimbot.MaxDistance or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
@@ -474,10 +477,20 @@ do
         ESPUI.sanitize(Config.NPC)
     end
 
-    -- "Landmine ESP" is the NPC ESP hazard filter: off (default) = mines
-    -- (PMN2 / MON-50) are skipped, on = they show like any other NPC.
-    if type(Config.NPC.ShowLandmines) ~= "boolean" then Config.NPC.ShowLandmines = false end
-    Config.NPC.LandmineDistance = math.clamp(tonumber(Config.NPC.LandmineDistance) or 600, 50, 10000)
+    -- Landmine ESP moved out of the NPC filter into the Misc tab as its
+    -- own Object-ESP kind ("Landmine", drawn by the drops engine). The old
+    -- NPC settings are carried over once, then forgotten.
+    if not Config.NPC.MinesMigrated then
+        Config.NPC.MinesMigrated = true
+        if Config.NPC.ShowLandmines ~= nil then
+            Config.Drops.Landmine.Enabled = Config.NPC.ShowLandmines == true
+        end
+        if tonumber(Config.NPC.LandmineDistance) then
+            Config.Drops.Landmine.MaxDistance = math.clamp(tonumber(Config.NPC.LandmineDistance), 50, 10000)
+        end
+    end
+    Config.NPC.ShowLandmines = nil
+    Config.NPC.LandmineDistance = nil
 
     Config.Misc.Walkspeed = math.clamp(Config.Misc.Walkspeed or OMNISPRINT_DEFAULT, OMNISPRINT_MIN, OMNISPRINT_MAX)
     Config.Weapon.InstantHitVelocity = math.clamp(Config.Weapon.InstantHitVelocity, 500, VELOCITY_HARD_CAP)
@@ -1571,7 +1584,8 @@ Aimbot = Config.Aimbot
 state.PlayerESP, state.NpcESP, state.Aimbot = PlayerESP, NpcESP, Aimbot
 
 -- ============================================================
--- DROPS  (rendering lives in esp.luau's Object ESP class)
+-- OBJECT ESP  (drops, corpses + landmines; drawn by the esp.luau
+-- Object ESP class - one Highlight + name label per kind)
 -- ============================================================
 dropEngine = ESPUI and ESPUI.newObjects(function() return Config.Drops end)
 if not dropEngine then
@@ -1723,7 +1737,7 @@ do
 
     -- Landmines (PMN2 / MON-50) store Health on their mesh part the same way
     -- vehicles do, so they used to register as NPCs. They are hazards, not
-    -- NPCs: skipped unless the "Landmine ESP" toggle is on.
+    -- NPCs: registerNPC reroutes them to the Object ESP class (Misc tab).
     local function isLandmine(model)
         local n = model.Name
         if n == "PMN2" or n == "MON50" then return true end
@@ -1735,15 +1749,14 @@ do
         if Players:GetPlayerFromCharacter(model) then return end
         if sameInstance(model, LocalPlayer.Character) then return end
         if not modelHasHealth(model) then return end
-        local mine = isLandmine(model)
-        if not Config.NPC.ShowLandmines and mine then return end
-        local d = NpcESP:Ensure(model)
-        -- Mines get their own range (Hazards slider) through the engine's
-        -- per-target cap; the render loop refreshes it every frame.
-        if d and mine then
-            d.landmine = true
-            d.maxDistance = Config.NPC.LandmineDistance or 600
+        -- Landmines (PMN2 / MON-50) are hazards, not NPCs: they render
+        -- through the Object ESP class as the "Landmine" kind (the Misc
+        -- tab's own section with its own colour and range).
+        if isLandmine(model) then
+            dropEngine:Ensure(model, "Landmine")
+            return
         end
+        NpcESP:Ensure(model)
     end
 
     local function hookNPCDeath(model)
@@ -1784,10 +1797,6 @@ do
         local toRemove = {}
         for npc in pairs(NpcESP.Objects) do
             if not npc or not npc.Parent then
-                table.insert(toRemove, npc)
-            elseif not Config.NPC.ShowLandmines and isLandmine(npc) then
-                -- "Landmine ESP" switched off: drop registered mines within a
-                -- second (the scan re-adds them if it is switched back on).
                 table.insert(toRemove, npc)
             end
         end
@@ -5116,7 +5125,9 @@ do
             addValue (cat, sub, "Max distance", function() return cfg.MaxDistance end,
                 function(v) cfg.MaxDistance = v end, 50, 100, 10000, function(v) return tostring(math.floor(v)) end)
             addSection(cat, sub, "Box")
-            addToggle(cat, sub, "Corner box",    function() return cfg.Box end,             function(v) cfg.Box = v end)
+            addToggle(cat, sub, "Box",           function() return cfg.Box end,             function(v) cfg.Box = v end)
+            addDropdown(cat, sub, "Box style", function() return { "Corner", "Full" } end,
+                function() return cfg.BoxStyle end, function(v) cfg.BoxStyle = v end, win.popupLayer)
             addValue (cat, sub, "Corner length", function() return cfg.BoxCornerLength end,
                 function(v) cfg.BoxCornerLength = v end, 1, 0, 40, function(v) return tostring(math.floor(v)) end)
             addValue (cat, sub, "Box thickness", function() return cfg.BoxThickness end,
@@ -5152,16 +5163,26 @@ do
             addValue (cat, sub, "Fill opacity", function() return cfg.ChamsTransparency end,
                 function(v) cfg.ChamsTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
             addColor (cat, sub, "Chams colour", cfg, "Chams")
+            addSection(cat, sub, "Tracers")
+            addToggle(cat, sub, "Tracers", function() return cfg.Tracers end, function(v) cfg.Tracers = v end)
+            addDropdown(cat, sub, "Origin", function() return { "Bottom", "Center" } end,
+                function() return cfg.TracerOrigin end, function(v) cfg.TracerOrigin = v end, win.popupLayer)
+            addValue (cat, sub, "Tracer thickness", function() return cfg.TracerThickness end,
+                function(v) cfg.TracerThickness = v end, 1, 1, 5, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Tracer opacity", function() return cfg.TracerTransparency end,
+                function(v) cfg.TracerTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Tracer colour", cfg, "Tracer")
+            addSection(cat, sub, "Head dot")
+            addToggle(cat, sub, "Head dot", function() return cfg.HeadDot end, function(v) cfg.HeadDot = v end)
+            addValue (cat, sub, "Dot size", function() return cfg.HeadDotSize end,
+                function(v) cfg.HeadDotSize = v end, 1, 2, 12, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Dot opacity", function() return cfg.HeadDotTransparency end,
+                function(v) cfg.HeadDotTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Dot colour", cfg, "HeadDot")
         end
 
         buildESPSection("ESP", "Player", Config.Player, "PlayerESP")
         buildESPSection("ESP", "NPC",    Config.NPC,    "NpcESP")
-
-        addSection("ESP", "NPC", "Hazards")
-        addToggle("ESP", "NPC", "Landmine ESP", function() return Config.NPC.ShowLandmines end,
-            function(v) Config.NPC.ShowLandmines = v end)
-        addValue ("ESP", "NPC", "Landmine distance", function() return Config.NPC.LandmineDistance end,
-            function(v) Config.NPC.LandmineDistance = v end, 50, 50, 4500, function(v) return tostring(math.floor(v)) end)
 
         addSection("ESP", "Misc", "Items")
         addToggle("ESP", "Misc", "Items",        function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
@@ -5178,6 +5199,16 @@ do
             function(v) Config.Drops.Corpse.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
         addColor ("ESP", "Misc", "Corpse colour", Config.Drops.Corpse, "")
         addToggle("ESP", "Misc", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
+
+        addSection("ESP", "Misc", "Landmines")
+        addToggle("ESP", "Misc", "Landmine ESP",          function() return Config.Drops.Landmine.Enabled end, function(v) Config.Drops.Landmine.Enabled = v end)
+        addToggle("ESP", "Misc", "Landmine filled",       function() return Config.Drops.Landmine.Filled ~= false end, function(v) Config.Drops.Landmine.Filled = v end)
+        addValue ("ESP", "Misc", "Landmine fill opacity", function() return Config.Drops.Landmine.Opacity end,
+            function(v) Config.Drops.Landmine.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+        addColor ("ESP", "Misc", "Landmine colour", Config.Drops.Landmine, "")
+        addToggle("ESP", "Misc", "Landmine names",        function() return Config.Drops.ShowLandmineNames end, function(v) Config.Drops.ShowLandmineNames = v end)
+        addValue ("ESP", "Misc", "Landmine distance",     function() return Config.Drops.Landmine.MaxDistance end,
+            function(v) Config.Drops.Landmine.MaxDistance = v end, 50, 50, 4500, function(v) return tostring(math.floor(v)) end)
 
         addSection("ESP", "Misc", "Display")
         addValue ("ESP", "Misc", "Max distance", function() return Config.Drops.MaxDistance end,
@@ -5699,9 +5730,7 @@ track(RunService.RenderStepped:Connect(function()
         -- Friend / mod tint (box + chams) live from the Players settings.
         tracked.color = espTintFor(target)
     end
-    for target, tracked in pairs(NpcESP.Objects) do
-        -- Mines follow their own Hazards range slider (per-target cap).
-        if tracked.landmine then tracked.maxDistance = Config.NPC.LandmineDistance or 600 end
+    for target in pairs(NpcESP.Objects) do
         local root = target:FindFirstChild("HumanoidRootPart")
         if root then updateVelocityTracker(target, root) end
     end
