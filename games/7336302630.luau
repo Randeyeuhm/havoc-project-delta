@@ -5706,12 +5706,7 @@ function cleanupAll()
     if state.setNoclip then pcall(state.setNoclip, false) end
     if state.unbindThirdPerson then pcall(state.unbindThirdPerson) end
 
-    for _, reg in pairs(dropRegistry) do
-        for _, entry in pairs(reg) do
-            pcall(function() if entry.hl then entry.hl:Destroy() end end)
-            pcall(function() if entry.label then entry.label:Remove() end end)
-        end
-    end
+    pcall(function() dropEngine:Clear() end)
 
     if dropWatchConnection then
         pcall(function() dropWatchConnection:Disconnect() end)
