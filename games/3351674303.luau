@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v22"
+local SCRIPT_VERSION = "de-v23"
 
 local Connections = {}
 local function track(conn)
@@ -1280,7 +1280,7 @@ local function trackEntryPart(entry)
 end
 
 local function raceTrackInfo(model)
-    if not RaceUtil then return nil, nil end
+    if not RaceUtil then return nil, nil, nil end
     local names = { model.Name }
     if RaceController then
         local ok, decoded = pcall(function()
@@ -1297,11 +1297,11 @@ local function raceTrackInfo(model)
             local laps = tonumber(res.MaxLaps)
             local minTime = tonumber(res.MinTimeSeconds)
             if laps or minTime then
-                return laps, minTime
+                return laps, minTime, nm
             end
         end
     end
-    return nil, nil
+    return nil, nil, nil
 end
 
 -- Finishing too fast skips the payout - the server checks the total race
@@ -1424,7 +1424,7 @@ local function runRaceRoutine()
         notify("Race assist: couldn't read this race's checkpoints")
         return
     end
-    local lapsKnown, minTime = raceTrackInfo(trackModel)
+    local lapsKnown, minTime, trackName = raceTrackInfo(trackModel)
     local laps = math.clamp(lapsKnown or 4, 1, 8)
     local startClock = os.clock()
     raceBusy = true
@@ -1433,6 +1433,21 @@ local function runRaceRoutine()
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
         local minTxt = minTime and (" - payout after %ds"):format(math.floor(minTime)) or ""
+        if trackName and RaceUtil then
+            -- show the game's own payout numbers: fixed cash per finishing
+            -- place, plus a bonus for every extra racer (never car-based)
+            local okPay, cash, bonus = pcall(function()
+                local c = RaceUtil.calculateBaselinePayout and RaceUtil.calculateBaselinePayout("Exhibition", trackName, 1) or nil
+                local b = RaceUtil.calculatePayoutBonusPercent and RaceUtil.calculatePayoutBonusPercent("Exhibition", trackName, 2) or nil
+                return c, b
+            end)
+            if okPay and type(cash) == "number" and cash > 0 then
+                minTxt = minTxt .. (", 1st place ~%s"):format(formatCash(cash))
+                if type(bonus) == "number" and bonus > 0 then
+                    minTxt = minTxt .. (", +%s%% per extra racer"):format(tostring(math.round(bonus * 10) / 10))
+                end
+            end
+        end
         notify(("Race assist: taking %d checkpoints x%d lap(s)%s"):format(#cps, laps, minTxt))
         local ok, err = pcall(function()
             local function dirBetween(fromPart, toPart)
@@ -1840,6 +1855,11 @@ local function buildMenu()
         "Payout buffer: extra wait at the finish so the race clears the " ..
         "track's payout minimum time. Server wait is locked at 0.5s - that " ..
         "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 3.")
+    note(p7, "Minimum finish time per race (below it the payout is void): " ..
+        "Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
+        "Sofia Bay 55s, Drawbridge 59s. Cash pays by finishing place x " ..
+        "extra-racer bonus x event multipliers - not by your car - and the " ..
+        "assist waits the live minimum automatically.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
