@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v25"
+local SCRIPT_VERSION = "de-v26"
 
 local Connections = {}
 local function track(conn)
@@ -1469,6 +1469,9 @@ local function runRaceRoutine()
                 minTxt = minTxt .. (", 1st ~%s"):format(formatCash(cash1))
                 if type(cash5) == "number" and cash5 > cash1 then
                     minTxt = minTxt .. (" (5 racers: ~%s)"):format(formatCash(cash5))
+                end
+                if gmmOpts then
+                    minTxt = minTxt .. " [matchmaking payout table]"
                 end
             end
         end
