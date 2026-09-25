@@ -34,11 +34,10 @@ local Lighting         = game:GetService("Lighting")
 local HttpService      = game:GetService("HttpService")
 local VirtualUser      = game:GetService("VirtualUser")
 local TeleportService  = game:GetService("TeleportService")
-local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v5"
+local SCRIPT_VERSION = "de-v6"
 
 local Connections = {}
 local function track(conn)
@@ -52,9 +51,9 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, InfNitro = false, NoSpeedCap = false },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
-    Money    = { ShowHud = true, AutoDrops = false },
+    Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
@@ -174,9 +173,10 @@ if ESPUI then
 end
 
 -- Clamp anything numeric the file could have corrupted.
-Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 3)
-Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 3)
-Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 3)
+Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 10)
+Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 10)
+Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 10)
+Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 10)
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
@@ -435,6 +435,24 @@ local function applyGrip(chassis)
     elseif gripState.chassis then
         restoreGrip(gripState)
     end
+end
+
+-- BRAKE: the sim multiplies brake torque by PerformanceUpgrades.BrakeMult
+-- when braking (Generic + Motorcycle). Scale it in place; the true base is
+-- kept under a marker key so the written value is always base * factor and
+-- survives the game rebuilding the table (a fresh table re-captures its
+-- own base). Factor 1 restores the base.
+local function applyBrake(chassis)
+    if not chassis then return end
+    local pu = chassis.PerformanceUpgrades
+    if type(pu) ~= "table" then return end
+    local base = pu.__hubBrakeBase
+    if base == nil then
+        base = tonumber(pu.BrakeMult) or 1
+        pu.__hubBrakeBase = base
+    end
+    local want = base * Config.Vehicle.BrakeMult
+    if pu.BrakeMult ~= want then pu.BrakeMult = want end
 end
 
 -- ============================================================
@@ -729,54 +747,10 @@ local function teleportTo(partName, label)
 end
 
 -- ============================================================
--- FEATURES: MONEY  (cash display + NASCAR World cash drops)
+-- MONEY  (cash display only - the NASCAR cash-drop collect attempt was
+-- removed: the server validates those drops, so remote-fired collects
+-- never awarded anything)
 -- ============================================================
--- Cash is read straight off leaderstats. Cash drops are CollectionService
--- models tagged "CashDrop" whose name is the drop index; the game's own
--- client fires CollectCashDrop when you touch one, so we fire the same
--- remote for drops we haven't tried this session. The server still decides
--- whether to award them (it may want you nearby - then drive close).
-local RemotesModule
-local function getRemotes()
-    if RemotesModule then return RemotesModule end
-    local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Remotes" })
-    if node then
-        local ok, res = pcall(require, node)
-        if ok and type(res) == "table" then RemotesModule = res end
-    end
-    return RemotesModule
-end
-
-local firedDrops = {}
-
-local function collectCashDrops(force)
-    if not force and not Config.Money.AutoDrops then return 0 end
-    local remotes = getRemotes()
-    if not remotes then return 0 end
-    local fired = 0
-    for _, model in ipairs(CollectionService:GetTagged("CashDrop")) do
-        local num = tonumber(model.Name)
-        if num and not firedDrops[num] then
-            firedDrops[num] = true
-            fired = fired + 1
-            pcall(function() remotes.fireServer("CollectCashDrop", num) end)
-        end
-    end
-    return fired
-end
-
-track(CollectionService:GetInstanceAddedSignal("CashDrop"):Connect(function()
-    if Config.Money.AutoDrops then
-        task.defer(function() collectCashDrops(false) end)
-    end
-end))
-
-task.spawn(function()
-    while true do
-        task.wait(3)
-        pcall(collectCashDrops, false)
-    end
-end)
 
 -- ============================================================
 -- FEATURES: SKY PLATE  (flat 10k-stud-high runway for the farm)
@@ -1026,17 +1000,20 @@ local function buildMenu()
             Config.Vehicle.SpeedMult = v
             initVehicleModules()
             setSpeedFactor(v)
-        end, 0.05, 1, 3)
+        end, 0.05, 1, 10)
     slider(p1, "Acceleration multiplier",
         function() return Config.Vehicle.TorqueMult end,
         function(v)
             Config.Vehicle.TorqueMult = v
             initVehicleModules()
             setTorqueFactor(v)
-        end, 0.05, 1, 3)
+        end, 0.05, 1, 10)
     slider(p1, "Grip multiplier",
         function() return Config.Vehicle.GripMult end,
-        function(v) Config.Vehicle.GripMult = v end, 0.05, 1, 3)
+        function(v) Config.Vehicle.GripMult = v end, 0.05, 1, 10)
+    slider(p1, "Brake multiplier",
+        function() return Config.Vehicle.BrakeMult end,
+        function(v) Config.Vehicle.BrakeMult = v end, 0.05, 1, 10)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -1044,9 +1021,9 @@ local function buildMenu()
     toggle(p1, "Ignore speed caps",
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
-    note(p1, "Multipliers scale the driven car's engine, torque and tyre grip - " ..
-        "they reset when you switch cars. Speed changes may stand out in races; " ..
-        "keep 1.0 for events you care about.")
+    note(p1, "Multipliers scale the driven car's engine, torque, tyre grip and " ..
+        "brakes - they reset when you switch cars. Speed changes may stand out " ..
+        "in races; keep 1.0 for events you care about.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -1112,20 +1089,6 @@ local function buildMenu()
         function() return Config.Money.ShowHud end,
         function(v) Config.Money.ShowHud = v end)
     note(p5, "Reads leaderstats.Cash and updates live.")
-    section(p5, "Cash drops (NASCAR World)")
-    toggle(p5, "Auto collect cash drops",
-        function() return Config.Money.AutoDrops end,
-        function(v)
-            Config.Money.AutoDrops = v
-            if v then collectCashDrops(true) end
-        end)
-    button(p5, "Collect now", function()
-        local n = collectCashDrops(true)
-        notify(n > 0 and ("Requested %d cash drop(s)"):format(n) or "No new cash drops found")
-    end)
-    note(p5, "Drops only spawn during the NASCAR World event (tagged 'CashDrop'). " ..
-        "We fire the same remote the game fires on touch - if the server wants " ..
-        "you nearby it may ignore distant calls.")
     section(p5, "Auto farm  (driving income)")
     toggle(p5, "Auto farm (auto drive)",
         function() return Config.Farm.Enabled end,
@@ -1262,6 +1225,7 @@ track(RunService.RenderStepped:Connect(function()
         updateHud(chassis)
         farmTick(chassis)
         applyGrip(chassis)
+        applyBrake(chassis)
     end)
 
     pcall(renderESP, cam)
