@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v48"
+local SCRIPT_VERSION = "de-v49"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -623,7 +623,15 @@ local function getActiveChassis()
     return ok and chassis or nil
 end
 
+-- The car you are in. The active chassis controller owns the same vehicle
+-- object the sim uses and is present even where the driver-seat registry
+-- lookup comes up empty (jobs, races), so it is checked first; the registry
+-- stays as a fallback.
 local function getLocalVehicleModel()
+    local chassis = getActiveChassis()
+    if chassis and chassis.VehicleObject and chassis.VehicleObject.Object then
+        return chassis.VehicleObject.Object
+    end
     if not ClientVehicles then return nil end
     local ok, veh = pcall(function() return ClientVehicles.GetVehicleFromDriver(LocalPlayer) end)
     if ok and veh and veh.Object then return veh.Object end
@@ -1941,6 +1949,7 @@ local function deliveryTick()
         if not deliveryFarm.noCarWarned then
             deliveryFarm.noCarWarned = true
             notify("Delivery auto-farm: get in a car")
+            print("[driving-empire] delivery farm: no car detected (chassis + driver-seat both empty)")
         end
         return
     end
