@@ -2305,6 +2305,24 @@ local function buildMenu()
         guard("button " .. text, function() return UILib.makeButton(page, text, onClick, opts) end)
     end
     local function note(page, text) pcall(function() UILib.makeNote(page, text, "auto") end) end
+    local function color(page, label, cfgTable, prefix)
+        guard("colour " .. label, function()
+            return UILib.makeColorPicker(page, label, cfgTable, prefix, saveConfig)
+        end)
+    end
+    local function dropdown(page, label, getItems, getSelected, onSelect)
+        guard("dropdown " .. label, function()
+            return UILib.makeDropdown(page, label, getItems, getSelected, onSelect, win.popupLayer)
+        end)
+    end
+    local function multiselect(page, text, items, cfgTable, prefix)
+        guard("multiselect " .. text, function()
+            return UILib.makeMultiSelect(page, text, items,
+                function(item) return cfgTable[prefix .. item] == true end,
+                function(item, on) cfgTable[prefix .. item] = on end,
+                { overlayParent = win.popupLayer })
+        end)
+    end
 
     -- ---------------- Vehicle ----------------
     local p1 = pages[1]
@@ -2380,20 +2398,77 @@ local function buildMenu()
         function() return Config.ESP.Enabled end,
         function(v) Config.ESP.Enabled = v end,
         hotkeyById.ToggleESP)
-    button(p4, "Open ESP Customizer", function()
-        if ESPUI then
-            ESPUI.open{
-                cfg = Config.ESP,
-                uilib = UILib,
-                screenGui = screenGui,
-                save = saveConfig,
-                notify = notify,
-            }
-        else
-            notify("esp.luau not loaded - customizer unavailable")
-        end
-    end)
     bindrow(p4, hotkeyById.ToggleESP)
+    section(p4, "Targeting")
+    toggle(p4, "Team check",
+        function() return Config.ESP.TeamCheck end,
+        function(v) Config.ESP.TeamCheck = v end)
+    toggle(p4, "Visible only (raycast)",
+        function() return Config.ESP.VisibleOnly end,
+        function(v) Config.ESP.VisibleOnly = v end)
+    slider(p4, "Max distance",
+        function() return Config.ESP.MaxDistance end,
+        function(v) Config.ESP.MaxDistance = v end, 50, 100, 10000)
+    section(p4, "Box")
+    toggle(p4, "Corner box",
+        function() return Config.ESP.Box end,
+        function(v) Config.ESP.Box = v end)
+    slider(p4, "Corner length",
+        function() return Config.ESP.BoxCornerLength end,
+        function(v) Config.ESP.BoxCornerLength = v end, 1, 0, 40)
+    slider(p4, "Box thickness",
+        function() return Config.ESP.BoxThickness end,
+        function(v) Config.ESP.BoxThickness = v end, 1, 1, 6)
+    slider(p4, "Box opacity",
+        function() return Config.ESP.BoxTransparency end,
+        function(v) Config.ESP.BoxTransparency = v end, 0.05, 0, 1)
+    color(p4, "Box colour", Config.ESP, "Box")
+    section(p4, "Name")
+    toggle(p4, "Name",
+        function() return Config.ESP.Name end,
+        function(v) Config.ESP.Name = v end)
+    dropdown(p4, "Source",
+        function() return { "Username", "DisplayName" } end,
+        function() return Config.ESP.NameSource end,
+        function(v) Config.ESP.NameSource = v end)
+    slider(p4, "Name size",
+        function() return Config.ESP.NameSize end,
+        function(v) Config.ESP.NameSize = v end, 1, 8, 24)
+    slider(p4, "Name opacity",
+        function() return Config.ESP.NameTransparency end,
+        function(v) Config.ESP.NameTransparency = v end, 0.05, 0, 1)
+    color(p4, "Name colour", Config.ESP, "Name")
+    section(p4, "Health")
+    toggle(p4, "Health",
+        function() return Config.ESP.Health end,
+        function(v) Config.ESP.Health = v end)
+    slider(p4, "Health size",
+        function() return Config.ESP.HealthSize end,
+        function(v) Config.ESP.HealthSize = v end, 1, 8, 24)
+    slider(p4, "Health opacity",
+        function() return Config.ESP.HealthTransparency end,
+        function(v) Config.ESP.HealthTransparency = v end, 0.05, 0, 1)
+    section(p4, "Distance")
+    toggle(p4, "Distance",
+        function() return Config.ESP.Distance end,
+        function(v) Config.ESP.Distance = v end)
+    slider(p4, "Distance size",
+        function() return Config.ESP.DistanceSize end,
+        function(v) Config.ESP.DistanceSize = v end, 1, 8, 24)
+    slider(p4, "Distance opacity",
+        function() return Config.ESP.DistanceTransparency end,
+        function(v) Config.ESP.DistanceTransparency = v end, 0.05, 0, 1)
+    color(p4, "Distance colour", Config.ESP, "Distance")
+    section(p4, "Chams")
+    multiselect(p4, "Parts to highlight", { "Head", "Body" }, Config.ESP, "Chams")
+    toggle(p4, "Hollow (outline only)",
+        function() return Config.ESP.ChamsHollow end,
+        function(v) Config.ESP.ChamsHollow = v end)
+    slider(p4, "Chams opacity",
+        function() return Config.ESP.ChamsTransparency end,
+        function(v) Config.ESP.ChamsTransparency = v end, 0.05, 0, 1)
+    color(p4, "Chams colour", Config.ESP, "Chams")
+    note(p4, "Opacity sliders: 1 = fully visible.")
     section(p4, "World")
     toggle(p4, "Fullbright",
         function() return Config.Misc.Fullbright end,

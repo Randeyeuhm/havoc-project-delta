@@ -658,6 +658,19 @@ local function buildMenu()
         guard("button " .. text, function() return UILib.makeButton(page, text, onClick, opts) end)
     end
     local function note(page, text) pcall(function() UILib.makeNote(page, text, "auto") end) end
+    local function color(page, label, cfgTable, prefix)
+        guard("colour " .. label, function()
+            return UILib.makeColorPicker(page, label, cfgTable, prefix, saveConfig)
+        end)
+    end
+    local function multiselect(page, text, items, cfgTable, prefix)
+        guard("multiselect " .. text, function()
+            return UILib.makeMultiSelect(page, text, items,
+                function(item) return cfgTable[prefix .. item] == true end,
+                function(item, on) cfgTable[prefix .. item] = on end,
+                { overlayParent = win.popupLayer })
+        end)
+    end
 
     -- ---------------- Aimbot ----------------
     local p1 = pages[1]
@@ -703,19 +716,6 @@ local function buildMenu()
         function() return Config.ESP.Enabled end,
         function(v) Config.ESP.Enabled = v end,
         hotkeyById.ToggleESP)
-    button(p2, "Open ESP Customizer", function()
-        if ESPUI then
-            ESPUI.open{
-                cfg = Config.ESP,
-                uilib = UILib,
-                screenGui = screenGui,
-                save = saveConfig,
-                notify = notify,
-            }
-        else
-            notify("esp.luau not loaded - customizer unavailable")
-        end
-    end)
     bindrow(p2, hotkeyById.ToggleESP)
     section(p2, "Targeting")
     toggle(p2, "Team Check",
@@ -727,8 +727,66 @@ local function buildMenu()
     slider(p2, "Max Distance",
         function() return Config.ESP.MaxDistance end,
         function(v) Config.ESP.MaxDistance = v end, 100, 100, 10000)
-    note(p2, "Box, name, health, distance, tracers, skeleton, arrows, chams and " ..
-        "all colours/placements live in the ESP Customizer - with a live preview.")
+    section(p2, "Box")
+    toggle(p2, "Corner box",
+        function() return Config.ESP.Box end,
+        function(v) Config.ESP.Box = v end)
+    slider(p2, "Corner length",
+        function() return Config.ESP.BoxCornerLength end,
+        function(v) Config.ESP.BoxCornerLength = v end, 1, 0, 40)
+    slider(p2, "Box thickness",
+        function() return Config.ESP.BoxThickness end,
+        function(v) Config.ESP.BoxThickness = v end, 1, 1, 6)
+    slider(p2, "Box opacity",
+        function() return Config.ESP.BoxTransparency end,
+        function(v) Config.ESP.BoxTransparency = v end, 0.05, 0, 1)
+    color(p2, "Box colour", Config.ESP, "Box")
+    section(p2, "Name")
+    toggle(p2, "Name",
+        function() return Config.ESP.Name end,
+        function(v) Config.ESP.Name = v end)
+    dropdown(p2, "Source",
+        function() return { "Username", "DisplayName" } end,
+        function() return Config.ESP.NameSource end,
+        function(v) Config.ESP.NameSource = v end)
+    slider(p2, "Name size",
+        function() return Config.ESP.NameSize end,
+        function(v) Config.ESP.NameSize = v end, 1, 8, 24)
+    slider(p2, "Name opacity",
+        function() return Config.ESP.NameTransparency end,
+        function(v) Config.ESP.NameTransparency = v end, 0.05, 0, 1)
+    color(p2, "Name colour", Config.ESP, "Name")
+    section(p2, "Health")
+    toggle(p2, "Health",
+        function() return Config.ESP.Health end,
+        function(v) Config.ESP.Health = v end)
+    slider(p2, "Health size",
+        function() return Config.ESP.HealthSize end,
+        function(v) Config.ESP.HealthSize = v end, 1, 8, 24)
+    slider(p2, "Health opacity",
+        function() return Config.ESP.HealthTransparency end,
+        function(v) Config.ESP.HealthTransparency = v end, 0.05, 0, 1)
+    section(p2, "Distance")
+    toggle(p2, "Distance",
+        function() return Config.ESP.Distance end,
+        function(v) Config.ESP.Distance = v end)
+    slider(p2, "Distance size",
+        function() return Config.ESP.DistanceSize end,
+        function(v) Config.ESP.DistanceSize = v end, 1, 8, 24)
+    slider(p2, "Distance opacity",
+        function() return Config.ESP.DistanceTransparency end,
+        function(v) Config.ESP.DistanceTransparency = v end, 0.05, 0, 1)
+    color(p2, "Distance colour", Config.ESP, "Distance")
+    section(p2, "Chams")
+    multiselect(p2, "Parts to highlight", { "Head", "Body" }, Config.ESP, "Chams")
+    toggle(p2, "Hollow (outline only)",
+        function() return Config.ESP.ChamsHollow end,
+        function(v) Config.ESP.ChamsHollow = v end)
+    slider(p2, "Chams opacity",
+        function() return Config.ESP.ChamsTransparency end,
+        function(v) Config.ESP.ChamsTransparency = v end, 0.05, 0, 1)
+    color(p2, "Chams colour", Config.ESP, "Chams")
+    note(p2, "Opacity sliders: 1 = fully visible.")
 
     -- ---------------- Movement ----------------
     local p3 = pages[3]

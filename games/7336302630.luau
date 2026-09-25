@@ -322,7 +322,6 @@ do
             Enabled = true, MaxDistance = 4500,
             BoxColor = Color3.fromRGB(0, 255, 0),
             ShowLandmines = false,
-            LandmineDistance = 600,
         },
         Drops = {
             Item   = { Enabled = true, Hollow = true, R = 0,   G = 100, B = 255 },
@@ -467,7 +466,6 @@ do
     -- "Landmine ESP" is the NPC ESP hazard filter: off (default) = mines
     -- (PMN2 / MON-50) are skipped, on = they show like any other NPC.
     if type(Config.NPC.ShowLandmines) ~= "boolean" then Config.NPC.ShowLandmines = false end
-    Config.NPC.LandmineDistance = math.clamp(tonumber(Config.NPC.LandmineDistance) or 600, 50, 10000)
 
     Config.Misc.Walkspeed = math.clamp(Config.Misc.Walkspeed or OMNISPRINT_DEFAULT, OMNISPRINT_MIN, OMNISPRINT_MAX)
     Config.Weapon.InstantHitVelocity = math.clamp(Config.Weapon.InstantHitVelocity, 500, VELOCITY_HARD_CAP)
@@ -1808,15 +1806,8 @@ do
         if Players:GetPlayerFromCharacter(model) then return end
         if sameInstance(model, LocalPlayer.Character) then return end
         if not modelHasHealth(model) then return end
-        local mine = isLandmine(model)
-        if not Config.NPC.ShowLandmines and mine then return end
-        local d = NpcESP:Ensure(model)
-        -- Mines get their own range (Hazards slider) through the engine's
-        -- per-target cap; the render loop refreshes it every frame.
-        if d and mine then
-            d.landmine = true
-            d.maxDistance = Config.NPC.LandmineDistance or 600
-        end
+        if not Config.NPC.ShowLandmines and isLandmine(model) then return end
+        NpcESP:Ensure(model)
     end
 
     local function hookNPCDeath(model)
@@ -5111,6 +5102,16 @@ do
             table.insert(guiControls, e)
             return e
         end
+        local function addMultiSelect(cat, sub, text, items, cfg, prefix)
+            local parent = win.subtab(cat, sub)
+            local e = UILib.makeMultiSelect(parent, text, items,
+                function(item) return cfg[prefix .. item] == true end,
+                function(item, on) cfg[prefix .. item] = on end,
+                { overlayParent = win.popupLayer })
+            e.homeParent = parent
+            table.insert(guiControls, e)
+            return e
+        end
         local function addInfo(cat, sub, initText)
             return makeNote(win.subtab(cat, sub), initText)
         end
@@ -5170,21 +5171,51 @@ do
 
         ammoInfoLabel = addInfo("Aimbot", "Ballistics", "—")
 
-        -- ESP appearance (box, labels, chams, range) is configured in the
-        -- hub-wide ESP customizer (esp.luau) - the same windows the other
-        -- games use. The menu keeps only the quick enable toggle.
+        -- Full ESP settings live in this menu (no separate customizer
+        -- windows): General -> Chams, exactly the fields the engine reads.
         local function buildESPSection(cat, sub, cfg, keybindId)
             addSection(cat, sub, "General")
-            addToggle(cat, sub, "Enabled", function() return cfg.Enabled end, function(v) cfg.Enabled = v end, keybindId)
-            addSection(cat, sub, "Appearance")
-            addButton(cat, sub, "Open ESP customizer", function()
-                if ESPUI then
-                    ESPUI.open{ cfg = cfg, uilib = UILib, screenGui = gui, save = saveConfig, notify = notify }
-                else
-                    notify("esp.luau not loaded - customizer unavailable")
-                end
-            end)
-            addInfo(cat, sub, "Box, labels, chams and range for this list are set in the customizer.")
+            addToggle(cat, sub, "Enabled",    function() return cfg.Enabled end,    function(v) cfg.Enabled = v end, keybindId)
+            addToggle(cat, sub, "Team check", function() return cfg.TeamCheck end, function(v) cfg.TeamCheck = v end)
+            addValue (cat, sub, "Max distance", function() return cfg.MaxDistance end,
+                function(v) cfg.MaxDistance = v end, 50, 100, 10000, function(v) return tostring(math.floor(v)) end)
+            addSection(cat, sub, "Box")
+            addToggle(cat, sub, "Corner box",    function() return cfg.Box end,             function(v) cfg.Box = v end)
+            addValue (cat, sub, "Corner length", function() return cfg.BoxCornerLength end,
+                function(v) cfg.BoxCornerLength = v end, 1, 0, 40, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Box thickness", function() return cfg.BoxThickness end,
+                function(v) cfg.BoxThickness = v end, 1, 1, 6, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Box opacity",   function() return cfg.BoxTransparency end,
+                function(v) cfg.BoxTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Box colour", cfg, "Box")
+            addSection(cat, sub, "Name")
+            addToggle(cat, sub, "Name", function() return cfg.Name end, function(v) cfg.Name = v end)
+            addDropdown(cat, sub, "Source", function() return { "Username", "DisplayName" } end,
+                function() return cfg.NameSource end, function(v) cfg.NameSource = v end, win.popupLayer)
+            addValue (cat, sub, "Name size",    function() return cfg.NameSize end,
+                function(v) cfg.NameSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Name opacity", function() return cfg.NameTransparency end,
+                function(v) cfg.NameTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Name colour", cfg, "Name")
+            addSection(cat, sub, "Health")
+            addToggle(cat, sub, "Health", function() return cfg.Health end, function(v) cfg.Health = v end)
+            addValue (cat, sub, "Health size",    function() return cfg.HealthSize end,
+                function(v) cfg.HealthSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Health opacity", function() return cfg.HealthTransparency end,
+                function(v) cfg.HealthTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addSection(cat, sub, "Distance")
+            addToggle(cat, sub, "Distance", function() return cfg.Distance end, function(v) cfg.Distance = v end)
+            addValue (cat, sub, "Distance size",    function() return cfg.DistanceSize end,
+                function(v) cfg.DistanceSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
+            addValue (cat, sub, "Distance opacity", function() return cfg.DistanceTransparency end,
+                function(v) cfg.DistanceTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Distance colour", cfg, "Distance")
+            addSection(cat, sub, "Chams")
+            addMultiSelect(cat, sub, "Parts to highlight", { "Head", "Body" }, cfg, "Chams")
+            addToggle(cat, sub, "Hollow (outline only)", function() return cfg.ChamsHollow end, function(v) cfg.ChamsHollow = v end)
+            addValue (cat, sub, "Chams opacity", function() return cfg.ChamsTransparency end,
+                function(v) cfg.ChamsTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
+            addColor (cat, sub, "Chams colour", cfg, "Chams")
         end
 
         buildESPSection("ESP", "Player", Config.Player, "PlayerESP")
@@ -5193,34 +5224,24 @@ do
         addSection("ESP", "NPC", "Hazards")
         addToggle("ESP", "NPC", "Landmine ESP", function() return Config.NPC.ShowLandmines end,
             function(v) Config.NPC.ShowLandmines = v end)
-        addValue ("ESP", "NPC", "Landmine distance", function() return Config.NPC.LandmineDistance end,
-            function(v) Config.NPC.LandmineDistance = v end, 50, 50, 4500, function(v) return tostring(math.floor(v)) end)
 
-        addSection("ESP", "Drops", "Objects")
-        addToggle("ESP", "Drops", "Items",   function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
-        addToggle("ESP", "Drops", "Corpses", function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
-        addButton("ESP", "Drops", "Open objects customizer", function()
-            if ESPUI and ESPUI.openObjects then
-                ESPUI.openObjects{
-                    cfg = Config.Drops,
-                    title = "OBJECT ESP",
-                    types = {
-                        { key = "Item",   label = "Items" },
-                        { key = "Corpse", label = "Corpses" },
-                    },
-                    nameField = "Show%sNames",
-                    distance = "MaxDistance",
-                    labelSize = "LabelSize",
-                    uilib = UILib,
-                    screenGui = gui,
-                    save = saveConfig,
-                    notify = notify,
-                }
-            else
-                notify("esp.luau not loaded - customizer unavailable")
-            end
-        end)
-        addInfo("ESP", "Drops", "Hollow, colours, names, range and label size are in the customizer.")
+        addSection("ESP", "Drops", "Items")
+        addToggle("ESP", "Drops", "Items",        function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
+        addToggle("ESP", "Drops", "Item hollow",  function() return Config.Drops.Item.Hollow end,  function(v) Config.Drops.Item.Hollow = v end)
+        addColor ("ESP", "Drops", "Item colour",  Config.Drops.Item, "")
+        addToggle("ESP", "Drops", "Item names",   function() return Config.Drops.ShowItemNames end, function(v) Config.Drops.ShowItemNames = v end)
+
+        addSection("ESP", "Drops", "Corpses")
+        addToggle("ESP", "Drops", "Corpses",       function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
+        addToggle("ESP", "Drops", "Corpse hollow", function() return Config.Drops.Corpse.Hollow end,  function(v) Config.Drops.Corpse.Hollow = v end)
+        addColor ("ESP", "Drops", "Corpse colour", Config.Drops.Corpse, "")
+        addToggle("ESP", "Drops", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
+
+        addSection("ESP", "Drops", "Display")
+        addValue ("ESP", "Drops", "Max distance", function() return Config.Drops.MaxDistance end,
+            function(v) Config.Drops.MaxDistance = v end, 50, 100, 10000, function(v) return tostring(math.floor(v)) end)
+        addValue ("ESP", "Drops", "Label size", function() return Config.Drops.LabelSize end,
+            function(v) Config.Drops.LabelSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
 
         addSection("ESP", "Radar", "Radar")
         addToggle("ESP", "Radar", "Enabled", function() return Config.Misc.Radar end,
@@ -5716,9 +5737,7 @@ track(RunService.RenderStepped:Connect(function()
         local root = target:FindFirstChild("HumanoidRootPart")
         if root then updateVelocityTracker(target, root) end
     end
-    for target, tracked in pairs(NpcESP.Objects) do
-        -- Mines follow their own Hazards range slider (per-target cap).
-        if tracked.landmine then tracked.maxDistance = Config.NPC.LandmineDistance or 600 end
+    for target in pairs(NpcESP.Objects) do
         local root = target:FindFirstChild("HumanoidRootPart")
         if root then updateVelocityTracker(target, root) end
     end

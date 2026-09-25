@@ -390,11 +390,7 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
 
     local distance = math.huge
     if localRoot then distance = (localRoot.Position - root.Position).Magnitude end
-    -- Per-target cap (d.maxDistance, set by the host - e.g. landmine ranges)
-    -- can only tighten the global range.
-    local cap = tonumber(d.maxDistance) or maxDist
-    if cap > maxDist then cap = maxDist end
-    if distance > cap then hideData(d); return true end
+    if distance > maxDist then hideData(d); return true end
 
     -- Projection: Project Delta's fixed world-size box (4.5 x 6.5 studs)
     -- through the camera's real vertical FOV and viewport height.
