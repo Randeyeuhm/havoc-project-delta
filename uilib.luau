@@ -1062,159 +1062,6 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
     return { update = update, row = row, searchText = label }
 end
 
--- Multi-select list: a row that expands into checkable items - any number of
--- them can be on at once (unlike a dropdown, which picks one). isOn(item)
--- reads the state, setOn(item, v) writes it. Returns { update, row,
--- searchText } like every other control.
-local function makeMultiSelect(parent, label, items, isOn, setOn, opts)
-    opts = opts or {}
-    local row = makeRow(parent, 30)
-
-    -- Holds the expanded list and hides it while the row animates open.
-    local body = create("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        ClipsDescendants = true,
-        Parent = row,
-    })
-
-    textLabel({
-        Size = UDim2.new(1, -96, 0, 30),
-        Position = UDim2.fromOffset(12, 0),
-        Text = label,
-        Parent = row,
-    })
-
-    local summary = textLabel({
-        Size = UDim2.new(0, 60, 0, 30),
-        Position = UDim2.new(1, -74, 0, 0),
-        Text = "",
-        TextColor3 = THEME.TEXT_DIM,
-        TextSize = 11,
-        Font = FONTS.MEDIUM,
-        TextXAlignment = Enum.TextXAlignment.Right,
-        TextTruncate = Enum.TextTruncate.AtEnd,
-        Parent = row,
-    })
-
-    local chevron = textLabel({
-        Size = UDim2.fromOffset(12, 30),
-        Position = UDim2.new(1, -18, 0, 0),
-        Text = "▼",
-        TextSize = 8,
-        TextColor3 = THEME.TEXT_DIM,
-        TextXAlignment = Enum.TextXAlignment.Center,
-        Parent = row,
-    })
-
-    -- Covers the top strip only, so item clicks pass through to the list.
-    local expandBtn = hitButton({ Size = UDim2.new(1, 0, 0, 30), Parent = row })
-
-    local list = create("Frame", {
-        Size = UDim2.new(1, -24, 0, #items * 27),
-        Position = UDim2.fromOffset(12, 34),
-        BackgroundTransparency = 1,
-        Parent = body,
-    })
-    create("UIListLayout", {
-        Padding = UDim.new(0, 3),
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = list,
-    })
-
-    local checks = {}
-    local expanded = false
-
-    local function paint()
-        local on = {}
-        for _, item in ipairs(items) do
-            local c = checks[item]
-            local active = (isOn and isOn(item)) == true
-            c.box.BackgroundColor3 = active and THEME.ACCENT or THEME.PANEL_HI
-            c.tickA.Visible = active
-            c.tickB.Visible = active
-            if active then table.insert(on, item) end
-        end
-        summary.Text = #on > 0 and table.concat(on, ", ") or (opts.emptyText or "None")
-        summary.TextColor3 = #on > 0 and THEME.TEXT or THEME.TEXT_DIM
-    end
-
-    for i, item in ipairs(items) do
-        local irow = create("Frame", {
-            Size = UDim2.new(1, 0, 0, 24),
-            LayoutOrder = i,
-            BackgroundColor3 = THEME.PANEL,
-            BorderSizePixel = 0,
-            Parent = list,
-        })
-        corner(irow, 4)
-
-        local box = create("Frame", {
-            Size = UDim2.fromOffset(14, 14),
-            Position = UDim2.fromOffset(6, 5),
-            BackgroundColor3 = THEME.PANEL_HI,
-            BorderSizePixel = 0,
-            Parent = irow,
-        })
-        corner(box, 3); stroke(box, THEME.STROKE)
-
-        -- Tick drawn from two frames: font glyphs are unreliable here.
-        local tickA = create("Frame", {
-            Size = UDim2.fromOffset(6, 2),
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, -2, 0.5, 1),
-            Rotation = 45,
-            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-            BorderSizePixel = 0,
-            Parent = box,
-        })
-        corner(tickA, 1)
-        local tickB = create("Frame", {
-            Size = UDim2.fromOffset(10, 2),
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.new(0.5, 2, 0.5, -2),
-            Rotation = -45,
-            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-            BorderSizePixel = 0,
-            Parent = box,
-        })
-        corner(tickB, 1)
-
-        textLabel({
-            Size = UDim2.new(1, -30, 1, 0),
-            Position = UDim2.fromOffset(26, 0),
-            Text = item,
-            Parent = irow,
-        })
-
-        local ihit = hitButton({ Parent = irow })
-        ihit.MouseButton1Click:Connect(function()
-            local wasOn = (isOn and isOn(item)) == true
-            if setOn then setOn(item, not wasOn) end
-            hooks.saveDebounced()
-            paint()
-        end)
-        checks[item] = { box = box, tickA = tickA, tickB = tickB }
-    end
-
-    local function setExpanded(state)
-        expanded = state
-        tween(row, 0.18, { Size = UDim2.new(1, 0, 0, state and (34 + #items * 27 + 8) or 30) })
-        tween(chevron, 0.18, { Rotation = state and 180 or 0 })
-        if not state then paint() end
-    end
-
-    hoverTint(expandBtn, row, "PANEL", "PANEL_HI")
-    expandBtn.MouseButton1Click:Connect(function() setExpanded(not expanded) end)
-
-    local function update()
-        if not expanded then paint() end
-    end
-
-    paint()
-    return { update = update, row = row, searchText = label }
-end
-
 -- Keybind row: label + current key + Rebind button + on/off pill.
 -- entry needs `.Desc`, `.Key` and `.Enabled` fields. opts (optional):
 --   locked   - true to refuse toggling (e.g. the menu key)
@@ -1514,6 +1361,245 @@ local function makeDropdown(parent, label, getItems, getSelected, onSelect, over
     end
 
     update()
+    return { update = update, row = row, searchText = label,
+        close = function() if isOpen then setOpen(false) end end }
+end
+
+-- Multi-select list: a dropdown-style popup of checkable items - unlike the
+-- dropdown, any number of items can be on at once and the list stays open
+-- while toggling (click-away or the row closes it). isOn(item) reads the
+-- state, setOn(item, v) writes it; opts.overlayParent floats the list over
+-- the whole window - pass the window's popup layer, like makeDropdown.
+-- Returns { update, row, searchText, close }.
+local function makeMultiSelect(parent, label, items, isOn, setOn, opts)
+    opts = opts or {}
+    local overlayParent = opts.overlayParent
+    local row = makeRow(parent, 30)
+
+    textLabel({
+        Size = UDim2.new(1, -96, 0, 30),
+        Position = UDim2.fromOffset(12, 0),
+        Text = label,
+        Parent = row,
+    })
+
+    local summary = textLabel({
+        Size = UDim2.new(0, 60, 0, 30),
+        Position = UDim2.new(1, -74, 0, 0),
+        Text = "",
+        TextColor3 = THEME.TEXT_DIM,
+        TextSize = 11,
+        Font = FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = row,
+    })
+
+    local chevron = textLabel({
+        Size = UDim2.fromOffset(12, 30),
+        Position = UDim2.new(1, -18, 0, 0),
+        Text = "▼",
+        TextSize = 8,
+        TextColor3 = THEME.TEXT_DIM,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        Parent = row,
+    })
+
+    local hit = hitButton({ Size = UDim2.new(1, 0, 0, 30), Parent = row })
+
+    local list = create("ScrollingFrame", {
+        BackgroundColor3 = THEME.BG,
+        BorderSizePixel = 0,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = THEME.STROKE,
+        ScrollBarImageTransparency = 0.2,
+        CanvasSize = UDim2.new(),
+        Visible = false,
+        ZIndex = 9,
+        Active = true,
+        Parent = overlayParent or row,
+    })
+    corner(list, 6); stroke(list, THEME.STROKE)
+    create("UIListLayout", {
+        Padding = UDim.new(0, ITEM_GAP),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = list,
+    })
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
+        PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 8),
+        Parent = list,
+    })
+
+    local isOpen = false
+    local itemButtons = {}
+    local moveConn = nil
+    local popup = { owners = { list, hit } }
+
+    local function paint()
+        local on = {}
+        for _, item in ipairs(items) do
+            if (isOn and isOn(item)) == true then table.insert(on, item) end
+        end
+        summary.Text = #on > 0 and table.concat(on, ", ") or (opts.emptyText or "None")
+        summary.TextColor3 = #on > 0 and THEME.TEXT or THEME.TEXT_DIM
+    end
+
+    -- Re-tints an item row and its tick from the live state.
+    local function paintItem(b, parts, item)
+        local active = (isOn and isOn(item)) == true
+        b.BackgroundColor3 = active and THEME.ACCENT or THEME.PANEL
+        b.BackgroundTransparency = active and 0 or 0.15
+        parts.box.BackgroundColor3 = active and THEME.ACCENT or THEME.PANEL_HI
+        parts.tickA.Visible = active
+        parts.tickB.Visible = active
+    end
+
+    local function update()
+        paint()
+    end
+
+    local function setOpen(state)
+        isOpen = state
+        if moveConn then moveConn:Disconnect(); moveConn = nil end
+        if not state then
+            -- Hide a frame later, not right now: if this close came from the
+            -- same press that is toggling an item, the item must survive its
+            -- own release.
+            task.defer(function()
+                if not isOpen then list.Visible = false end
+            end)
+            row.ZIndex = 1
+            tween(chevron, 0.12, { Rotation = 0 })
+            releasePopup(popup)
+            return
+        end
+        claimPopup(popup)
+
+        for _, b in ipairs(itemButtons) do b:Destroy() end
+        itemButtons = {}
+
+        for i, item in ipairs(items) do
+            local b = create("TextButton", {
+                Size = UDim2.new(1, 0, 0, ITEM_H),
+                LayoutOrder = i,
+                BackgroundColor3 = THEME.PANEL,
+                BorderSizePixel = 0,
+                AutoButtonColor = false,
+                Text = "",
+                ZIndex = 10,
+                Parent = list,
+            })
+            corner(b, 4)
+
+            local box = create("Frame", {
+                Size = UDim2.fromOffset(14, 14),
+                Position = UDim2.new(0, 6, 0.5, -7),
+                BackgroundColor3 = THEME.PANEL_HI,
+                BorderSizePixel = 0,
+                ZIndex = 11,
+                Parent = b,
+            })
+            corner(box, 3); stroke(box, THEME.STROKE)
+
+            -- Tick drawn from two frames: font glyphs are unreliable here.
+            local tickA = create("Frame", {
+                Size = UDim2.fromOffset(6, 2),
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, -2, 0.5, 1),
+                Rotation = 45,
+                BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+                BorderSizePixel = 0,
+                ZIndex = 12,
+                Parent = box,
+            })
+            corner(tickA, 1)
+            local tickB = create("Frame", {
+                Size = UDim2.fromOffset(10, 2),
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.new(0.5, 2, 0.5, -2),
+                Rotation = -45,
+                BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+                BorderSizePixel = 0,
+                ZIndex = 12,
+                Parent = box,
+            })
+            corner(tickB, 1)
+
+            textLabel({
+                Size = UDim2.new(1, -30, 1, 0),
+                Position = UDim2.fromOffset(26, 0),
+                Text = item,
+                TextSize = 11,
+                Font = FONTS.MEDIUM,
+                ZIndex = 11,
+                Parent = b,
+            })
+
+            local parts = { box = box, tickA = tickA, tickB = tickB }
+            paintItem(b, parts, item)
+            -- Hover only tints rows that are off; leaving always repaints
+            -- the live state (a plain hoverTint would forget the tick).
+            b.MouseEnter:Connect(function()
+                if (isOn and isOn(item)) ~= true then b.BackgroundColor3 = THEME.PANEL_HI end
+            end)
+            b.MouseLeave:Connect(function() paintItem(b, parts, item) end)
+
+            -- Toggle in place and keep the list open for more picks.
+            b.MouseButton1Click:Connect(function()
+                local wasOn = (isOn and isOn(item)) == true
+                if setOn then setOn(item, not wasOn) end
+                hooks.saveDebounced()
+                paintItem(b, parts, item)
+                paint()
+            end)
+            itemButtons[i] = b
+        end
+
+        local count = math.max(#items, 1)
+        local contentH = count * ITEM_H + (count - 1) * ITEM_GAP + 8
+        local h = math.clamp(contentH, 30, 200)
+        list.CanvasSize = UDim2.fromOffset(0, contentH)
+
+        if overlayParent then
+            local rap, pap = row.AbsolutePosition, overlayParent.AbsolutePosition
+            local x, y = rap.X - pap.X + 6, rap.Y - pap.Y + 34
+            local above = rap.Y - pap.Y - 4 - h
+            if y + h > overlayParent.AbsoluteSize.Y and above >= 0 then
+                y = above
+            end
+            list.Position = UDim2.fromOffset(x, y)
+            list.Size = UDim2.fromOffset(math.max(row.AbsoluteSize.X - 12, 120), h)
+            -- A scrolled panel or dragged window would leave the list
+            -- floating in the wrong spot, so close instead of chasing it.
+            moveConn = row:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+                if isOpen then setOpen(false) end
+            end)
+        else
+            list.Position = UDim2.fromOffset(6, 34)
+            list.Size = UDim2.new(1, -12, 0, h)
+            row.ZIndex = 8
+        end
+
+        list.Visible = true
+        tween(chevron, 0.12, { Rotation = 180 })
+    end
+
+    popup.close = function() setOpen(false) end
+
+    hoverTint(hit, row, "PANEL", "PANEL_HI")
+    hit.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
+
+    if overlayParent then
+        -- The list isn't under the row, so it would outlive it.
+        row.Destroying:Connect(function()
+            if isOpen then setOpen(false) end
+            list:Destroy()
+        end)
+    end
+
+    paint()
     return { update = update, row = row, searchText = label,
         close = function() if isOpen then setOpen(false) end end }
 end

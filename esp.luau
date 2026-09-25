@@ -1086,7 +1086,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
                 function(item, on)
                     cfg[prefix .. item] = on
                     persist()
-                end)
+                end, { overlayParent = popupLayer })
         end)
     end
     local function colorpicker(page, label, prefix)
