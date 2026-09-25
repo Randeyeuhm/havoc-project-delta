@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-`local SCRIPT_VERSION = "de-v10"
+local SCRIPT_VERSION = "de-v10"
 
 local Connections = {}
 local function track(conn)
