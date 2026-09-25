@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v34"
+local SCRIPT_VERSION = "de-v35"
 
 local Connections = {}
 local function track(conn)
@@ -1405,10 +1405,13 @@ local function carAwareMinTime(chassis, trackModel, laps)
         local v = tonumber(t[#t])
         if v and v > 0 then topMPH = v end
     end
-    local topStuds = math.clamp(topMPH * 1.6, 100, 900)  -- mph-ish -> studs/s-ish
+    -- The game's own chassis math: speed in studs/s is the tune top x2
+    -- (EngineSpeed*2 feeds WheelSpeed; the gear-find compares tune*mult*2
+    -- to velocity; boost doubles TopSpeed again). x2, not x1.6.
+    local topStuds = math.clamp(topMPH * 2, 100, 1200)
     local pad = Config.Race.CarLimitPad or 1.25
     local floorTime = (length / topStuds) * pad
-    print(("[driving-empire] car limit: track %.0f studs, car top %.0f mph, floor %.1fs (pad %.2f)"):format(length, topMPH, floorTime, pad))
+    print(("[driving-empire] car limit: track %.0f studs, car top %.0f (=%.0f studs/s), floor %.1fs (pad %.2f)"):format(length, topMPH, topStuds, floorTime, pad))
     return floorTime
 end
 
@@ -1427,7 +1430,7 @@ local function legitimizeVehicleStats(chassis)
         local v = tonumber(t[#t])
         if v and v > 0 then top = v end
     end
-    local plausible = math.clamp(top * 1.6, 120, 900)  -- mph-ish -> studs/s-ish
+    local plausible = math.clamp(top * 2, 120, 1000)  -- tune top x2 -> studs/s (game's own relation)
     if type(stats.TopSpeedVectorMagnitude) == "number" and stats.TopSpeedVectorMagnitude < plausible then
         stats.TopSpeedVectorMagnitude = plausible
     end
