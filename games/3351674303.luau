@@ -38,7 +38,7 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v3"
+local SCRIPT_VERSION = "de-v4"
 
 local Connections = {}
 local function track(conn)
@@ -52,7 +52,7 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, InfNitro = false, NoSpeedCap = false },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true, AutoDrops = false },
     Farm     = { Enabled = false, Steer = 0 },
@@ -176,6 +176,7 @@ end
 -- Clamp anything numeric the file could have corrupted.
 Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 3)
 Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 3)
+Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 3)
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
@@ -395,6 +396,46 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+
+-- GRIP: the chassis controllers read `ExternalGripMultiplier` every frame
+-- (Generic + Motorcycle: wheel traction and friction weight). The game's own
+-- zones touch it too, so we use the controller's setter, remember what it
+-- was before we overrode it, and put that back when grip returns to 1x or
+-- the driven car changes.
+local gripState = { chassis = nil, original = nil }
+
+local function setChassisGrip(chassis, value)
+    if type(chassis.SetExternalGripMultiplier) == "function" then
+        pcall(function() chassis:SetExternalGripMultiplier(value) end)
+    else
+        pcall(function() chassis.ExternalGripMultiplier = value end)
+    end
+end
+
+local function restoreGrip(state)
+    if state.chassis then
+        setChassisGrip(state.chassis, state.original)
+        state.chassis = nil
+        state.original = nil
+    end
+end
+
+local function applyGrip(chassis)
+    if not chassis then return end
+    local g = Config.Vehicle.GripMult
+    if g ~= 1 then
+        if gripState.chassis ~= chassis then
+            restoreGrip(gripState)   -- car switched: undo on the old one first
+            gripState.chassis = chassis
+            gripState.original = chassis.ExternalGripMultiplier
+        end
+        if chassis.ExternalGripMultiplier ~= g then
+            setChassisGrip(chassis, g)
+        end
+    elseif gripState.chassis then
+        restoreGrip(gripState)
+    end
+end
 
 -- ============================================================
 -- FEATURES: SPEEDOMETER HUD
@@ -885,6 +926,9 @@ local function buildMenu()
             initVehicleModules()
             setTorqueFactor(v)
         end, 0.05, 1, 3)
+    slider(p1, "Grip multiplier",
+        function() return Config.Vehicle.GripMult end,
+        function(v) Config.Vehicle.GripMult = v end, 0.05, 1, 3)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -892,9 +936,9 @@ local function buildMenu()
     toggle(p1, "Ignore speed caps",
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
-    note(p1, "Multipliers scale the driven car's engine + torque - they reset " ..
-        "when you switch cars. Speed changes may stand out in races; keep 1.0 " ..
-        "for events you care about.")
+    note(p1, "Multipliers scale the driven car's engine, torque and tyre grip - " ..
+        "they reset when you switch cars. Speed changes may stand out in races; " ..
+        "keep 1.0 for events you care about.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -1057,6 +1101,7 @@ track(RunService.RenderStepped:Connect(function()
         end
         updateHud(chassis)
         farmTick(chassis)
+        applyGrip(chassis)
     end)
 
     pcall(renderESP, cam)
