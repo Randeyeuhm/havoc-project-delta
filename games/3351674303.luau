@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v11"
+local SCRIPT_VERSION = "de-v12"
 
 local Connections = {}
 local function track(conn)
@@ -496,6 +496,15 @@ local function getLocalVehicleObject()
     return nil
 end
 
+-- The reliable handle on the car you are driving: the active chassis
+-- controller owns the same vehicle object the sim uses, and it is available
+-- even where the driver-seat lookup comes up empty (e.g. races).
+local function getDrivenVehicle()
+    local chassis = getActiveChassis()
+    if chassis and chassis.VehicleObject then return chassis.VehicleObject end
+    return getLocalVehicleObject()
+end
+
 -- Tell the game's own teleport detector that a car teleport is coming - this
 -- is exactly what the game does before its own vehicle teleports (respawns,
 -- race exits), so ours don't read as unexplained position jumps.
@@ -508,7 +517,7 @@ end
 -- Move the driven car. Mirrors the game's own onVehicleTeleport: zero the
 -- velocity of every part, authorize the jump, then move via the weight part.
 local function teleportCarTo(target)
-    local veh = getLocalVehicleObject()
+    local veh = getDrivenVehicle()
     if not veh or not veh.Object then return false end
     local model = veh.Object
     local weight = veh.Components and veh.Components.Weight
@@ -675,7 +684,7 @@ local function applyTires()
         if tireState.veh or #tireState.parts > 0 then restoreTires() end
         return
     end
-    local veh = getLocalVehicleObject()
+    local veh = getDrivenVehicle()
     if not veh then
         if tireState.veh then restoreTires() end
         return
@@ -688,7 +697,9 @@ local function applyTires()
     local wheels = cache and cache.Wheels
     if type(wheels) ~= "table" then return end
     local function addPart(p)
-        if p == nil or not p:IsA("BasePart") then return end
+        if p == nil then return end
+        local isOk, isPart = pcall(function() return p:IsA("BasePart") end)
+        if not isOk or not isPart then return end
         if p.__hubTire == nil then
             p.__hubTire = { t = p.Transparency, c = p.CanCollide }
             table.insert(tireState.parts, p)
@@ -1202,20 +1213,19 @@ local function findRaceTrackModel()
     local g = workspace:FindFirstChild("Game")
     local races = g and g:FindFirstChild("Races")
     if not races then return nil end
+    local function isTrack(m)
+        return m:IsA("Model") and m:FindFirstChild("Checkpoints") and m:FindFirstChild("Finish")
+    end
+    -- the live track normally sits in Races.LocalSession - scan broadly so a
+    -- different container layout still gets found
     local session = races:FindFirstChild("LocalSession")
-    if not session then
-        for _, d in ipairs(races:GetDescendants()) do
-            if d.Name == "LocalSession" then
-                session = d
-                break
-            end
+    if session then
+        for _, m in ipairs(session:GetChildren()) do
+            if isTrack(m) then return m end
         end
     end
-    if not session then return nil end
-    for _, m in ipairs(session:GetChildren()) do
-        if m:IsA("Model") and m:FindFirstChild("Checkpoints") and m:FindFirstChild("Finish") then
-            return m
-        end
+    for _, d in ipairs(races:GetDescendants()) do
+        if isTrack(d) then return d end
     end
     return nil
 end
@@ -1246,14 +1256,13 @@ local function raceLaps(model)
     return nil
 end
 
--- One checkpoint sweep: appear just before the gate, then just past it -
--- the game's crossing ray runs between those two frames and hits the
--- checkpoint part. Returns "ok" / "rejected: <reason>" / "none" / "novh".
-local function sweepCheckpoint(cp, dir, dist, lift)
+-- One sweep: appear just before the gate, then just past it - the game's
+-- crossing ray runs between those two frames and hits the part. Returns
+-- "ok" / "rejected: <reason>" / "none" / "novh".
+local function sweepAt(position, dir, dist)
     local rot = CFrame.lookAt(Vector3.new(0, 0, 0), dir).Rotation
-    local base = cp.Position + Vector3.new(0, lift or 0, 0)
-    local before = CFrame.new(base - dir * dist) * rot
-    local after = CFrame.new(base + dir * dist) * rot
+    local before = CFrame.new(position - dir * dist) * rot
+    local after = CFrame.new(position + dir * dist) * rot
     local snap = raceProbe.seq
     if not teleportCarTo(before) then return "novh", nil end
     task.wait(0.1)
@@ -1268,6 +1277,11 @@ local function sweepCheckpoint(cp, dir, dist, lift)
     return "none", nil
 end
 
+local function sweepCheckpoint(cp, dir, dist, lift)
+    local base = cp.Position + Vector3.new(0, lift or 0, 0)
+    return sweepAt(base, dir, dist)
+end
+
 local function crossCheckpoint(cp, dir)
     local last = "none"
     for _, v in ipairs({ { 12, 0 }, { 16, 4 } }) do
@@ -1276,6 +1290,39 @@ local function crossCheckpoint(cp, dir)
         if res ~= "none" then last = res end
     end
     return last
+end
+
+-- The finish gate can be a big arch, so try it from a few spots, heights
+-- and sweep lengths until the server confirms the crossing.
+local function tryFinish(finishPart, approachDir, full)
+    local pos = finishPart.Position
+    local size = finishPart.Size
+    local bottom = pos - Vector3.new(0, size.Y / 2, 0) + Vector3.new(0, 2, 0)
+    local look = finishPart.CFrame.LookVector * Vector3.new(1, 0, 1)
+    if look.Magnitude < 0.1 then
+        look = approachDir
+    else
+        look = look.Unit
+    end
+    local attempts = {
+        { pos, approachDir, 16 },
+        { pos, approachDir, 44 },
+        { bottom, approachDir, 16 },
+    }
+    if full then
+        table.insert(attempts, { bottom, approachDir, 44 })
+        table.insert(attempts, { pos, look, 16 })
+        table.insert(attempts, { bottom, look, 16 })
+    end
+    for _, a in ipairs(attempts) do
+        local res, kind = sweepAt(a[1], a[2], a[3])
+        if res == "ok" and kind == "finish" then
+            return "ok"
+        end
+        if res == "novh" then return "novh" end
+        task.wait(0.3)
+    end
+    return "none"
 end
 
 local function runRaceRoutine()
@@ -1289,11 +1336,6 @@ local function runRaceRoutine()
         notify("Race assist: join a race first (with your car spawned)")
         return
     end
-    local veh = getLocalVehicleObject()
-    if not veh or not veh.Object then
-        notify("Race assist: get in your car first")
-        return
-    end
     local cps = {}
     for _, e in ipairs(trackModel.Checkpoints:GetChildren()) do
         local p = trackEntryPart(e)
@@ -1305,7 +1347,8 @@ local function runRaceRoutine()
         notify("Race assist: couldn't read this race's checkpoints")
         return
     end
-    local laps = math.clamp(raceLaps(trackModel) or 4, 1, 8)
+    local lapsKnown = raceLaps(trackModel)
+    local laps = math.clamp(lapsKnown or 4, 1, 8)
     raceBusy = true
     task.spawn(function()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
@@ -1326,7 +1369,6 @@ local function runRaceRoutine()
                 dirs[i] = dirBetween(cps[i - 1] or cps[#cps], cps[i])
             end
             local finishDir = dirBetween(cps[#cps], finish)
-            local finishReason = nil
             for pass = 1, laps do
                 local taken, skipped = 0, 0
                 for i = 1, #cps do
@@ -1336,33 +1378,50 @@ local function runRaceRoutine()
                     elseif res == "none" then
                         skipped = skipped + 1
                     elseif res == "novh" then
-                        error("lost the car mid-run", 0)
+                        error("couldn't move your car - make sure you're sitting in it", 0)
                     else
                         error(("checkpoint %d was rejected by the server (%s)"):format(i, res), 0)
                     end
+                    task.wait(0.5)  -- breathing room between hops
                 end
-                local fres, fkind = sweepCheckpoint(finish, finishDir, 14, 0)
-                if not (fres == "ok" and fkind == "finish") then
-                    local r2, k2 = sweepCheckpoint(finish, finishDir, 18, 4)
-                    if r2 == "ok" and k2 == "finish" then
-                        fres, fkind = r2, k2
-                    elseif r2 and r2:sub(1, 8) == "rejected" then
-                        finishReason = r2
+                if pass == 1 and taken == 0 then
+                    -- nothing answered: race may not have started, or every
+                    -- checkpoint is already taken and only the finish is left
+                    local fres = tryFinish(finish, finishDir, false)
+                    if fres == "ok" then
+                        notify("Race assist: race finished!")
+                        return
+                    end
+                    error("no checkpoint answered - wait for the race to start (GO) and retry (if the checkpoints were already taken, press again for the finish)", 0)
+                end
+                notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
+                -- take the finish line too: after the final lap, or every lap
+                -- when the lap count couldn't be read
+                if pass == laps or not lapsKnown then
+                    local fres = tryFinish(finish, finishDir, false)
+                    if fres == "ok" then
+                        notify("Race assist: race finished!")
+                        return
+                    end
+                    if fres == "novh" then
+                        error("couldn't move your car - make sure you're sitting in it", 0)
                     end
                 end
-                if fres == "novh" then
-                    error("lost the car mid-run", 0)
-                end
-                if fres == "ok" and fkind == "finish" then
+            end
+            -- final finish-line rounds (progress is kept, so a retry only has
+            -- to land the finish crossing)
+            for _ = 1, 2 do
+                local fres = tryFinish(finish, finishDir, true)
+                if fres == "ok" then
                     notify("Race assist: race finished!")
                     return
                 end
-                if pass == 1 and taken == 0 then
-                    error("no checkpoint answered - wait for the race to start (GO), stay in your car, then retry", 0)
+                if fres == "novh" then
+                    error("couldn't move your car - make sure you're sitting in it", 0)
                 end
-                notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
+                task.wait(1)
             end
-            error(finishReason or "the finish line never accepted a crossing - press the button again", 0)
+            error("the race didn't accept the finish - press the button again (it continues from your current progress)", 0)
         end)
         if chassis then pcall(function() chassis.Teleporting = false end) end
         raceBusy = false
