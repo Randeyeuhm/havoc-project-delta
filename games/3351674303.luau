@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v12"
+local SCRIPT_VERSION = "de-v13"
 
 local Connections = {}
 local function track(conn)
@@ -1382,7 +1382,7 @@ local function runRaceRoutine()
                     else
                         error(("checkpoint %d was rejected by the server (%s)"):format(i, res), 0)
                     end
-                    task.wait(0.5)  -- breathing room between hops
+                    task.wait(0.1)  -- quick pause between hops
                 end
                 if pass == 1 and taken == 0 then
                     -- nothing answered: race may not have started, or every
