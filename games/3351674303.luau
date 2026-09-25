@@ -2464,7 +2464,7 @@ local function buildMenu()
     toggle(p4, "Filled",
         function() return Config.ESP.ChamsFilled ~= false end,
         function(v) Config.ESP.ChamsFilled = v end)
-    slider(p4, "Chams opacity",
+    slider(p4, "Fill opacity",
         function() return Config.ESP.ChamsTransparency end,
         function(v) Config.ESP.ChamsTransparency = v end, 0.05, 0, 1)
     color(p4, "Chams colour", Config.ESP, "Chams")

@@ -5140,7 +5140,7 @@ do
             addSection(cat, sub, "Chams")
             addMultiSelect(cat, sub, "Parts to highlight", { "Head", "Body" }, cfg, "Chams")
             addToggle(cat, sub, "Filled", function() return cfg.ChamsFilled ~= false end, function(v) cfg.ChamsFilled = v end)
-            addValue (cat, sub, "Chams opacity", function() return cfg.ChamsTransparency end,
+            addValue (cat, sub, "Fill opacity", function() return cfg.ChamsTransparency end,
                 function(v) cfg.ChamsTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
             addColor (cat, sub, "Chams colour", cfg, "Chams")
         end
@@ -5155,7 +5155,7 @@ do
         addSection("ESP", "Drops", "Items")
         addToggle("ESP", "Drops", "Items",        function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
         addToggle("ESP", "Drops", "Item filled",  function() return Config.Drops.Item.Filled ~= false end,  function(v) Config.Drops.Item.Filled = v end)
-        addValue ("ESP", "Drops", "Item opacity", function() return Config.Drops.Item.Opacity end,
+        addValue ("ESP", "Drops", "Item fill opacity", function() return Config.Drops.Item.Opacity end,
             function(v) Config.Drops.Item.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
         addColor ("ESP", "Drops", "Item colour",  Config.Drops.Item, "")
         addToggle("ESP", "Drops", "Item names",   function() return Config.Drops.ShowItemNames end, function(v) Config.Drops.ShowItemNames = v end)
@@ -5163,7 +5163,7 @@ do
         addSection("ESP", "Drops", "Corpses")
         addToggle("ESP", "Drops", "Corpses",       function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
         addToggle("ESP", "Drops", "Corpse filled", function() return Config.Drops.Corpse.Filled ~= false end, function(v) Config.Drops.Corpse.Filled = v end)
-        addValue ("ESP", "Drops", "Corpse opacity", function() return Config.Drops.Corpse.Opacity end,
+        addValue ("ESP", "Drops", "Corpse fill opacity", function() return Config.Drops.Corpse.Opacity end,
             function(v) Config.Drops.Corpse.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
         addColor ("ESP", "Drops", "Corpse colour", Config.Drops.Corpse, "")
         addToggle("ESP", "Drops", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
