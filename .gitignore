@@ -13,3 +13,7 @@ WeaponConfig.luau
 Thumbs.db
 Desktop.ini
 .vscode/
+
+# structure dumps (regenerable, large)
+*.Structure
+*.structure
