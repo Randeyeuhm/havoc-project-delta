@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v31"
+local SCRIPT_VERSION = "de-v32"
 
 local Connections = {}
 local function track(conn)
@@ -388,6 +388,26 @@ local function installInvokeProbe()
     end
 end
 
+-- FIRE PROBE: count the game's race-recording uploads (RaceRecordUploadStart/
+-- Chunk fire when a race ends) so the post-race report can say whether the
+-- server even received a recording of the run.
+local raceReport = { uploads = 0, chunks = 0 }
+local function installFireProbe()
+    if not Remotes or type(Remotes.fireServer) ~= "function" then return end
+    if type(vehicleHooks.origFireServer) ~= "function" then
+        vehicleHooks.origFireServer = Remotes.fireServer
+    end
+    local orig = vehicleHooks.origFireServer
+    Remotes.fireServer = function(name, ...)
+        if name == "RaceRecordUploadStart" then
+            raceReport.uploads = raceReport.uploads + 1
+        elseif name == "RaceRecordUploadChunk" then
+            raceReport.chunks = raceReport.chunks + 1
+        end
+        return orig(name, ...)
+    end
+end
+
 -- RACE CLOCK: every racing-loop tick the client pushes the race's elapsed
 -- time (tick() - raceStart) through ClientRaceHelper.updateTrackInfo.
 -- Wrapping it gives the assist a live, exact race timer, so it can hold at
@@ -491,6 +511,7 @@ local function initVehicleModules()
         end
     end
     installInvokeProbe()
+    installFireProbe()
     installRaceClockHook()
     if ChassisUtils then
         if not vehicleHooks.origSpeed then
@@ -1348,20 +1369,35 @@ local function legitimizeVehicleStats(chassis)
 end
 
 -- Watch leaderstats.Cash after a finished race and report when the payout
--- actually lands (or that it never came - then the server withheld it).
+-- actually lands (or that it never came). Also reports whether the game
+-- uploaded its race recording and how many players were in the session.
 local function watchRacePayout()
     local before = getCash()
-    if not before then return end
+    local here = #Players:GetPlayers()
+    local uploads0, chunks0 = raceReport.uploads, raceReport.chunks
     task.spawn(function()
-        for _ = 1, 24 do
+        task.wait(15)  -- the recording upload fires right after the finish
+        local uploads = raceReport.uploads - uploads0
+        local chunks = raceReport.chunks - chunks0
+        local uploaded = uploads > 0 and ("yes (%d chunks)"):format(chunks) or "NO"
+        print(("[driving-empire] race report: players here=%d, game uploaded a recording: %s, cash before=%s"):format(
+            here, uploaded, before and tostring(before) or "?"))
+        notify(("Race report: %d players in the session, game uploaded a recording: %s"):format(here, uploaded))
+        if not before then
+            notify("Couldn't read your cash - watch it manually after returning to the main server")
+            return
+        end
+        local deadline = os.clock() + 300
+        while os.clock() < deadline do
             task.wait(2.5)
             local now = getCash()
             if now and now > before then
                 notify(("Race payout received: +%s"):format(formatCash(now - before)))
+                print(("[driving-empire] race report: payout +%s"):format(tostring(now - before)))
                 return
             end
         end
-        notify("No race payout landed in 60s - the server withheld it (stay on the server after finishing; matchmaking races are checked server-side)")
+        notify("No race payout within 5 minutes - the server withheld it. Stay on the server until the race fully ends + teleport back, and check the results screen cash value")
     end)
 end
 
@@ -2005,10 +2041,11 @@ local function buildMenu()
     note(p7, "Prints the live payout numbers to the executor console: every " ..
         "track's 1st-8th place cash + per-racer bonus, for the normal AND " ..
         "matchmaking tables, pulled straight from the game's own config.")
-    note(p7, "If a finished race pays nothing: stay on the server a moment " ..
-        "- the assist's cash watcher toasts 'Race payout received' when the " ..
-        "money lands. Matchmaking races are recorded and checked " ..
-        "server-side, so impossible-looking runs can be withheld.")
+    note(p7, "If a finished race pays nothing: STAY on the server until " ..
+        "the race fully ends (results + teleport back) - payouts land when " ..
+        "the session wraps up, not at your finish. The cash watcher watches " ..
+        "for 5 minutes and also reports whether the game uploaded its race " ..
+        "recording (matchmaking runs are validated server-side).")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
