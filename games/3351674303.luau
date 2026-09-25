@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v29"
+local SCRIPT_VERSION = "de-v30"
 
 local Connections = {}
 local function track(conn)
@@ -1970,12 +1970,12 @@ local function buildMenu()
         "finish time (the toast reads that minimum from the game's own " ..
         "config - this slider never changes it). Server wait is locked at " ..
         "0.5s. Defaults: 0.5 / 12 / 1.")
-    note(p7, "Old fallback minimum finish times baked into the game files " ..
-        "(the LIVE minimum is usually much lower - the toast shows the real " ..
-        "one): Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
-        "Sofia Bay 55s, Drawbridge 59s. Cash pays by finishing place x " ..
-        "extra-racer bonus x event multipliers - not by your car. The " ..
-        "'Print payout table' button also prints every track's live minimum.")
+    note(p7, "Minimum finish time comes from the game's LIVE config - right " ..
+        "now it is ~1s on nearly every track (LightningLoop 30s), so paying " ..
+        "finishes are effectively unrestricted by time. The 59-150s values " ..
+        "in older game files are stale fallbacks - the toast always shows " ..
+        "the live one. Cash pays by finishing place x extra-racer bonus x " ..
+        "event multipliers - not by your car.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
