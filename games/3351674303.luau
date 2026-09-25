@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v9"
+`local SCRIPT_VERSION = "de-v10"
 
 local Connections = {}
 local function track(conn)
@@ -173,11 +173,11 @@ if ESPUI then
 end
 
 -- Clamp anything numeric the file could have corrupted.
-Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 10)
-Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 10)
+Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 50)
+Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 50)
 Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 500)
-Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 10)
-Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 10)
+Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 50)
+Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 50)
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
@@ -1096,23 +1096,23 @@ local function buildMenu()
             Config.Vehicle.SpeedMult = v
             initVehicleModules()
             setSpeedFactor(v)
-        end, 0.05, 1, 10)
+        end, 0.05, 1, 50)
     slider(p1, "Acceleration multiplier",
         function() return Config.Vehicle.TorqueMult end,
         function(v)
             Config.Vehicle.TorqueMult = v
             initVehicleModules()
             setTorqueFactor(v)
-        end, 0.05, 1, 10)
+        end, 0.05, 1, 50)
     slider(p1, "Grip multiplier",
         function() return Config.Vehicle.GripMult end,
         function(v) Config.Vehicle.GripMult = v end, 1, 1, 500)
     slider(p1, "Brake multiplier",
         function() return Config.Vehicle.BrakeMult end,
-        function(v) Config.Vehicle.BrakeMult = v end, 0.05, 1, 10)
+        function(v) Config.Vehicle.BrakeMult = v end, 0.05, 1, 50)
     slider(p1, "Steer strength",
         function() return Config.Vehicle.SteerMult end,
-        function(v) Config.Vehicle.SteerMult = v end, 0.05, 1, 10)
+        function(v) Config.Vehicle.SteerMult = v end, 0.05, 1, 50)
     toggle(p1, "Instant shifting",
         function() return Config.Vehicle.InstantShift end,
         function(v) Config.Vehicle.InstantShift = v end)
