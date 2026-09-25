@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v21"
+local SCRIPT_VERSION = "de-v22"
 
 local Connections = {}
 local function track(conn)
@@ -298,7 +298,6 @@ end)()
 local ChassisUtils, ClientVehicles, VehicleController
 local Remotes, RaceUtil, RaceController, TeleportDetection
 local ClientRaceHelper
-local VehicleStatTracker
 
 local function waitPath(root, segments)
     local node = root
@@ -473,13 +472,6 @@ local function initVehicleModules()
         if node then
             local ok, res = pcall(require, node)
             if ok and type(res) == "table" then ClientRaceHelper = res end
-        end
-    end
-    if not VehicleStatTracker then
-        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Vehicles", "VehicleStatTracker" })
-        if node then
-            local ok, res = pcall(require, node)
-            if ok and type(res) == "table" then VehicleStatTracker = res end
         end
     end
     installInvokeProbe()
@@ -1467,20 +1459,14 @@ local function runRaceRoutine()
                     elseif res == "novh" then
                         error("couldn't move your car - make sure you're sitting in it", 0)
                     else
-                        -- Server rejected this crossing. Loop back through the
-                        -- previous checkpoint (and nudge the server with a
-                        -- direct invoke in case its state lags), then approach
-                        -- this gate again - and keep going once it clears.
-                        local prev = i > 1 and (i - 1) or #cps
-                        notify(("Race assist: checkpoint %d rejected (%s) - looping back to checkpoint %d"):format(i, tostring(res), prev))
+                        -- Server rejected this crossing: redo the SAME
+                        -- checkpoint with spaced-out re-crossings. Looping
+                        -- back through the previous gate broke runs more
+                        -- than it helped.
+                        notify(("Race assist: checkpoint %d rejected (%s) - redoing it"):format(i, tostring(res)))
                         local cleared = false
-                        for _ = 1, 3 do
-                            crossCheckpoint(cps[prev], dirs[prev])
+                        for _ = 1, 4 do
                             task.wait(Config.Race.HopDelay or 0.5)
-                            if Remotes and type(Remotes.invokeServer) == "function" then
-                                pcall(function() Remotes.invokeServer("RaceCheckpoint", prev) end)
-                            end
-                            task.wait(0.25)
                             local res2 = crossCheckpoint(cps[i], dirs[i])
                             if res2 == "ok" then
                                 cleared = true
@@ -1489,12 +1475,21 @@ local function runRaceRoutine()
                             if res2 == "novh" then
                                 error("couldn't move your car - make sure you're sitting in it", 0)
                             end
+                            if res2 == "none" and Remotes and type(Remotes.invokeServer) == "function" then
+                                -- the crossing ray missed - report this gate
+                                -- anyway through the remote
+                                local okCall, answer = pcall(Remotes.invokeServer, "RaceCheckpoint", i)
+                                if okCall and answer then
+                                    cleared = true
+                                    break
+                                end
+                            end
                         end
                         if not cleared then
-                            error(("checkpoint %d kept getting rejected (%s) - press the button again once the race catches up (progress is kept)"):format(i, tostring(res)), 0)
+                            error(("checkpoint %d kept getting rejected (%s) - press the button again (progress is kept)"):format(i, tostring(res)), 0)
                         end
                         taken = taken + 1
-                        notify(("Race assist: checkpoint %d accepted after looping back"):format(i))
+                        notify(("Race assist: checkpoint %d accepted after redoing it"):format(i))
                     end
                     task.wait(Config.Race.HopDelay or 0.5)  -- hop delay (Race tab slider)
                 end
@@ -1543,195 +1538,6 @@ local function runRaceRoutine()
         raceBusy = false
         if not ok then
             notify("Race assist: " .. tostring(err))
-        end
-    end)
-end
-
--- REMOTE RACE (combined): report each checkpoint through the game's own
--- RaceCheckpoint remote first - the exact call verified in-game - and use
--- the server's rejections as steering: an "expected N" reply gets followed
--- directly. Only when the remote still can't push a gate does the routine
--- teleport the car through it as a backup (the game's own crossing ray then
--- reports it). The finish goes out the same way, payout minimum respected.
-local function raceRemoteNode(which)
-    local folder = ReplicatedStorage:FindFirstChild("Remotes")
-    if not folder then return nil end
-    return folder:FindFirstChild(which == "finish" and "RaceFinishLine" or "RaceCheckpoint")
-end
-
-local function invokeRaceRemote(name, ...)
-    local args = table.pack(...)
-    local node = raceRemoteNode(name == "RaceFinishLine" and "finish" or "cp")
-    if node and node:IsA("RemoteFunction") then
-        local ret = table.pack(pcall(function()
-            return node:InvokeServer(table.unpack(args, 1, args.n))
-        end))
-        if not ret[1] then return false, "invoke failed: " .. tostring(ret[2]) end
-        if ret[2] then return true, nil end
-        return false, tostring(ret[3] or "no reason given")
-    end
-    -- folder missing: fall back to the game's Remotes module
-    if not Remotes or type(Remotes.invokeServer) ~= "function" then
-        return false, "race remote not found"
-    end
-    local ret = table.pack(pcall(Remotes.invokeServer, name, table.unpack(args, 1, args.n)))
-    if not ret[1] then return false, "invoke failed: " .. tostring(ret[2]) end
-    if ret[2] then return true, nil end
-    return false, tostring(ret[3] or "no reason given")
-end
-
-local function expectedFromReason(reason)
-    if type(reason) ~= "string" then return nil end
-    local expected = reason:match("expected%s+(%d+)")
-    return expected and tonumber(expected) or nil
-end
-
-local function runRemoteRaceRoutine()
-    if raceBusy then
-        notify("Race assist is already running")
-        return
-    end
-    if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
-    local trackModel = findRaceTrackModel()
-    if not trackModel then
-        notify("Race assist: join a race first (with your car spawned)")
-        return
-    end
-    local cps = {}
-    for _, e in ipairs(trackModel.Checkpoints:GetChildren()) do
-        local p = trackEntryPart(e)
-        if p then table.insert(cps, p) end
-    end
-    table.sort(cps, function(a, b) return (tonumber(a.Name) or 0) < (tonumber(b.Name) or 0) end)
-    local finish = trackEntryPart(trackModel.Finish)
-    if #cps == 0 or not finish then
-        notify("Race assist: couldn't read this race's checkpoints")
-        return
-    end
-    local cpCount = #cps
-    local lapsKnown, minTime = raceTrackInfo(trackModel)
-    local laps = math.clamp(lapsKnown or 4, 1, 8)
-    local startClock = os.clock()
-    raceBusy = true
-    task.spawn(function()
-        if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
-        notify(("Race assist (remote): taking %d checkpoints x%d lap(s)"):format(cpCount, laps))
-        local ok, err = pcall(function()
-            local function dirBetween(fromPart, toPart)
-                local d = (toPart.Position - fromPart.Position) * Vector3.new(1, 0, 1)
-                if d.Magnitude < 1 then
-                    d = toPart.CFrame.LookVector * Vector3.new(1, 0, 1)
-                    if d.Magnitude < 0.1 then d = Vector3.new(1, 0, 0) end
-                end
-                return d.Unit
-            end
-            local dirs = {}
-            for i = 1, cpCount do
-                dirs[i] = dirBetween(cps[i - 1] or cps[cpCount], cps[i])
-            end
-            local finishDir = dirBetween(cps[cpCount], finish)
-            local accepted, fails, lastReason = 0, 0, nil
-            local function finishAttempt()
-                if accepted > 0 then
-                    waitForPayout(minTime, startClock)
-                end
-                local stats = nil
-                if VehicleStatTracker and type(VehicleStatTracker.get) == "function" then
-                    local okGet, resGet = pcall(VehicleStatTracker.get)
-                    if okGet then stats = resGet end
-                end
-                local fok, freason = invokeRaceRemote("RaceFinishLine", stats, false)
-                if fok then return true end
-                lastReason = freason or lastReason
-                -- physical backup: sweep the finish line too
-                local fres = tryFinish(finish, finishDir, true)
-                if fres == "ok" then return true end
-                return false
-            end
-            local n = 1
-            local steps = 0
-            local stepCap = (laps * cpCount * 3) + cpCount
-            local t0 = os.clock()
-            while steps < stepCap and os.clock() - t0 < 900 do
-                steps = steps + 1
-                local okSend, reason = invokeRaceRemote("RaceCheckpoint", n)
-                if not okSend then
-                    -- the server says which checkpoint it wants - follow it
-                    local expected = expectedFromReason(reason)
-                    if expected and expected >= 1 and expected <= cpCount and expected ~= n then
-                        local okJump, jreason = invokeRaceRemote("RaceCheckpoint", expected)
-                        if okJump then
-                            okSend = true
-                            n = expected
-                            notify(("Race assist (remote): server wanted %d - jumped there"):format(expected))
-                        else
-                            reason = jreason or reason
-                        end
-                    end
-                end
-                if not okSend then
-                    -- teleport backup for this gate: the game's own crossing
-                    -- ray reports it (and syncs the local race state)
-                    notify(("Race assist (remote): checkpoint %d rejected (%s) - teleporting through it"):format(n, tostring(reason)))
-                    local res = crossCheckpoint(cps[n], dirs[n])
-                    if res == "ok" then
-                        okSend = true
-                    elseif res == "novh" then
-                        error("couldn't move your car - make sure you're sitting in it", 0)
-                    else
-                        task.wait(RACE_SERVER_WAIT)
-                        local okRetry, rreason = invokeRaceRemote("RaceCheckpoint", n)
-                        if okRetry then
-                            okSend = true
-                        else
-                            reason = rreason or ("sweep: " .. tostring(res))
-                        end
-                    end
-                end
-                if okSend then
-                    accepted = accepted + 1
-                    fails = 0
-                    if accepted % 5 == 0 then
-                        notify(("Race assist (remote): %d checkpoints accepted"):format(accepted))
-                    end
-                    n = n % cpCount + 1
-                    if n == 1 then
-                        -- lap boundary: offer the finish (rejected while laps
-                        -- remain - harmless)
-                        if finishAttempt() then
-                            notify("Race assist: race finished!")
-                            return
-                        end
-                    end
-                else
-                    fails = fails + 1
-                    lastReason = reason
-                    n = n % cpCount + 1
-                    if fails >= cpCount then
-                        -- a full lap of refusals: either only the finish is
-                        -- left, or the race isn't running
-                        if finishAttempt() then
-                            notify("Race assist: race finished!")
-                            return
-                        end
-                        error(("the server stopped accepting checkpoints (%s) - if the race is running, press the button again"):format(tostring(lastReason)), 0)
-                    end
-                end
-                task.wait(RACE_SERVER_WAIT)  -- pacing between gates
-            end
-            -- budget spent: a few last finish attempts
-            for _ = 1, 3 do
-                if finishAttempt() then
-                    notify("Race assist: race finished!")
-                    return
-                end
-                task.wait(1)
-            end
-            error(("the finish wasn't accepted via remote (%s) - press this button again (it resumes from where the server is)"):format(tostring(lastReason)), 0)
-        end)
-        raceBusy = false
-        if not ok then
-            notify("Race assist (remote): " .. tostring(err))
         end
     end)
 end
@@ -2019,14 +1825,6 @@ local function buildMenu()
     local p7 = pages[7]
     section(p7, "Race assist")
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
-    button(p7, "Finish race via remote (teleport backup)", function() runRemoteRaceRoutine() end)
-    note(p7, "Remote mode reports each checkpoint through the game's own " ..
-        "RaceCheckpoint remote first - if the server rejects one, the assist " ..
-        "reads its 'expected N' reply and follows it directly, and only then " ..
-        "teleports the car through that gate as a backup, so a run keeps " ..
-        "moving. The finish is sent the same way (payout minimum respected). " ..
-        "If it stops early it prints the server's reason - press it again to " ..
-        "resume.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
@@ -2044,7 +1842,7 @@ local function buildMenu()
         "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 3.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
-        "a crossing it loops back through the previous checkpoint and retries " ..
+        "a crossing it just redoes that checkpoint after a short pause " ..
         "instead of giving up. You must be in a race with your car spawned; " ..
         "wait for the countdown (GO) before pressing. Race records and " ..
         "leaderboards are monitored - use it on tracks you don't care about.")
