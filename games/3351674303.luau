@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v27"
+local SCRIPT_VERSION = "de-v28"
 
 local Connections = {}
 local function track(conn)
@@ -1312,6 +1312,12 @@ local function raceTrackInfo(model)
     return nil, nil, nil
 end
 
+-- "1.5" style below 10s, whole seconds above (150, not 150.0)
+local function fmtSecs(v)
+    if v >= 10 then return tostring(math.floor(v)) end
+    return tostring(math.round(v * 10) / 10)
+end
+
 -- Finishing too fast skips the payout - the server checks the total race
 -- time against the track's payout minimum. Park at the last checkpoint
 -- until the race clock clears it (+ the buffer).
@@ -1326,7 +1332,7 @@ local function waitForPayout(minTime, startClock)
     if elapsed >= target then return end
     local waitFor = math.min(target - elapsed, 600)
     if waitFor > 0.5 then
-        notify(("Race assist: holding %.1fs before the finish - this race pays out after %ds"):format(waitFor, math.floor(minTime)))
+        notify(("Race assist: holding %.1fs before the finish - this race pays out after %ss"):format(waitFor, fmtSecs(minTime)))
     end
     -- wait precisely: half-second chunks until close, then tenths, so the
     -- finish crossing lands right after the minimum
@@ -1444,7 +1450,7 @@ local function runRaceRoutine()
         if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
         local chassis = getActiveChassis()
         if chassis then pcall(function() chassis.Teleporting = true end) end
-        local minTxt = minTime and (" - payout after %ds"):format(math.floor(minTime)) or ""
+        local minTxt = minTime and (" - payout after %ss"):format(fmtSecs(minTime)) or ""
         if trackName and RaceUtil then
             -- show the game's own payout numbers: fixed cash per finishing
             -- place, plus a bonus for every extra racer (never car-based).
@@ -1630,6 +1636,21 @@ local function printPayoutTable()
                 if okInfo and info then
                     print(("[current] %s MinTime=%ss TimeLimit=%ss MaxLaps=%s"):format(
                         trackName, tostring(info.MinTimeSeconds), tostring(info.TimeLimitSeconds), tostring(info.MaxLaps)))
+                end
+            end
+            local trNode = waitPath(ReplicatedStorage, { "Modules", "Shared", "Races", "RaceRemoteConfig" })
+            if trNode then
+                local okT, tracks = pcall(function() return require(trNode).getTracks() end)
+                if okT and type(tracks) == "table" then
+                    local tnames = {}
+                    for nm in pairs(tracks) do table.insert(tnames, nm) end
+                    table.sort(tnames)
+                    print("----- live track times (MinTime / TimeLimit / MaxLaps) -----")
+                    for _, nm in ipairs(tnames) do
+                        local t = tracks[nm]
+                        print(("[track] %s MinTime=%ss TimeLimit=%ss MaxLaps=%s"):format(
+                            nm, tostring(t.MinTime), tostring(t.TimeLimit), tostring(t.MaxLaps)))
+                    end
                 end
             end
             print("===== end payout table =====")
@@ -1946,11 +1967,12 @@ local function buildMenu()
         "track's live minimum time (default 1s - the crossing happens about " ..
         "a second after the minimum). Server wait is locked at 0.5s - that " ..
         "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 1.")
-    note(p7, "Minimum finish time per race (below it the payout is void): " ..
-        "Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
+    note(p7, "Old fallback minimum finish times baked into the game files " ..
+        "(the LIVE minimum is usually much lower - the toast shows the real " ..
+        "one): Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
         "Sofia Bay 55s, Drawbridge 59s. Cash pays by finishing place x " ..
-        "extra-racer bonus x event multipliers - not by your car - and the " ..
-        "assist waits the live minimum automatically.")
+        "extra-racer bonus x event multipliers - not by your car. The " ..
+        "'Print payout table' button also prints every track's live minimum.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it just redoes that checkpoint after a short pause " ..
