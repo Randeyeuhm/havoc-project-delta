@@ -371,8 +371,10 @@ local function applyCham(d, cfg, field, name, adornee, parent)
     local t = guiT(cfg.ChamsTransparency)
     hl.FillColor = rgb(cfg.ChamsR, cfg.ChamsG, cfg.ChamsB)
     hl.OutlineColor = hl.FillColor
+    -- The opacity slider fades only the INSIDE (fill); the outline stays
+    -- solid so the chams stay readable at any fill opacity.
     hl.FillTransparency = (cfg.ChamsFilled ~= false) and t or 1
-    hl.OutlineTransparency = t
+    hl.OutlineTransparency = 0.2
     hl.Enabled = true
 end
 
