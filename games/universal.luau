@@ -145,7 +145,7 @@ do
 end
 
 -- ============================================================
--- ESP LIBRARY (esp.luau: one file - engine + customizer)
+-- ESP LIBRARY (esp.luau: engine classes; settings live in this menu)
 -- ============================================================
 local ESP_FILE = "esp.luau"
 local ESPUI

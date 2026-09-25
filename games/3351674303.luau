@@ -14,7 +14,7 @@
       • Vehicle   - speed multiplier, acceleration multiplier, infinite
                     nitro, ignore speed caps (client-side physics)
       • Teleports - Race Hub, dealerships, garages, bank, drag strip, ...
-      • Visuals   - player ESP (full customizer) + fullbright
+      • Visuals   - player ESP (settings in the menu) + fullbright
       • Misc      - anti-AFK, rejoin, reset character
 
     Menu key: RightShift (locked). Config: driving_empire_config.json.
@@ -96,7 +96,7 @@ local function saveConfigDebounced()
 end
 
 -- The file is read now but merged LATER (after esp.luau has filled the ESP
--- section), so saved customizer settings can actually restore.
+-- section), so saved ESP settings can actually restore.
 local savedFromFile = nil
 if type(isfile) == "function" and isfile(CONFIG_FILE) and type(readfile) == "function" then
     local ok, decoded = pcall(function()

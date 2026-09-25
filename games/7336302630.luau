@@ -449,7 +449,7 @@ do
     end
 
     Config.Weapon.InstantHitVelocity = math.max(Config.Weapon.InstantHitVelocity or IH_DEFAULT_VELOCITY, IH_DEFAULT_VELOCITY)
-    -- Max distance is set from the ESP customizer (slider range 100-10000);
+    -- Max distance is set from the ESP menu (slider range 100-10000);
     -- keep whatever is saved and only repair broken values.
     Config.Player.MaxDistance = math.clamp(tonumber(Config.Player.MaxDistance) or 4500, 100, 10000)
     Config.NPC.MaxDistance    = math.clamp(tonumber(Config.NPC.MaxDistance)    or 4500, 100, 10000)
@@ -1533,7 +1533,7 @@ end
 -- for the hub-wide esp.luau library, and the library's engine is its direct
 -- port (same 8-segment corner boxes, same label layout, chams included).
 -- Project Delta now renders through the shared library like the other games;
--- box/label/chams options live in the library's customizer (ESP tab buttons).
+-- box/label/chams options live in the ESP menu tabs.
 local function makeESPEngine(getCfg)
     if ESPUI and ESPUI.new then
         return ESPUI.new(getCfg)

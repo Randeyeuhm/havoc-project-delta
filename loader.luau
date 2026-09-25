@@ -21,7 +21,7 @@
     repo's games/ folder and push. No loader changes needed.
 
     It also fetches uilib.luau + esp.luau (the shared UI toolkit and the
-    one-file ESP library - engine + customizer) and hands their sources to
+    one-file ESP library - engine classes) and hands their sources to
     the game script, which loads them with loadstring - nothing is ever
     written to the executor's workspace.
 ]]
