@@ -322,6 +322,7 @@ do
             Enabled = true, MaxDistance = 4500,
             BoxColor = Color3.fromRGB(0, 255, 0),
             ShowLandmines = false,
+            LandmineDistance = 600,
         },
         Drops = {
             Item   = { Enabled = true, Hollow = true, R = 0,   G = 100, B = 255 },
@@ -466,6 +467,7 @@ do
     -- "Landmine ESP" is the NPC ESP hazard filter: off (default) = mines
     -- (PMN2 / MON-50) are skipped, on = they show like any other NPC.
     if type(Config.NPC.ShowLandmines) ~= "boolean" then Config.NPC.ShowLandmines = false end
+    Config.NPC.LandmineDistance = math.clamp(tonumber(Config.NPC.LandmineDistance) or 600, 50, 10000)
 
     Config.Misc.Walkspeed = math.clamp(Config.Misc.Walkspeed or OMNISPRINT_DEFAULT, OMNISPRINT_MIN, OMNISPRINT_MAX)
     Config.Weapon.InstantHitVelocity = math.clamp(Config.Weapon.InstantHitVelocity, 500, VELOCITY_HARD_CAP)
@@ -1806,8 +1808,15 @@ do
         if Players:GetPlayerFromCharacter(model) then return end
         if sameInstance(model, LocalPlayer.Character) then return end
         if not modelHasHealth(model) then return end
-        if not Config.NPC.ShowLandmines and isLandmine(model) then return end
-        NpcESP:Ensure(model)
+        local mine = isLandmine(model)
+        if not Config.NPC.ShowLandmines and mine then return end
+        local d = NpcESP:Ensure(model)
+        -- Mines get their own range (Hazards slider) through the engine's
+        -- per-target cap; the render loop refreshes it every frame.
+        if d and mine then
+            d.landmine = true
+            d.maxDistance = Config.NPC.LandmineDistance or 600
+        end
     end
 
     local function hookNPCDeath(model)
@@ -5184,6 +5193,8 @@ do
         addSection("ESP", "NPC", "Hazards")
         addToggle("ESP", "NPC", "Landmine ESP", function() return Config.NPC.ShowLandmines end,
             function(v) Config.NPC.ShowLandmines = v end)
+        addValue ("ESP", "NPC", "Landmine distance", function() return Config.NPC.LandmineDistance end,
+            function(v) Config.NPC.LandmineDistance = v end, 50, 50, 4500, function(v) return tostring(math.floor(v)) end)
 
         addSection("ESP", "Drops", "Objects")
         addToggle("ESP", "Drops", "Items",   function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
@@ -5705,7 +5716,9 @@ track(RunService.RenderStepped:Connect(function()
         local root = target:FindFirstChild("HumanoidRootPart")
         if root then updateVelocityTracker(target, root) end
     end
-    for target in pairs(NpcESP.Objects) do
+    for target, tracked in pairs(NpcESP.Objects) do
+        -- Mines follow their own Hazards range slider (per-target cap).
+        if tracked.landmine then tracked.maxDistance = Config.NPC.LandmineDistance or 600 end
         local root = target:FindFirstChild("HumanoidRootPart")
         if root then updateVelocityTracker(target, root) end
     end
