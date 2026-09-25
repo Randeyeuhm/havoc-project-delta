@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v18"
+local SCRIPT_VERSION = "de-v19"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
-    Race     = { HopDelay = 0.1, ServerWait = 0.6, SweepDist = 12, PayoutBuffer = 3 },
+    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 3 },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -187,8 +187,7 @@ Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
 Config.HUD.YOffset = math.clamp(tonumber(Config.HUD.YOffset) or 40, 0, 600)
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
 Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
-Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.1, 0, 5)
-Config.Race.ServerWait = math.clamp(tonumber(Config.Race.ServerWait) or 0.6, 0.1, 5)
+Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
 Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 3, 0, 60)
 
@@ -1327,6 +1326,10 @@ local function waitForPayout(minTime, startClock)
     end
 end
 
+-- Locked: 0.5s gives the server enough time to answer every crossing -
+-- this is the value that clears rejections almost entirely.
+local RACE_SERVER_WAIT = 0.5
+
 -- One sweep: appear just before the gate, then just past it - the game's
 -- crossing ray runs between those two frames and hits the part. Returns
 -- "ok" / "rejected: <reason>" / "none" / "novh".
@@ -1335,7 +1338,7 @@ local function sweepAt(position, dir, dist)
     local before = CFrame.new(position - dir * dist) * rot
     local after = CFrame.new(position + dir * dist) * rot
     local snap = raceProbe.seq
-    local tries = math.max(2, math.floor((Config.Race.ServerWait or 0.6) / 0.05))
+    local tries = math.max(2, math.floor(RACE_SERVER_WAIT / 0.05))
     if not teleportCarTo(before) then return "novh", nil end
     task.wait(0.1)
     if not teleportCarTo(after) then return "novh", nil end
@@ -1465,7 +1468,7 @@ local function runRaceRoutine()
                         local cleared = false
                         for _ = 1, 3 do
                             crossCheckpoint(cps[prev], dirs[prev])
-                            task.wait(Config.Race.HopDelay or 0.1)
+                            task.wait(Config.Race.HopDelay or 0.5)
                             if Remotes and type(Remotes.invokeServer) == "function" then
                                 pcall(function() Remotes.invokeServer("RaceCheckpoint", prev) end)
                             end
@@ -1485,7 +1488,7 @@ local function runRaceRoutine()
                         taken = taken + 1
                         notify(("Race assist: checkpoint %d accepted after looping back"):format(i))
                     end
-                    task.wait(Config.Race.HopDelay or 0.1)  -- hop delay (Race tab slider)
+                    task.wait(Config.Race.HopDelay or 0.5)  -- hop delay (Race tab slider)
                 end
                 if pass == 1 and taken == 0 then
                     -- nothing answered: race may not have started, or every
@@ -1822,21 +1825,18 @@ local function buildMenu()
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
-        function(v) Config.Race.HopDelay = v end, 0.05, 0, 5)
-    slider(p7, "Server wait (s)",
-        function() return Config.Race.ServerWait end,
-        function(v) Config.Race.ServerWait = v end, 0.05, 0.1, 5)
+        function(v) Config.Race.HopDelay = v end, 0.05, 0.5, 1.5)
     slider(p7, "Sweep distance",
         function() return Config.Race.SweepDist end,
         function(v) Config.Race.SweepDist = v end, 1, 6, 60)
     slider(p7, "Payout buffer (s)",
         function() return Config.Race.PayoutBuffer end,
         function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
-    note(p7, "Hop delay: pause between checkpoints. Server wait: how long " ..
-        "each crossing waits for the server's answer. Sweep distance: how far " ..
-        "before/after each gate the car is placed. Payout buffer: extra wait " ..
-        "at the finish so the race clears the track's payout minimum time. " ..
-        "Defaults: 0.1 / 0.6 / 12 / 3.")
+    note(p7, "Hop delay: pause between checkpoints (0.5-1.5s). Sweep " ..
+        "distance: how far before/after each gate the car is placed. " ..
+        "Payout buffer: extra wait at the finish so the race clears the " ..
+        "track's payout minimum time. Server wait is locked at 0.5s - that " ..
+        "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 3.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
         "in - in order - then across the finish line. If the server rejects " ..
         "a crossing it loops back through the previous checkpoint and retries " ..
