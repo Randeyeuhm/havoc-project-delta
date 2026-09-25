@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v49"
+local SCRIPT_VERSION = "de-v50"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1897,7 +1897,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0 }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0 }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -1943,7 +1943,22 @@ local function deliveryTick()
         return
     end
 
-    if st.IsCollecting or st.IsDropping then return end  -- server is processing
+    -- Items collect ONE AT A TIME while the car sits in the pickup circle, so
+    -- track every change. The farm stays at the pickup until no more items
+    -- are coming, then drives to the drop-off.
+    local items = tonumber(st.ItemsCarried) or 0
+    local maxCap = tonumber(st.MaxCapacity) or 4
+    if items ~= deliveryFarm.lastItems then
+        if deliveryFarm.lastItems >= 0 then
+            print(("[driving-empire] delivery farm: items %d/%d"):format(items, maxCap))
+        end
+        deliveryFarm.lastItems = items
+        deliveryFarm.itemsAt = now
+        if items == 0 then
+            deliveryFarm.pickupDone = false
+        end
+    end
+
     local veh = getLocalVehicleModel()
     if not veh then
         if not deliveryFarm.noCarWarned then
@@ -1955,9 +1970,68 @@ local function deliveryTick()
     end
     deliveryFarm.noCarWarned = false
 
-    local carrying = (tonumber(st.ItemsCarried) or 0) > 0
+    local carrying = items > 0
+
+    -- Server is dropping the load off: hold position and keep the
+    -- interaction alive until DeliveryCompleted arrives.
+    if st.IsDropping then
+        local tgt = st.DestinationPosition or veh:GetPivot().Position
+        local dHold = (veh:GetPivot().Position - tgt).Magnitude
+        if dHold > 70 then
+            if (now - deliveryFarm.lastMove) > 6 then
+                deliveryFarm.lastMove = now
+                local cf = veh:GetPivot()
+                local okTp = teleportCarTo(CFrame.new(tgt + Vector3.new(0, 6, 0)) * (cf - cf.Position))
+                print(("[driving-empire] delivery farm: teleport to dropoff ok=%s (%.0f studs away)"):format(
+                    tostring(okTp), dHold))
+            end
+            return
+        end
+        if (now - deliveryFarm.lastInteract) >= 5 then
+            local part = deliveryLocationPart(tgt)
+            if part and Remotes and type(Remotes.fireServer) == "function" then
+                deliveryFarm.lastInteract = now
+                pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
+            end
+        end
+        return
+    end
+
+    -- While carrying, wait at the pickup until the pile stops giving items
+    -- (truck full / pile empty / count stalled), then head for the drop-off.
+    if carrying and st.PickupPosition then
+        local atPickup = (veh:GetPivot().Position - st.PickupPosition).Magnitude <= 70
+        local rem = tonumber(st.PackagesRemainingAtPickup)
+        local full = items >= maxCap
+        local exhausted = rem ~= nil and rem <= 0
+        local stalled = (now - deliveryFarm.itemsAt) > 12
+        if atPickup and not (full or exhausted or stalled) then
+            if (now - deliveryFarm.lastInteract) >= 5 then
+                local part = deliveryLocationPart(st.PickupPosition)
+                if part and Remotes and type(Remotes.fireServer) == "function" then
+                    deliveryFarm.lastInteract = now
+                    pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
+                end
+            end
+            return
+        end
+        if atPickup and not deliveryFarm.pickupDone then
+            deliveryFarm.pickupDone = true
+            notify(("Delivery: %d items picked up"):format(items))
+            print(("[driving-empire] delivery farm: pickup done (items=%d/%d%s) - heading to the dropoff"):format(
+                items, maxCap, (stalled and not full and not exhausted) and ", pile stalled" or ""))
+        end
+    end
+
     local target = carrying and st.DestinationPosition or st.PickupPosition
-    if not target then return end
+    local label = carrying and "dropoff" or "pickup"
+    if not target then
+        if carrying and (now - (deliveryFarm.lastDiag or 0)) > 15 then
+            deliveryFarm.lastDiag = now
+            print(("[driving-empire] delivery farm: carrying %d items but no destination yet - waiting"):format(items))
+        end
+        return
+    end
 
     local d = (veh:GetPivot().Position - target).Magnitude
     if d > 70 then
@@ -1966,7 +2040,7 @@ local function deliveryTick()
             local cf = veh:GetPivot()
             local okTp = teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position))
             print(("[driving-empire] delivery farm: teleport to %s ok=%s (%.0f studs away)"):format(
-                carrying and "dropoff" or "pickup", tostring(okTp), d))
+                label, tostring(okTp), d))
         end
         return
     end
@@ -1977,8 +2051,11 @@ local function deliveryTick()
         if Remotes and type(Remotes.fireServer) == "function" then
             pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
             deliveryFarm.lastInteract = now
-            print(("[driving-empire] delivery farm: %s interaction fired (%.0f studs)"):format(
-                carrying and "dropoff" or "pickup", d))
+            if deliveryFarm.interactLabel ~= label or (now - deliveryFarm.lastInteractPrint) > 30 then
+                deliveryFarm.interactLabel = label
+                deliveryFarm.lastInteractPrint = now
+                print(("[driving-empire] delivery farm: %s interaction fired (%.0f studs)"):format(label, d))
+            end
         end
     elseif not deliveryFarm.warned then
         deliveryFarm.warned = true
