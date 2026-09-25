@@ -18,7 +18,8 @@
       - corner box: 8 Line segments, fixed corner length capped at 30% of
         the box's short side
       - name / health / distance labels (outlined Text)
-      - head + body Highlight chams (hollow = outline only)
+      - Highlights (chams) - one picker chooses the part (Head / Body /
+        Both), with shared colour, opacity and hollow settings
 
     Health works for player rigs (Humanoid) AND vehicle-style NPCs that
     keep health as an attribute on the model / PrimaryPart / Chassis.
@@ -44,7 +45,7 @@ local RunService  = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 
 local ESP = {}
-ESP.VERSION = "esp-v2-pd-core"
+ESP.VERSION = "esp-v3-chams-picker"
 
 -- ============================================================
 -- SCHEMA
@@ -83,21 +84,18 @@ local DEFAULTS = {
     DistanceTransparency = 1,
     DistanceR = 200, DistanceG = 200, DistanceB = 200,
 
-    -- highlight chams
-    HeadHighlight = false,
-    HeadHighlightHollow = false,
-    HeadHighlightTransparency = 0.7,
-    HeadHighlightR = 255, HeadHighlightG = 80, HeadHighlightB = 80,
-
-    BodyHighlight = false,
-    BodyHighlightHollow = false,
-    BodyHighlightTransparency = 0.7,
-    BodyHighlightR = 255, BodyHighlightG = 80, BodyHighlightB = 80,
+    -- chams (Highlight) - ONE picker decides what gets highlighted; the
+    -- colour/opacity/hollow settings are shared by whatever part(s) are on
+    ChamsPart = "None",   -- None | Head | Body | Both
+    ChamsHollow = false,
+    ChamsTransparency = 0.7,
+    ChamsR = 255, ChamsG = 80, ChamsB = 80,
 }
 ESP.DEFAULTS = DEFAULTS
 
 local CHOICES = {
     NameSource = { ["Username"] = true, ["DisplayName"] = true },
+    ChamsPart = { ["None"] = true, ["Head"] = true, ["Body"] = true, ["Both"] = true },
 }
 
 -- Old espui schema fields. The customizer no longer reads them, so they
@@ -130,10 +128,31 @@ local LEGACY_KEYS = {
     "Chams", "ChamsAlwaysOnTop", "ChamsFillTransparency",
     "ChamsOutlineTransparency", "ChamsFillR", "ChamsFillG", "ChamsFillB",
     "ChamsOutlineR", "ChamsOutlineG", "ChamsOutlineB",
+    -- the split head/body chams of esp-v1/v2 (migrated into ChamsPart in fill)
+    "HeadHighlight", "HeadHighlightHollow", "HeadHighlightTransparency",
+    "HeadHighlightR", "HeadHighlightG", "HeadHighlightB",
+    "BodyHighlight", "BodyHighlightHollow", "BodyHighlightTransparency",
+    "BodyHighlightR", "BodyHighlightG", "BodyHighlightB",
 }
 
 function ESP.fill(cfg)
     if type(cfg) ~= "table" then return cfg end
+    -- Migrate the old split head/body chams into the single ChamsPart picker
+    -- (must run BEFORE the defaults injection below).
+    if cfg.ChamsPart == nil and (cfg.HeadHighlight ~= nil or cfg.BodyHighlight ~= nil) then
+        local wasHead = cfg.HeadHighlight == true
+        local wasBody = cfg.BodyHighlight == true
+        if wasHead and wasBody then cfg.ChamsPart = "Both"
+        elseif wasHead then cfg.ChamsPart = "Head"
+        elseif wasBody then cfg.ChamsPart = "Body"
+        else cfg.ChamsPart = "None" end
+        local src = wasBody and "Body" or "Head"
+        cfg.ChamsHollow = cfg[src .. "HighlightHollow"] == true
+        cfg.ChamsTransparency = cfg[src .. "HighlightTransparency"] or 0.7
+        cfg.ChamsR = cfg[src .. "HighlightR"] or 255
+        cfg.ChamsG = cfg[src .. "HighlightG"] or 80
+        cfg.ChamsB = cfg[src .. "HighlightB"] or 80
+    end
     for k, v in pairs(DEFAULTS) do
         if cfg[k] == nil then cfg[k] = v end
     end
@@ -160,9 +179,9 @@ function ESP.sanitize(cfg)
     cfg.NameTransparency = num(cfg.NameTransparency, 0, 1, 1)
     cfg.HealthTransparency = num(cfg.HealthTransparency, 0, 1, 1)
     cfg.DistanceTransparency = num(cfg.DistanceTransparency, 0, 1, 1)
-    cfg.HeadHighlightTransparency = num(cfg.HeadHighlightTransparency, 0, 1, 0.7)
-    cfg.BodyHighlightTransparency = num(cfg.BodyHighlightTransparency, 0, 1, 0.7)
+    cfg.ChamsTransparency = num(cfg.ChamsTransparency, 0, 1, 0.7)
     if CHOICES.NameSource[cfg.NameSource] ~= true then cfg.NameSource = "Username" end
+    if CHOICES.ChamsPart[cfg.ChamsPart] ~= true then cfg.ChamsPart = "None" end
     return cfg
 end
 
@@ -307,6 +326,25 @@ local LINE_TEMPLATE = {
     { "BR_V", 0, 0, 0, 0 }, { "BR_H", 0, 0, 0, 0 },
 }
 
+-- Shared chams updater: creates the Highlight on first use, then keeps its
+-- colour / opacity / hollow in sync every frame.
+local function applyCham(d, cfg, field, name, adornee, parent)
+    local hl = d[field]
+    if not hl then
+        hl = Instance.new("Highlight")
+        hl.Name = name
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Adornee, hl.Parent = adornee, parent
+        d[field] = hl
+    end
+    local t = guiT(cfg.ChamsTransparency)
+    hl.FillColor = rgb(cfg.ChamsR, cfg.ChamsG, cfg.ChamsB)
+    hl.OutlineColor = hl.FillColor
+    hl.FillTransparency = cfg.ChamsHollow and 1 or t
+    hl.OutlineTransparency = t
+    hl.Enabled = true
+end
+
 -- ============================================================
 -- PER-TARGET RENDER (one frame)
 -- ============================================================
@@ -378,41 +416,16 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
         end
     end
 
-    -- Head + body Highlight chams.
-    if cfg.HeadHighlight then
-        local hl = d.HeadHighlight
-        if not hl then
-            hl = Instance.new("Highlight")
-            hl.Name = "HavocESPHead"
-            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.Adornee, hl.Parent = head, head
-            d.HeadHighlight = hl
-        end
-        local t = guiT(cfg.HeadHighlightTransparency)
-        hl.FillColor = rgb(cfg.HeadHighlightR, cfg.HeadHighlightG, cfg.HeadHighlightB)
-        hl.OutlineColor = hl.FillColor
-        hl.FillTransparency = cfg.HeadHighlightHollow and 1 or t
-        hl.OutlineTransparency = t
-        hl.Enabled = true
+    -- Chams (Highlight): ONE picker (ChamsPart) decides which part(s) get
+    -- highlighted; colour, opacity and hollow are shared.
+    local chams = cfg.ChamsPart
+    if chams == "Head" or chams == "Both" then
+        applyCham(d, cfg, "HeadHighlight", "HavocESPHeadCham", head, head)
     elseif d.HeadHighlight then
         d.HeadHighlight.Enabled = false
     end
-
-    if cfg.BodyHighlight then
-        local hl = d.BodyHighlight
-        if not hl then
-            hl = Instance.new("Highlight")
-            hl.Name = "HavocESPBody"
-            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.Adornee, hl.Parent = model, model
-            d.BodyHighlight = hl
-        end
-        local t = guiT(cfg.BodyHighlightTransparency)
-        hl.FillColor = rgb(cfg.BodyHighlightR, cfg.BodyHighlightG, cfg.BodyHighlightB)
-        hl.OutlineColor = hl.FillColor
-        hl.FillTransparency = cfg.BodyHighlightHollow and 1 or t
-        hl.OutlineTransparency = t
-        hl.Enabled = true
+    if chams == "Body" or chams == "Both" then
+        applyCham(d, cfg, "BodyHighlight", "HavocESPBodyCham", model, model)
     elseif d.BodyHighlight then
         d.BodyHighlight.Enabled = false
     end
@@ -985,7 +998,7 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
         -- Above the preview window (20) so its popup layer beats everything
         -- when the two windows are dragged over each other.
         zindex = 21,
-        tabs = { "General", "Box", "Name", "Health", "Distance", "Highlights" },
+        tabs = { "General", "Box", "Name", "Health", "Distance", "Chams" },
     }
     local options = win.frame
     local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
@@ -1116,18 +1129,13 @@ local function buildOptionsWindow(ctx, THEME, FONTS)
     colorpicker(p5, "Distance colour", "Distance")
     note(p5, "Metres, below the box.")
 
-    -- ---------------- Highlights ----------------
+    -- ---------------- Chams ----------------
     local p6 = pages[6]
-    section(p6, "Head highlight")
-    toggle(p6, "Head highlight", "HeadHighlight")
-    toggle(p6, "Hollow (outline only)", "HeadHighlightHollow")
-    slider(p6, "Opacity", "HeadHighlightTransparency", 0.05, 0, 1)
-    colorpicker(p6, "Head colour", "HeadHighlight")
-    section(p6, "Body highlight")
-    toggle(p6, "Body highlight", "BodyHighlight")
-    toggle(p6, "Hollow (outline only)", "BodyHighlightHollow")
-    slider(p6, "Opacity", "BodyHighlightTransparency", 0.05, 0, 1)
-    colorpicker(p6, "Body colour", "BodyHighlight")
+    section(p6, "Chams (Highlight)")
+    dropdown(p6, "Part to highlight", "ChamsPart", { "None", "Head", "Body", "Both" })
+    toggle(p6, "Hollow (outline only)", "ChamsHollow")
+    slider(p6, "Opacity", "ChamsTransparency", 0.05, 0, 1)
+    colorpicker(p6, "Chams colour", "Chams")
     note(p6, "Chams can't render in the preview window - check them in-game.")
 
     win.setTab(1)
