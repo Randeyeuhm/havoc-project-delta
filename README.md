@@ -33,7 +33,7 @@ The original suite:
 
 Built against the game's decompiled source — vehicle physics run client-side:
 
-- **Vehicle** — speed, acceleration, grip, steering and brake multipliers (engine, torque, tyre traction, turn-in and braking in the client physics), infinite nitro, ignore speed caps
+- **Vehicle** — speed, acceleration, grip, steering and brake multipliers (engine, torque, tyre traction, turn-in and braking in the client physics), instant gearshifts (the shift finishes the frame it starts — no clutch/throttle cut), chassis-lock bypass (the game's client-side guard freezes the car and its wheels once you pass 3.5× its stock top speed — the script keeps that tripwire above your actual speed), infinite nitro, ignore speed caps
 - **Teleports** — Race Hub, main dealership, aviation + boat garages, drag strip, bank, police station, drawbridge
 - **HUD** — live speedometer (MPH, gear, RPM) straight from the car's chassis controller, plus your cash
 - **Money** — live cash readout on the HUD

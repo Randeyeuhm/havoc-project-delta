@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v8"
+local SCRIPT_VERSION = "de-v9"
 
 local Connections = {}
 local function track(conn)
@@ -51,7 +51,7 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
@@ -178,6 +178,7 @@ Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1,
 Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 500)
 Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 10)
 Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 10)
+Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
@@ -305,6 +306,53 @@ local function waitPath(root, segments)
     return node
 end
 
+-- INSTANT SHIFTING: the sim stages gear changes behind a shift timer
+-- (Tune.ShiftUpTime * 0.8, with the clutch and throttle cut while
+-- IsShifting). We finish the pending shift in the same frame it starts -
+-- the gear snaps over, no wait, no cut. Wraps the module field; the true
+-- original lives in getgenv so re-executes can't stack wrappers.
+local function installTransmissionHooks()
+    if not ChassisUtils or type(ChassisUtils.UpdateTransmission) ~= "function" then return end
+    if type(vehicleHooks.origUpdateTransmission) ~= "function" then
+        vehicleHooks.origUpdateTransmission = ChassisUtils.UpdateTransmission
+    end
+    local orig = vehicleHooks.origUpdateTransmission
+    ChassisUtils.UpdateTransmission = function(chassis)
+        orig(chassis)
+        if Config.Vehicle.InstantShift and type(chassis) == "table" and chassis.IsShifting then
+            chassis.ShiftEndTime = 0
+            orig(chassis)
+        end
+    end
+end
+
+-- CHASSIS LOCK (the "wheels bug out when you go fast" guard): every frame
+-- the sim freezes the whole chassis - pins the body AND every wheel's CFrame
+-- back to last frame's position - once horizontal speed passes 3.5x the
+-- car's TopSpeed (a client-side speed-hack tripwire). TopSpeed is rewritten
+-- from the tune data at the top of every frame, so the bypass re-raises it
+-- right before that check (see applyLockBypass below) and puts the stock
+-- value back the moment the check has passed (this UpdateBoost wrapper -
+-- UpdateBoost is the first thing called after it), leaving the rest of the
+-- frame - gauges, boost doubling, drag - on the stock value.
+local function installBoostRestore()
+    if not ChassisUtils or type(ChassisUtils.UpdateBoost) ~= "function" then return end
+    if type(vehicleHooks.origUpdateBoost) ~= "function" then
+        vehicleHooks.origUpdateBoost = ChassisUtils.UpdateBoost
+    end
+    local orig = vehicleHooks.origUpdateBoost
+    ChassisUtils.UpdateBoost = function(chassis, ...)
+        if type(chassis) == "table" then
+            local hold = chassis.__hubTopSpeedHold
+            if hold ~= nil then
+                chassis.TopSpeed = hold
+                chassis.__hubTopSpeedHold = nil
+            end
+        end
+        return orig(chassis, ...)
+    end
+end
+
 local function initVehicleModules()
     if not ChassisUtils then
         local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Vehicles", "ChassisUtils" })
@@ -334,6 +382,8 @@ local function initVehicleModules()
             vehicleHooks.speedFactor = 1
             vehicleHooks.torqueFactor = 1
         end
+        installTransmissionHooks()
+        installBoostRestore()
         return true
     end
     return false
@@ -471,6 +521,34 @@ local function applySteer(chassis)
     end
     local want = base * Config.Vehicle.SteerMult
     if pc.TurnRadiusMult ~= want then pc.TurnRadiusMult = want end
+end
+
+-- CHASSIS LOCK BYPASS: see installBoostRestore above. UpdateBrakeDiscHeating
+-- runs in the sim immediately before the 3.5x-speed freeze check (it is the
+-- only hook point between the TopSpeed rewrite and that check), so bumping
+-- TopSpeed here - just for the check - keeps the anti-speed-hack freeze from
+-- ever tripping, no matter how fast the multipliers take the car.
+local function applyLockBypass(chassis)
+    if type(chassis) ~= "table" or chassis.__hubLockBypass then return end
+    local orig = chassis.UpdateBrakeDiscHeating
+    if type(orig) ~= "function" then return end
+    chassis.__hubLockBypass = true
+    chassis.UpdateBrakeDiscHeating = function(self, ...)
+        if type(self) == "table" then
+            local vo = self.VehicleObject
+            local weight = vo and vo.Components and vo.Components.Weight
+            local vel = weight and (weight.AssemblyLinearVelocity or weight.Velocity)
+            local top = tonumber(self.TopSpeed)
+            if vel and top then
+                local h = (vel * Vector3.new(1, 0, 1)).Magnitude
+                if top * 3.5 < h then
+                    self.__hubTopSpeedHold = top
+                    self.TopSpeed = h / 3.3
+                end
+            end
+        end
+        return orig(self, ...)
+    end
 end
 
 -- ============================================================
@@ -1035,6 +1113,9 @@ local function buildMenu()
     slider(p1, "Steer strength",
         function() return Config.Vehicle.SteerMult end,
         function(v) Config.Vehicle.SteerMult = v end, 0.05, 1, 10)
+    toggle(p1, "Instant shifting",
+        function() return Config.Vehicle.InstantShift end,
+        function(v) Config.Vehicle.InstantShift = v end)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -1248,6 +1329,7 @@ track(RunService.RenderStepped:Connect(function()
         applyGrip(chassis)
         applyBrake(chassis)
         applySteer(chassis)
+        applyLockBypass(chassis)
     end)
 
     pcall(renderESP, cam)
