@@ -452,7 +452,6 @@ end
 local drag = nil          -- { gui, move, finish } while a pointer drag runs
 local inputHandle = nil   -- the live attachInput() handle, if any
 local warnedNoInput = false
-local pickerDebugLeft = 3 -- temporary: colour picker click diagnostic prints
 
 local function dragMove(pos)
     local gui = drag.gui
@@ -1013,20 +1012,9 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
         hooks.save()
     end
 
-    -- Diagnostic (auto-stops after 3 clicks): raw click vs the widget rect,
-    -- so a still-off picker can be fixed from one report instead of guesses.
-    local function pickerSample(input)
-        if pickerDebugLeft <= 0 then return end
-        pickerDebugLeft = pickerDebugLeft - 1
-        local p, a, sz = input.Position, sv.AbsolutePosition, sv.AbsoluteSize
-        print(("[uilib] picker click: raw=(%.0f,%.0f) widget=(%.0f,%.0f) size=(%.0f,%.0f)")
-            :format(p.X, p.Y, a.X, a.Y, sz.X, sz.Y))
-    end
-
     svHit.InputBegan:Connect(function(input)
         if not isPointerDown(input) then return end
         picking = true
-        pickerSample(input)
         beginDrag(input, sv, function(rx, ry)
             s, v = rx, 1 - ry
             writeHSV()
