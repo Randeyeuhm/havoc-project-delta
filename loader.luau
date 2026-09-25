@@ -10,9 +10,12 @@
         loadstring(game:HttpGet("https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"))()
 
     How the pick works:
-      • games/<PlaceId>.luau  - game-specific script (games/7336302630.luau
-                                is Havoc Project Delta)
-      • games/universal.luau  - fallback: generic aimbot / ESP / utilities
+      • games/<PlaceId>.luau   - exact script for one place (games/7336302630.luau
+                                 is Havoc Project Delta)
+      • UNIVERSES[game.GameId] - sub places (different PlaceId, same GameId)
+                                 use the mapped main script, so the whole game
+                                 incl. its sub places runs the same script
+      • games/universal.luau   - fallback: generic aimbot / ESP / utilities
 
     Adding support for a new game = drop a "<PlaceId>.luau" file into the
     repo's games/ folder and push. No loader changes needed.
@@ -30,6 +33,13 @@ local GAMES_DIR      = "games/"
 local UNIVERSAL_FILE = GAMES_DIR .. "universal.luau"
 local UILIB_FILE     = "uilib.luau"
 local ESPUI_FILE     = "espui.luau"
+
+-- Sub places of a game have their own PlaceId but share ONE GameId. Map a
+-- game's GameId (game.GameId) to the main place whose games/<id>.luau
+-- should run in EVERY place of that universe (main + sub places):
+local UNIVERSES = {
+    [2862098693] = 7336302630,  -- Havoc Project Delta (all of its places)
+}
 
 local RAW_BASE = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(USER, REPO, BRANCH)
 
@@ -59,17 +69,34 @@ local function baseName(path)
     return (path:match("([^/]+)$")) or path
 end
 
--- 1) Pick the script for this game: games/<PlaceId>.luau when the repo has
---    one, otherwise fall back to the universal script.
+-- 1) Pick the script for this place:
+--      games/<PlaceId>.luau         - exact script for this one place
+--      games/<main place of GameId> - the whole game incl. sub places
+--      games/universal.luau         - fallback
 local placeId = game.PlaceId
+local gameId = game.GameId
 local gamePath = GAMES_DIR .. tostring(placeId) .. ".luau"
 local gameSrc = fetch(gamePath)
 if gameSrc then
     log("game script found for PlaceId " .. placeId)
 else
-    gamePath = UNIVERSAL_FILE
-    log("no script for PlaceId " .. placeId .. " - loading the universal script")
-    gameSrc = fetch(gamePath)
+    -- Nothing for this exact place. Sub places (different PlaceId, same
+    -- GameId) fall back to the main place's script via the UNIVERSES map.
+    local mainPlace = UNIVERSES[gameId]
+    if mainPlace and mainPlace ~= placeId then
+        gamePath = GAMES_DIR .. tostring(mainPlace) .. ".luau"
+        gameSrc = fetch(gamePath)
+        if gameSrc then
+            log("PlaceId " .. placeId .. " belongs to GameId " .. gameId ..
+                " - using its main script (" .. mainPlace .. ")")
+        end
+    end
+    if not gameSrc then
+        gamePath = UNIVERSAL_FILE
+        log("no script for PlaceId " .. placeId .. " (GameId " .. gameId ..
+            ") - loading the universal script")
+        gameSrc = fetch(gamePath)
+    end
 end
 if not gameSrc then
     warn("[Havoc Hub] failed to download " .. gamePath .. " - check the repo")
