@@ -84,6 +84,25 @@ do
     end
 end
 
+local ESP_FILE = "esp.luau"
+
+local ESPUI
+do
+    local ok, res = pcall(function()
+        local src = moduleSource(ESP_FILE)
+        if not src then error("no source (loader stash empty, no local file)") end
+        local chunk, compileErr = loadstring(src, "@" .. ESP_FILE)
+        if not chunk then error("compile error: " .. tostring(compileErr)) end
+        return chunk()
+    end)
+    if ok and type(res) == "table" then
+        ESPUI = res
+        print("[Havoc] esp " .. tostring(ESPUI.VERSION or "?") .. " loaded")
+    else
+        warn("[Havoc] esp.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
+    end
+end
+
 -- Palette and decorators come from the library when present; the inline
 -- fallbacks keep HUD / radar / Inventory ESP / toasts identical without it.
 local THEME = UILib and UILib.THEME or {
@@ -171,7 +190,6 @@ local applyVisorRemoval
 local saveConfig, saveConfigDebounced
 local Hotkeys, keyMap, rebuildKeyMap
 local updateVelocityTracker, getTrackedVelocity, cleanupVelocityTracker
-local ESP
 local PlayerESP, NpcESP, Aimbot
 local renderDrops, dropRegistry, dropWatchConnection
 local fovCircle
@@ -295,27 +313,15 @@ end
 do
     local DEFAULTS = {
         Player = {
-            Enabled = true, ShowCornerBox = true, ShowName = true, ShowDistance = true,
-            ShowHealth = true,
-            ShowHeadHighlight = true, HeadHighlightHollow = true,
-            ShowBodyHighlight = false, BodyHighlightHollow = true,
-            MaxDistance = 4500, BoxColor = Color3.fromRGB(255, 0, 0),
-            -- Opacity semantics: 1 = fully visible (migrated from transparency).
-            CornerBoxTransparency = 0.5, CornerBoxLength = 8,
-            HeadHighlightR = 255, HeadHighlightG = 255, HeadHighlightB = 255,
-            BodyHighlightR = 255, BodyHighlightG = 255, BodyHighlightB = 255,
+            -- ESP appearance (box/labels/chams) lives in the esp.luau schema
+            -- and is injected by ESPUI.fill; only PD-specific bits stay here.
+            Enabled = true, MaxDistance = 4500,
+            BoxColor = Color3.fromRGB(255, 0, 0),
         },
         NPC = {
-            Enabled = true, ShowCornerBox = true, ShowName = true, ShowDistance = true,
-            ShowHealth = true,
-            ShowHeadHighlight = true, HeadHighlightHollow = true,
-            ShowBodyHighlight = false, BodyHighlightHollow = true,
-            MaxDistance = 4500, BoxColor = Color3.fromRGB(0, 255, 0),
+            Enabled = true, MaxDistance = 4500,
+            BoxColor = Color3.fromRGB(0, 255, 0),
             ShowLandmines = false,
-            -- Opacity semantics: 1 = fully visible (migrated from transparency).
-            CornerBoxTransparency = 0.5, CornerBoxLength = 8,
-            HeadHighlightR = 255, HeadHighlightG = 255, HeadHighlightB = 0,
-            BodyHighlightR = 255, BodyHighlightG = 255, BodyHighlightB = 0,
         },
         Drops = {
             Item   = { Enabled = true, Hollow = true, R = 0,   G = 100, B = 255 },
@@ -430,6 +436,13 @@ do
         if ok and type(decoded) == "table" then deepMerge(Config, decoded) end
     end
 
+    -- ESP settings now live in the hub library's schema (esp.luau): fills the
+    -- new fields in and migrates/purges the old in-script ESP keys.
+    if ESPUI then
+        ESPUI.fill(Config.Player)
+        ESPUI.fill(Config.NPC)
+    end
+
     if loaded and type(loaded.Weapon) == "table" and loaded.Weapon.InstantHit == nil then
         local w = loaded.Weapon
         Config.Weapon.InstantHit = (w.InstantHit or w.NoSpread or w.UseBulletReplacement) and true or false
@@ -440,6 +453,13 @@ do
     Config.NPC.MaxDistance    = math.max(Config.NPC.MaxDistance    or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
     Config.Drops.MaxDistance  = math.max(Config.Drops.MaxDistance  or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
     Config.Aimbot.MaxDistance = math.max(Config.Aimbot.MaxDistance or ESP_MAX_DISTANCE, ESP_MAX_DISTANCE)
+
+    -- The library's clamps repair enum fields and cap MaxDistance at 10000
+    -- (the value the lines above force anyway).
+    if ESPUI then
+        ESPUI.sanitize(Config.Player)
+        ESPUI.sanitize(Config.NPC)
+    end
 
     -- "Landmine ESP" is the NPC ESP hazard filter: off (default) = mines
     -- (PMN2 / MON-50) are skipped, on = they show like any other NPC.
@@ -1102,13 +1122,13 @@ end
 -- ============================================================
 Hotkeys = {
     { Id = "PlayerESP", Key = Enum.KeyCode.KeypadOne, Desc = "Toggle Player ESP", Action = function()
-        PlayerESP.Enabled = not PlayerESP.Enabled; refreshGUI(); saveConfig()
-        notify("Player ESP: " .. tostring(PlayerESP.Enabled))
-        return "Player ESP", PlayerESP.Enabled end },
+        Config.Player.Enabled = not Config.Player.Enabled; refreshGUI(); saveConfig()
+        notify("Player ESP: " .. tostring(Config.Player.Enabled))
+        return "Player ESP", Config.Player.Enabled end },
     { Id = "NpcESP", Key = Enum.KeyCode.KeypadTwo, Desc = "Toggle NPC ESP", Action = function()
-        NpcESP.Enabled = not NpcESP.Enabled; refreshGUI(); saveConfig()
-        notify("NPC ESP: " .. tostring(NpcESP.Enabled))
-        return "NPC ESP", NpcESP.Enabled end },
+        Config.NPC.Enabled = not Config.NPC.Enabled; refreshGUI(); saveConfig()
+        notify("NPC ESP: " .. tostring(Config.NPC.Enabled))
+        return "NPC ESP", Config.NPC.Enabled end },
     { Id = "AimbotToggle", Key = Enum.KeyCode.KeypadThree, Desc = "Toggle Aimbot", Action = function()
         Aimbot.Enabled = not Aimbot.Enabled; refreshGUI(); saveConfig()
         notify("Aimbot: " .. tostring(Aimbot.Enabled))
@@ -1505,349 +1525,34 @@ do
 end
 
 -- ============================================================
--- ESP CLASS
+-- ESP ENGINES (rendering lives in esp.luau)
 -- ============================================================
-do
-    local function newLine()
-        local ok, l = pcall(Drawing.new, "Line")
-        if not ok or not l then return nil end
-        l.Visible, l.Thickness, l.Transparency, l.ZIndex = false, 2, 0.5, 2
-        return l
+-- This script used to carry its own ESP class - that class was the prototype
+-- for the hub-wide esp.luau library, and the library's engine is its direct
+-- port (same 8-segment corner boxes, same label layout, chams included).
+-- Project Delta now renders through the shared library like the other games;
+-- box/label/chams options live in the library's customizer (ESP tab buttons).
+local function makeESPEngine(getCfg)
+    if ESPUI and ESPUI.new then
+        return ESPUI.new(getCfg)
     end
-
-    local function newText()
-        local ok, t = pcall(Drawing.new, "Text")
-        if not ok or not t then return nil end
-        t.Visible, t.Font, t.Size = false, Drawing.Fonts.UI, 16
-        t.Outline, t.OutlineColor, t.Center = true, Color3.fromRGB(0, 0, 0), false
-        return t
-    end
-
-    local LABEL_KEYS = {"TL_V","TL_H","TR_V","TR_H","BL_V","BL_H","BR_V","BR_H","NameLabel","DistanceLabel","HealthLabel"}
-
-    local function safeVisible(obj, v)
-        if obj then obj.Visible = v end
-    end
-
-    local function hideData(d)
-        if not d then return end
-        for i = 1, #LABEL_KEYS do
-            local o = d[LABEL_KEYS[i]]
-            if o then o.Visible = false end
-        end
-        if d.HeadHighlight then d.HeadHighlight.Enabled = false end
-        if d.BodyHighlight then d.BodyHighlight.Enabled = false end
-    end
-
-    local LINE_TEMPLATE = {
-        {"TL_V", 0,0, 0,0}, {"TL_H", 0,0, 0,0},
-        {"TR_V", 0,0, 0,0}, {"TR_H", 0,0, 0,0},
-        {"BL_V", 0,0, 0,0}, {"BL_H", 0,0, 0,0},
-        {"BR_V", 0,0, 0,0}, {"BR_H", 0,0, 0,0},
+    -- Stub: a missing library disables ESP without breaking the aimbot pools,
+    -- drops renderer and HUD, which all read .Objects every frame.
+    return {
+        Objects = {},
+        Ensure = function() end,
+        Remove = function() end,
+        Clear = function() end,
+        Prune = function() end,
+        HideAll = function() end,
+        Render = function() end,
+        IsEnemy = function() return false end,
+        GetDistance = function() return math.huge end,
     }
-
-    -- Root part for any entity: player rigs have HumanoidRootPart/Torso, the
-    -- heli/tank/car "vehicle NPCs" have a PrimaryPart (Chassis) or loose parts.
-    local function npcRoot(inst)
-        local r = inst:FindFirstChild("HumanoidRootPart")
-            or inst:FindFirstChild("Torso")
-            or inst.PrimaryPart
-            or inst:FindFirstChild("Chassis")
-        if r then return r end
-        for _, d in ipairs(inst:GetChildren()) do
-            if d:IsA("BasePart") then return d end
-        end
-        return nil
-    end
-
-    local function renderTarget(self, target, data, headCol, bodyCol)
-        if not data or not target or not target.Parent then return false end
-        if not self:IsEnemy(target) then hideData(data); return true end
-
-        local isFriend = false
-        if state.whitelistSet then
-            local p = Players:GetPlayerFromCharacter(target)
-            if p and state.whitelistSet[p.UserId] then isFriend = true end
-        end
-
-        local boxColor = self.BoxColor
-        if isFriend then
-            local pc = Config.Players
-            local friendCol = Color3.fromRGB(
-                pc.HighlightR or 0,
-                pc.HighlightG or 255,
-                pc.HighlightB or 0
-            )
-            headCol  = friendCol
-            bodyCol  = friendCol
-            boxColor = friendCol
-        end
-
-        if Config.Players.ModEnabled and state.getModRole then
-            local p = Players:GetPlayerFromCharacter(target)
-            if p and state.getModRole(p) then
-                local modCol = Color3.fromRGB(
-                    Config.Players.ModHighlightR or 255,
-                    Config.Players.ModHighlightG or 0,
-                    Config.Players.ModHighlightB or 255
-                )
-                headCol  = modCol
-                bodyCol  = modCol
-                boxColor = modCol
-            end
-        end
-
-        local char = data.Character; if not char then return true end
-        -- Vehicle NPCs (heli/tank/car) have no R15 rig and no Head, so fall
-        -- back to the primary part / any base part for root and highlight.
-        local root = npcRoot(char)
-        if not root then return true end
-        local head = char:FindFirstChild("Head") or root
-
-        local rootPos, visible = Camera:WorldToViewportPoint(root.Position)
-        if not visible then hideData(data); return true end
-
-        local distance = self:GetDistance(target)
-        if distance > self.MaxDistance then hideData(data); return true end
-
-        local scale  = 1000 / (rootPos.Z * getFovTan())
-        local width  = math.floor(4.5 * scale)
-        local height = math.floor(6.5 * scale)
-        local screenX, screenY = math.floor(rootPos.X), math.floor(rootPos.Y)
-        local boxX = math.floor(screenX - width * 0.5)
-        local boxY = math.floor((screenY - height * 0.5) + (0.5 * scale))
-
-        local hRight  = boxX + width
-        local hBottom = boxY + height
-
-        if self.ShowCornerBox then
-            local cornerLen = math.min(self.CornerBoxLength, math.min(width, height) * 0.3)
-            local L = LINE_TEMPLATE
-            L[1][2],L[1][3],L[1][4],L[1][5] = boxX, boxY+cornerLen, boxX, boxY
-            L[2][2],L[2][3],L[2][4],L[2][5] = boxX, boxY, boxX+cornerLen, boxY
-            L[3][2],L[3][3],L[3][4],L[3][5] = hRight, boxY+cornerLen, hRight, boxY
-            L[4][2],L[4][3],L[4][4],L[4][5] = hRight-cornerLen, boxY, hRight, boxY
-            L[5][2],L[5][3],L[5][4],L[5][5] = boxX, hBottom, boxX, hBottom-cornerLen
-            L[6][2],L[6][3],L[6][4],L[6][5] = boxX, hBottom, boxX+cornerLen, hBottom
-            L[7][2],L[7][3],L[7][4],L[7][5] = hRight, hBottom, hRight, hBottom-cornerLen
-            L[8][2],L[8][3],L[8][4],L[8][5] = hRight-cornerLen, hBottom, hRight, hBottom
-
-            -- Config stores OPACITY (1 = fully visible); Drawing wants
-            -- transparency, so invert here.
-            local color = boxColor
-            local transp = 1 - math.clamp(self.CornerBoxTransparency or 0.5, 0, 1)
-            for i = 1, 8 do
-                local e = L[i]
-                local line = data[e[1]]
-                if line then
-                    line.From = Vector2.new(e[2], e[3])
-                    line.To   = Vector2.new(e[4], e[5])
-                    line.Color, line.Transparency, line.Visible = color, transp, true
-                end
-            end
-        else
-            safeVisible(data.TL_V, false) safeVisible(data.TL_H, false)
-            safeVisible(data.TR_V, false) safeVisible(data.TR_H, false)
-            safeVisible(data.BL_V, false) safeVisible(data.BL_H, false)
-            safeVisible(data.BR_V, false) safeVisible(data.BR_H, false)
-        end
-
-        if self.ShowHeadHighlight then
-            local hl = data.HeadHighlight
-            if not hl then
-                hl = Instance.new("Highlight")
-                hl.Name = "HeadHighlight"
-                hl.OutlineTransparency = 0.2
-                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                hl.Adornee, hl.Parent = head, head
-                data.HeadHighlight = hl
-            end
-            hl.FillColor = headCol
-            hl.OutlineColor = headCol
-            hl.FillTransparency = self.HeadHighlightHollow and 1 or 0.3
-            hl.Enabled = true
-        elseif data.HeadHighlight then
-            data.HeadHighlight.Enabled = false
-        end
-
-        if self.ShowBodyHighlight then
-            local hl = data.BodyHighlight
-            if not hl then
-                hl = Instance.new("Highlight")
-                hl.Name = "BodyHighlight"
-                hl.OutlineTransparency = 0.2
-                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                hl.Adornee = char
-                hl.Parent  = char
-                data.BodyHighlight = hl
-            end
-            hl.FillColor = bodyCol
-            hl.OutlineColor = bodyCol
-            hl.FillTransparency = self.BodyHighlightHollow and 1 or 0.3
-            hl.Enabled = true
-        elseif data.BodyHighlight then
-            data.BodyHighlight.Enabled = false
-        end
-
-        if self.ShowName and data.NameLabel then
-            local l = data.NameLabel
-            l.Text = self:GetName(target)
-            l.Color = Color3.fromRGB(255, 255, 255)
-            l.Position = Vector2.new(screenX - l.TextBounds.X / 2, boxY - 20)
-            l.Visible = true
-        else safeVisible(data.NameLabel, false) end
-
-        if self.ShowDistance and data.DistanceLabel then
-            local l = data.DistanceLabel
-            l.Text = string.format("%dm", math.floor(distance))
-            l.Color = Color3.fromRGB(200, 200, 200)
-            l.Position = Vector2.new(screenX - l.TextBounds.X / 2, hBottom + 2)
-            l.Visible = true
-        else safeVisible(data.DistanceLabel, false) end
-
-        if self.ShowHealth and data.HealthLabel then
-            local l = data.HealthLabel
-            local hp = self:GetHealth(target)
-            l.Text = tostring(math.floor(hp))
-            l.Color = self:GetHealthColor(hp)
-            l.Position = Vector2.new(screenX - l.TextBounds.X / 2, boxY - 30)
-            l.Visible = true
-        else safeVisible(data.HealthLabel, false) end
-
-        return true
-    end
-
-    ESP = {}
-    ESP.__index = ESP
-
-    function ESP.new(settings)
-        settings = settings or {}
-        settings.Objects = {}
-        settings.ColorSource = settings
-        return setmetatable(settings, ESP)
-    end
-
-    function ESP:IsEnemy(target)
-        if sameInstance(target, LocalPlayer.Character) then return false end
-        if self.TeamCheck then
-            local p = Players:GetPlayerFromCharacter(target)
-            if p and p.Team == LocalPlayer.Team then return false end
-        end
-        return target ~= nil
-    end
-
-    function ESP:GetDistance(target)
-        if not LocalPlayer.Character then return math.huge end
-        local lr = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local tr = npcRoot(target)
-        if not lr or not tr then return math.huge end
-        return (lr.Position - tr.Position).Magnitude
-    end
-
-    function ESP:GetHealth(target)
-        local h = target:FindFirstChildOfClass("Humanoid")
-        if h then return h.Health end
-        -- Vehicle NPCs keep health as an attribute on the model, the primary
-        -- part (Chassis on the MI24V) or one of their collision parts.
-        local hp = target:GetAttribute("Health")
-        if typeof(hp) == "number" then return hp end
-        local pp = target.PrimaryPart
-        if pp then
-            local h2 = pp:GetAttribute("Health")
-            if typeof(h2) == "number" then return h2 end
-        end
-        local ch = target:FindFirstChild("Chassis")
-        if ch and ch:IsA("BasePart") then
-            local h3 = ch:GetAttribute("Health")
-            if typeof(h3) == "number" then return h3 end
-        end
-        for _, d in ipairs(target:GetChildren()) do
-            if d:IsA("BasePart") then
-                local h4 = d:GetAttribute("Health")
-                if typeof(h4) == "number" then return h4 end
-            end
-        end
-        return 0
-    end
-
-    function ESP:GetName(target)
-        local p = Players:GetPlayerFromCharacter(target)
-        return p and p.Name or ("NPC: " .. target.Name)
-    end
-
-    function ESP:GetHealthColor(health)
-        if health > 75 then return HC_GREEN
-        elseif health > 50 then return HC_YELLOW
-        elseif health > 25 then return HC_ORANGE
-        else return HC_RED end
-    end
-
-    function ESP:Add(target)
-        if not target or sameInstance(target, LocalPlayer.Character) or self.Objects[target] then return end
-        local d = {
-            Character      = target,
-            TL_V = newLine(), TL_H = newLine(), TR_V = newLine(), TR_H = newLine(),
-            BL_V = newLine(), BL_H = newLine(), BR_V = newLine(), BR_H = newLine(),
-            NameLabel     = newText(),
-            DistanceLabel = newText(),
-            HealthLabel   = newText(),
-            HeadHighlight = nil,
-            BodyHighlight = nil,
-        }
-        if not d.TL_V and not d.NameLabel then return end
-        self.Objects[target] = d
-    end
-
-    function ESP:Remove(target)
-        local d = self.Objects[target]; if not d then return end
-        for _, k in ipairs(LABEL_KEYS) do
-            local obj = d[k]
-            if obj then pcall(function() obj:Remove() end) end
-        end
-        if d.HeadHighlight then pcall(function() d.HeadHighlight:Destroy() end) end
-        if d.BodyHighlight then pcall(function() d.BodyHighlight:Destroy() end) end
-        self.Objects[target] = nil
-    end
-
-    function ESP:Clear()
-        for t in pairs(self.Objects) do self:Remove(t) end
-        self.Objects = {}
-    end
-
-    function ESP:Render()
-        if not self.Enabled then
-            for _, d in pairs(self.Objects) do hideData(d) end
-            return
-        end
-
-        local cs = self.ColorSource
-        local headCol, bodyCol
-        if cs then
-            headCol = Color3.fromRGB(cs.HeadHighlightR or 255, cs.HeadHighlightG or 255, cs.HeadHighlightB or 255)
-            bodyCol = Color3.fromRGB(cs.BodyHighlightR or 255, cs.BodyHighlightG or 255, cs.BodyHighlightB or 255)
-        else
-            headCol, bodyCol = Color3.new(1, 1, 1), Color3.new(1, 1, 1)
-        end
-
-        local removals = nil
-        for target, data in pairs(self.Objects) do
-            local root = target:FindFirstChild("HumanoidRootPart")
-            if root then updateVelocityTracker(target, root) end
-
-            local ok, keep = pcall(renderTarget, self, target, data, headCol, bodyCol)
-            if not ok or keep == false then
-                removals = removals or {}
-                table.insert(removals, target)
-            end
-        end
-        if removals then
-            for i = 1, #removals do self:Remove(removals[i]) end
-        end
-    end
 end
 
-PlayerESP = ESP.new(Config.Player)
-NpcESP    = ESP.new(Config.NPC)
+PlayerESP = makeESPEngine(function() return Config.Player end)
+NpcESP    = makeESPEngine(function() return Config.NPC end)
 Aimbot = Config.Aimbot
 state.PlayerESP, state.NpcESP, state.Aimbot = PlayerESP, NpcESP, Aimbot
 
@@ -2036,7 +1741,7 @@ do
         if player == LocalPlayer then return end
         local function tryAdd()
             if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                PlayerESP:Add(player.Character); return true
+                PlayerESP:Ensure(player.Character); return true
             end
             return false
         end
@@ -2059,7 +1764,7 @@ do
             checkCount = 0
             for _, p in ipairs(Players:GetPlayers()) do
                 if p ~= LocalPlayer and p.Character and not PlayerESP.Objects[p.Character] then
-                    PlayerESP:Add(p.Character)
+                    PlayerESP:Ensure(p.Character)
                 end
             end
         end
@@ -2100,7 +1805,7 @@ do
         if sameInstance(model, LocalPlayer.Character) then return end
         if not modelHasHealth(model) then return end
         if not Config.NPC.ShowLandmines and isLandmine(model) then return end
-        NpcESP:Add(model)
+        NpcESP:Ensure(model)
     end
 
     local function hookNPCDeath(model)
@@ -4871,8 +4576,8 @@ end
 -- ============================================================
 do
     local HUD_ENTRIES = {
-        { Id = "PlayerESP",     Label = "Player ESP",     Get = function() return PlayerESP.Enabled end },
-        { Id = "NpcESP",        Label = "NPC ESP",        Get = function() return NpcESP.Enabled end },
+        { Id = "PlayerESP",     Label = "Player ESP",     Get = function() return Config.Player.Enabled end },
+        { Id = "NpcESP",        Label = "NPC ESP",        Get = function() return Config.NPC.Enabled end },
         { Id = "Aimbot",        Label = "Aimbot",         Get = function() return Aimbot.Enabled end },
         { Id = "SilentAim",     Label = "Silent Aim",     Get = function() return Aimbot.SilentAim end },
         { Id = "FOVCircle",     Label = "FOV Circle",     Get = function() return Aimbot.ShowFOVCircle end },
@@ -5247,6 +4952,7 @@ do
     local makeColorPicker   = UILib and UILib.makeColorPicker
     local makeKeybindRow    = UILib and UILib.makeKeybindRow
     local makeDropdown      = UILib and UILib.makeDropdown
+    local makeButton        = UILib and UILib.makeButton
 
     -- Hotkey entries by id, so the keybind chips next to option toggles show
     -- the live key name and dim when that keybind is disabled (references,
@@ -5387,6 +5093,13 @@ do
             table.insert(dropdownEntries, e)
             return e
         end
+        local function addButton(cat, sub, text, onClick)
+            local parent = win.subtab(cat, sub)
+            local e = makeButton(parent, text, onClick)
+            e.homeParent = parent
+            table.insert(guiControls, e)
+            return e
+        end
         local function addInfo(cat, sub, initText)
             return makeNote(win.subtab(cat, sub), initText)
         end
@@ -5446,32 +5159,26 @@ do
 
         ammoInfoLabel = addInfo("Aimbot", "Ballistics", "—")
 
-        local function buildESPSection(cat, sub, esp, cfg)
-            addSection(cat, sub, "Highlights")
-            addToggle(cat, sub, "Body highlight", function() return esp.ShowBodyHighlight end, function(v) esp.ShowBodyHighlight = v end)
-            addToggle(cat, sub, "Body hollow",    function() return esp.BodyHighlightHollow end, function(v) esp.BodyHighlightHollow = v end)
-            addColor (cat, sub, "Body colour",    cfg, "BodyHighlight")
-            addToggle(cat, sub, "Head highlight", function() return esp.ShowHeadHighlight end, function(v) esp.ShowHeadHighlight = v end)
-            addToggle(cat, sub, "Head hollow",    function() return esp.HeadHighlightHollow end, function(v) esp.HeadHighlightHollow = v end)
-            addColor (cat, sub, "Head colour",    cfg, "HeadHighlight")
-            addSection(cat, sub, "Box")
-            addToggle(cat, sub, "Corner box",     function() return esp.ShowCornerBox end, function(v) esp.ShowCornerBox = v end)
-            addValue (cat, sub, "Corner length",  function() return esp.CornerBoxLength end,
-                function(v) esp.CornerBoxLength = v end, 1, 2, 40, function(v) return tostring(math.floor(v)) end)
-            addValue (cat, sub, "Box opacity", function() return esp.CornerBoxTransparency end,
-                function(v) esp.CornerBoxTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
-            addSection(cat, sub, "Labels")
-            addToggle(cat, sub, "Show name",      function() return esp.ShowName end, function(v) esp.ShowName = v end)
-            addToggle(cat, sub, "Show distance",  function() return esp.ShowDistance end, function(v) esp.ShowDistance = v end)
-            addToggle(cat, sub, "Show health",    function() return esp.ShowHealth end, function(v) esp.ShowHealth = v end)
+        -- ESP appearance (box, labels, chams) is configured in the hub-wide
+        -- ESP customizer (esp.luau) - the same windows the other games use.
+        local function buildESPSection(cat, sub, cfg, keybindId)
             addSection(cat, sub, "Range")
-            addToggle(cat, sub, "Enabled",        function() return esp.Enabled end, function(v) esp.Enabled = v end, cat == "Player" and "PlayerESP" or "NpcESP")
-            addValue (cat, sub, "Max distance",   function() return esp.MaxDistance end,
-                function(v) esp.MaxDistance = v end, 100, 100, 4500, function(v) return tostring(math.floor(v)) end)
+            addToggle(cat, sub, "Enabled", function() return cfg.Enabled end, function(v) cfg.Enabled = v end, keybindId)
+            addValue (cat, sub, "Max distance", function() return cfg.MaxDistance end,
+                function(v) cfg.MaxDistance = v end, 100, 100, 4500, function(v) return tostring(math.floor(v)) end)
+            addSection(cat, sub, "Appearance")
+            addButton(cat, sub, "Open ESP customizer", function()
+                if ESPUI then
+                    ESPUI.open{ cfg = cfg, uilib = UILib, screenGui = gui, save = saveConfig, notify = notify }
+                else
+                    notify("esp.luau not loaded - customizer unavailable")
+                end
+            end)
+            addInfo(cat, sub, "Box, labels and chams for this list are set in the customizer.")
         end
 
-        buildESPSection("ESP", "Player", PlayerESP, Config.Player)
-        buildESPSection("ESP", "NPC",    NpcESP,    Config.NPC)
+        buildESPSection("ESP", "Player", Config.Player, "PlayerESP")
+        buildESPSection("ESP", "NPC",    Config.NPC,    "NpcESP")
 
         addSection("ESP", "NPC", "Hazards")
         addToggle("ESP", "NPC", "Landmine ESP", function() return Config.NPC.ShowLandmines end,
@@ -5982,8 +5689,19 @@ end))
 -- [PERF] Drops rendered at 30Hz instead of 60Hz - invisible, halves cost.
 local _dropFrame = 0
 track(RunService.RenderStepped:Connect(function()
-    PlayerESP:Render()
-    NpcESP:Render()
+    -- The ballistics cache is fed from this loop (as the old in-script ESP
+    -- class did): every tracked target reports its root part, then both
+    -- engines draw through esp.luau.
+    for target in pairs(PlayerESP.Objects) do
+        local root = target:FindFirstChild("HumanoidRootPart")
+        if root then updateVelocityTracker(target, root) end
+    end
+    for target in pairs(NpcESP.Objects) do
+        local root = target:FindFirstChild("HumanoidRootPart")
+        if root then updateVelocityTracker(target, root) end
+    end
+    PlayerESP:Render(Camera)
+    NpcESP:Render(Camera)
     _dropFrame = _dropFrame + 1
     if _dropFrame >= 2 then
         _dropFrame = 0

@@ -139,15 +139,24 @@ local LEGACY_KEYS = {
     "HeadHighlightR", "HeadHighlightG", "HeadHighlightB",
     "BodyHighlight", "BodyHighlightHollow", "BodyHighlightTransparency",
     "BodyHighlightR", "BodyHighlightG", "BodyHighlightB",
+    -- Project Delta's in-script ESP schema (pre-library; the head/body
+    -- booleans above are migrated from it in fill)
+    "ShowCornerBox", "CornerBoxLength", "CornerBoxTransparency",
+    "ShowName", "ShowDistance", "ShowHealth",
+    "ShowHeadHighlight", "ShowBodyHighlight",
 }
 
 function ESP.fill(cfg)
     if type(cfg) ~= "table" then return cfg end
     -- Migrate the old split head/body chams into the single ChamsPart picker
-    -- (must run BEFORE the defaults injection below).
-    if cfg.ChamsPart == nil and (cfg.HeadHighlight ~= nil or cfg.BodyHighlight ~= nil) then
-        local wasHead = cfg.HeadHighlight == true
-        local wasBody = cfg.BodyHighlight == true
+    -- (must run BEFORE the defaults injection below). Project Delta's
+    -- in-script class used the longer ShowHeadHighlight/ShowBodyHighlight
+    -- names - treat those as the same booleans.
+    if cfg.ChamsPart == nil
+       and (cfg.HeadHighlight ~= nil or cfg.BodyHighlight ~= nil
+            or cfg.ShowHeadHighlight ~= nil or cfg.ShowBodyHighlight ~= nil) then
+        local wasHead = cfg.HeadHighlight == true or cfg.ShowHeadHighlight == true
+        local wasBody = cfg.BodyHighlight == true or cfg.ShowBodyHighlight == true
         if wasHead and wasBody then cfg.ChamsPart = "Both"
         elseif wasHead then cfg.ChamsPart = "Head"
         elseif wasBody then cfg.ChamsPart = "Body"
@@ -1161,12 +1170,19 @@ function ESP.open(ctx)
     -- before any window building happens (see uilib.restoreIdentity).
     if ctx.uilib.restoreIdentity then ctx.uilib.restoreIdentity() end
     if OPEN.ui and OPEN.ui.screenGui == ctx.screenGui then
-        local ui = OPEN.ui
-        local showing = ui.preview.Visible or ui.options.Visible
-        ui.preview.Visible = not showing
-        ui.options.Visible = not showing
-        if not showing then ui.refresh() end
-        return true
+        if OPEN.ui.cfg == ctx.cfg then
+            local ui = OPEN.ui
+            local showing = ui.preview.Visible or ui.options.Visible
+            ui.preview.Visible = not showing
+            ui.options.Visible = not showing
+            if not showing then ui.refresh() end
+            return true
+        end
+        -- A different config on the same screen (Project Delta opens this
+        -- per entity type): rebuild cleanly instead of leaving old windows.
+        if OPEN.ui.preview then pcall(function() OPEN.ui.preview:Destroy() end) end
+        if OPEN.ui.options then pcall(function() OPEN.ui.options:Destroy() end) end
+        OPEN.ui = nil
     end
     local THEME, FONTS = ctx.uilib.THEME, ctx.uilib.FONTS
     -- Build independently: a failure in one window must not stop the other,
@@ -1188,6 +1204,7 @@ function ESP.open(ctx)
     end
     OPEN.ui = {
         screenGui = ctx.screenGui,
+        cfg = ctx.cfg,
         options = optionsFrame,
         preview = previewFrame,
         refresh = refreshFn,
