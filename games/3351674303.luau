@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v6"
+local SCRIPT_VERSION = "de-v7"
 
 local Connections = {}
 local function track(conn)
@@ -175,7 +175,7 @@ end
 -- Clamp anything numeric the file could have corrupted.
 Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1, 10)
 Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 10)
-Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 10)
+Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 500)
 Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 10)
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
@@ -1010,7 +1010,7 @@ local function buildMenu()
         end, 0.05, 1, 10)
     slider(p1, "Grip multiplier",
         function() return Config.Vehicle.GripMult end,
-        function(v) Config.Vehicle.GripMult = v end, 0.05, 1, 10)
+        function(v) Config.Vehicle.GripMult = v end, 1, 1, 500)
     slider(p1, "Brake multiplier",
         function() return Config.Vehicle.BrakeMult end,
         function(v) Config.Vehicle.BrakeMult = v end, 0.05, 1, 10)
