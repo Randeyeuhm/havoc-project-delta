@@ -37,7 +37,7 @@ Built against the game's decompiled source — vehicle physics run client-side:
 - **Teleports** — Race Hub, main dealership, aviation + boat garages, drag strip, bank, police station, drawbridge
 - **HUD** — live speedometer (MPH, gear, RPM) straight from the car's chassis controller, plus your cash
 - **Money** — cash readout on the HUD, auto-collect for NASCAR World cash drops
-- **Auto farm** — holds the throttle (optional steer bias for circles) so driving income keeps ticking while you're AFK; auto-reverses when stuck
+- **Auto farm** — holds the throttle (optional steer bias for circles) so driving income keeps ticking while you're AFK; auto-reverses when stuck; **sky plate** mode builds a personal 10,000-stud-high plate and u-turns at its edges
 - **Visuals** — player ESP with the full customizer, fullbright
 - **Misc** — anti-AFK, reset character, rejoin server
 

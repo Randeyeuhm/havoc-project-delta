@@ -38,7 +38,7 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v4"
+local SCRIPT_VERSION = "de-v5"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true, AutoDrops = false },
-    Farm     = { Enabled = false, Steer = 0 },
+    Farm     = { Enabled = false, Steer = 0, Plate = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -779,6 +779,105 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- FEATURES: SKY PLATE  (flat 10k-stud-high runway for the farm)
+-- ============================================================
+-- A local-only plate high above the map: no traffic, no kerbs, no walls -
+-- the farm drives straight lines on it and U-turns when it reaches the
+-- edge (turn direction alternates so the car ping-pongs around the middle
+-- instead of drifting off). The plate only exists on this client; the car
+-- physics run client-side, so the car drives on it like any other road.
+local SKY_PLATE = { Y = 10000, GRID = 2, SEG = 2048, THICKNESS = 8, MARGIN = 600, TURN_THROTTLE = 0.55 }
+local skyPlate = nil
+local skyState = { turning = false, entryLook = nil, turnDir = 1, turns = 0, lastTp = 0 }
+
+local function ensureSkyPlate()
+    if skyPlate and skyPlate.Parent then return skyPlate end
+    if UILib and UILib.restoreIdentity then UILib.restoreIdentity() end
+    local ok, model = pcall(function()
+        local m = Instance.new("Model")
+        m.Name = "HavocSkyPlate"
+        for ix = 0, SKY_PLATE.GRID - 1 do
+            for iz = 0, SKY_PLATE.GRID - 1 do
+                local p = Instance.new("Part")
+                p.Name = "SkyTile"
+                p.Size = Vector3.new(SKY_PLATE.SEG, SKY_PLATE.THICKNESS, SKY_PLATE.SEG)
+                p.CFrame = CFrame.new(
+                    (ix - (SKY_PLATE.GRID - 1) / 2) * SKY_PLATE.SEG,
+                    SKY_PLATE.Y - SKY_PLATE.THICKNESS / 2,
+                    (iz - (SKY_PLATE.GRID - 1) / 2) * SKY_PLATE.SEG)
+                p.Anchored = true
+                p.CanCollide = true
+                p.Material = Enum.Material.SmoothPlastic
+                p.Color = Color3.fromRGB(34, 38, 46)
+                p.Transparency = 0.35
+                p.Parent = m
+            end
+        end
+        m.Parent = workspace
+        return m
+    end)
+    if ok and model then
+        skyPlate = model
+        return model
+    end
+    return nil
+end
+
+local function teleportToPlate()
+    local model = getLocalVehicleModel()
+    if not model then
+        local char = LocalPlayer.Character
+        if char and char.PrimaryPart then model = char end
+    end
+    if not model then
+        notify("Get in a car first")
+        return false
+    end
+    local cf = model:GetPivot()
+    model:PivotTo(CFrame.new(Vector3.new(0, SKY_PLATE.Y + 10, 0)) * (cf - cf.Position))
+    skyState.lastTp = os.clock()
+    return true
+end
+
+-- Runs from farmTick while the plate farm is on: watches for the edge and
+-- flips between "drive straight" and "u-turn" phases.
+local function farmPlateTick()
+    local model = getLocalVehicleModel()
+    if not model then
+        skyState.turning = false
+        return
+    end
+    local ok, pivot = pcall(function() return model:GetPivot() end)
+    if not ok or not pivot then return end
+    local pos = pivot.Position
+
+    -- Fell off / died / got flung? Put the car back on the plate (rate-limited).
+    if pos.Y < SKY_PLATE.Y - 600 then
+        if os.clock() - skyState.lastTp > 5 then
+            pcall(function() teleportToPlate() end)
+        end
+        return
+    end
+
+    local half = (SKY_PLATE.GRID * SKY_PLATE.SEG) / 2 - SKY_PLATE.MARGIN
+    local look = pivot.LookVector
+    if not skyState.turning then
+        if math.abs(pos.X) > half or math.abs(pos.Z) > half then
+            skyState.turning = true
+            skyState.entryLook = look
+            skyState.turns = skyState.turns + 1
+            skyState.turnDir = (skyState.turns % 2 == 0) and 1 or -1
+        end
+    else
+        local entry = skyState.entryLook
+        if entry and entry:Dot(look) < -0.75 then
+            skyState.turning = false
+            skyState.entryLook = nil
+        end
+    end
+end
+
+-- ============================================================
 -- FEATURES: AUTO FARM  (driving income - scales with speed)
 -- ============================================================
 -- The chassis physics ask InputController.Get() for throttle/steer every
@@ -792,6 +891,9 @@ local function farmInputOverride()
     if not Config.Farm.Enabled then return nil end
     if os.clock() < farmState.recoverUntil then
         return -1, -Config.Farm.Steer
+    end
+    if Config.Farm.Plate and skyState.turning then
+        return SKY_PLATE.TURN_THROTTLE, skyState.turnDir
     end
     return 1, Config.Farm.Steer
 end
@@ -823,6 +925,7 @@ end
 local function farmTick(chassis)
     if not Config.Farm.Enabled then
         farmState.stuckSince = nil
+        skyState.turning = false
         return
     end
     local speed = chassis and chassis.Speed or 0
@@ -834,6 +937,11 @@ local function farmTick(chassis)
         end
     else
         farmState.stuckSince = nil
+    end
+    if Config.Farm.Plate then
+        pcall(farmPlateTick)
+    else
+        skyState.turning = false
     end
 end
 
@@ -1036,10 +1144,62 @@ local function buildMenu()
     slider(p5, "Farm steer bias",
         function() return Config.Farm.Steer end,
         function(v) Config.Farm.Steer = v end, 0.05, -1, 1)
+    toggle(p5, "Sky plate farm (10k studs up)",
+        function() return Config.Farm.Plate end,
+        function(v)
+            Config.Farm.Plate = v
+            if v then
+                if UILib and UILib.restoreIdentity then UILib.restoreIdentity() end
+                local ok, tp = pcall(function()
+                    ensureSkyPlate()
+                    return teleportToPlate()
+                end)
+                if not (ok and skyPlate) then
+                    Config.Farm.Plate = false
+                    refreshGUI()
+                    notify("Sky plate farm failed to start")
+                    return
+                end
+                -- The plate only exists for farming: drive straight lines
+                -- until each edge, then u-turn.
+                Config.Farm.Enabled = true
+                Config.Farm.Steer = 0
+                initFarmHook()
+                farmState.cashStart = getCash() or 0
+                farmState.recoverUntil = 0
+                skyState.turning = false
+                skyState.turns = 0
+                refreshGUI()
+                notify(tp and "Sky plate farm on - flattest runway in the game"
+                    or "Sky plate farm on - get in a car")
+            else
+                skyState.turning = false
+                pcall(function()
+                    if skyPlate then skyPlate:Destroy() end
+                end)
+                skyPlate = nil
+                notify("Sky plate farm off - plate removed")
+            end
+        end)
+    button(p5, "Teleport onto / back to plate", function()
+        if not Config.Farm.Plate then
+            notify("Enable the sky plate farm first")
+            return
+        end
+        if UILib and UILib.restoreIdentity then UILib.restoreIdentity() end
+        local ok, tp = pcall(function()
+            ensureSkyPlate()
+            return teleportToPlate()
+        end)
+        notify(ok and tp and "Teleported to the sky plate" or "Sky plate not ready")
+    end)
     note(p5, "Holds full throttle for you - income scales with speed, so pair it " ..
         "with a speed multiplier. 0 steer drives straight (aim down a long road " ..
         "first); about 0.3 steers in circles (wide open areas). Auto-reverses for " ..
         "2s when it gets stuck.")
+    note(p5, "Sky plate: a personal plate 10,000 studs above the map - nothing " ..
+        "to crash into, first gear to top speed, u-turns itself at the edges. " ..
+        "Teleporting high up is exactly what anti-cheat watches for; your call.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[6]
