@@ -599,12 +599,18 @@ end))
 -- MENU
 -- ============================================================
 local function buildMenu()
+    -- Same window sizing as Project Delta: fill most of the viewport with
+    -- sane min/max clamps, instead of the old fixed 540x360 (too short -
+    -- long pages like ESP ran off the bottom).
+    local viewport = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1920, 1080)
+    local winW = math.clamp(viewport.X - 60, 380, 500)
+    local winH = math.clamp(viewport.Y - 80, 340, 720)
     local win = UILib.makeWindow{
         parent = screenGui,
         name = "Main",
         title = "HAVOC HUB  ·  UNIVERSAL",
         subtitle = "PlaceId " .. tostring(game.PlaceId),
-        size = UDim2.new(0, 540, 0, 360),
+        size = UDim2.new(0, winW, 0, winH),
         position = UDim2.new(0, 30, 0, 40),
         tabs = { "Aimbot", "ESP", "Movement", "Misc" },
         controls = guiControls,

@@ -2259,11 +2259,18 @@ local function buildMenu()
     -- header + drawn-X close, search bar (fed by our control list), left
     -- category rail, footer with the reopen hint + live status.
     if UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+    -- Same window sizing as Project Delta: fill most of the viewport with
+    -- sane min/max clamps instead of the library default (too small for
+    -- the longer pages).
+    local viewport = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1920, 1080)
+    local winW = math.clamp(viewport.X - 60, 380, 500)
+    local winH = math.clamp(viewport.Y - 80, 340, 720)
     local win = UILib.makeWindow{
         parent = screenGui,
         name = "Main",
         title = "HAVOC HUB  ·  DRIVING EMPIRE",
         subtitle = ("PlaceId %d  ·  %s"):format(game.PlaceId, SCRIPT_VERSION),
+        size = UDim2.new(0, winW, 0, winH),
         tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc" },
         controls = guiControls,
         footerHint = "RightShift — show / hide this menu",
