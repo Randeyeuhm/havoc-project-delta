@@ -14,7 +14,6 @@
       • Vehicle   - speed multiplier, acceleration multiplier, infinite
                     nitro, ignore speed caps (client-side physics)
       • Teleports - Race Hub, dealerships, garages, bank, drag strip, ...
-      • HUD       - live speedometer (MPH, gear, RPM)
       • Visuals   - player ESP (full customizer) + fullbright
       • Misc      - anti-AFK, rejoin, reset character
 
@@ -37,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v42"
+local SCRIPT_VERSION = "de-v43"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,8 +59,6 @@ local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
-    HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
-    Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0 },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
@@ -189,10 +186,6 @@ Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1
 Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 50)
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.Vehicle.NoTires = Config.Vehicle.NoTires == true
-Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
-Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
-Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
-Config.HUD.YOffset = math.clamp(tonumber(Config.HUD.YOffset) or 40, 0, 600)
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
 Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
@@ -869,34 +862,8 @@ local function applyTires()
 end
 
 -- ============================================================
--- FEATURES: SPEEDOMETER HUD
+-- CASH HELPERS  (used by the payout watcher + the auto-farm)
 -- ============================================================
-local hud = { ready = false, broken = false, speed = nil, info = nil, cash = nil }
-
-local function ensureHud()
-    if hud.ready or hud.broken then return hud.ready end
-    local ok = pcall(function()
-        local function mkText(size, color)
-            local t = Drawing.new("Text")
-            t.Center = false
-            t.Outline = true
-            t.OutlineColor = Color3.new(0, 0, 0)
-            t.Color = color
-            t.Transparency = 1   -- this executor's Drawing: 1 = fully visible
-            t.Size = size
-            t.Visible = false
-            t.Font = Drawing.Fonts.UI
-            return t
-        end
-        hud.speed = mkText(Config.HUD.SpeedSize, Color3.fromRGB(120, 220, 255))
-        hud.info = mkText(Config.HUD.InfoSize, Color3.fromRGB(210, 210, 220))
-        hud.cash = mkText(Config.HUD.InfoSize + 1, Color3.fromRGB(120, 230, 140))
-        hud.ready = true
-    end)
-    if not ok then hud.broken = true end
-    return hud.ready
-end
-
 local function getCash()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
     local cash = ls and ls:FindFirstChild("Cash")
@@ -909,52 +876,6 @@ local function formatCash(n)
     rev = rev:reverse()
     if rev:sub(1, 1) == "," then rev = rev:sub(2) end
     return "$" .. rev
-end
-
-local function updateHud(chassis)
-    if not ensureHud() then return end
-    local cam = workspace.CurrentCamera
-    if not cam then return end
-    local vp = cam.ViewportSize
-
-    local lineY = Config.HUD.YOffset
-    local showSpeed = Config.HUD.Enabled and chassis ~= nil
-    if showSpeed then
-        local speedText = ("%d MPH"):format(math.floor((chassis.SpeedMPH or 0) + 0.5))
-        local infoText = ("Gear %d  |  %d RPM"):format(chassis.Gear or 0, math.floor((chassis.RPM or 0) + 0.5))
-
-        hud.speed.Text = speedText
-        hud.speed.Size = Config.HUD.SpeedSize
-        hud.info.Text = infoText
-        hud.info.Size = Config.HUD.InfoSize
-
-        local w1 = 0
-        pcall(function() w1 = hud.speed.TextBounds.X end)
-        if w1 <= 0 then w1 = #speedText * Config.HUD.SpeedSize * 0.62 end
-        hud.speed.Position = Vector2.new(vp.X - Config.HUD.XOffset - w1, lineY)
-
-        local w2 = 0
-        pcall(function() w2 = hud.info.TextBounds.X end)
-        if w2 <= 0 then w2 = #infoText * Config.HUD.InfoSize * 0.62 end
-        hud.info.Position = Vector2.new(vp.X - Config.HUD.XOffset - w2,
-            lineY + Config.HUD.SpeedSize + 4)
-        lineY = lineY + Config.HUD.SpeedSize + 4 + Config.HUD.InfoSize + 6
-    end
-    hud.speed.Visible = showSpeed
-    hud.info.Visible = showSpeed
-
-    local cashValue = getCash()
-    local showCash = Config.Money.ShowHud and cashValue ~= nil
-    if showCash then
-        local cashText = formatCash(cashValue)
-        hud.cash.Text = cashText
-        hud.cash.Size = Config.HUD.InfoSize + 1
-        local w3 = 0
-        pcall(function() w3 = hud.cash.TextBounds.X end)
-        if w3 <= 0 then w3 = #cashText * (Config.HUD.InfoSize + 1) * 0.62 end
-        hud.cash.Position = Vector2.new(vp.X - Config.HUD.XOffset - w3, lineY)
-    end
-    hud.cash.Visible = showCash
 end
 
 -- ============================================================
@@ -2051,7 +1972,7 @@ local function buildMenu()
         name = "Main",
         title = "HAVOC HUB  ·  DRIVING EMPIRE",
         subtitle = ("PlaceId %d  ·  %s"):format(game.PlaceId, SCRIPT_VERSION),
-        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc", "Race" },
+        tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc", "Race" },
         controls = guiControls,
         footerHint = "RightShift — show / hide this menu",
         onClose = function()
@@ -2059,7 +1980,7 @@ local function buildMenu()
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6), win.tab(7) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
 
     local builtCount = 0
     local function guard(what, fn)
@@ -2142,28 +2063,8 @@ local function buildMenu()
     end
     note(p2, "Moves your car (or character on foot). 'Not found' = drive closer once so the map streams in.")
 
-    -- ---------------- HUD ----------------
-    local p3 = pages[3]
-    section(p3, "Speedometer")
-    toggle(p3, "Speedometer HUD",
-        function() return Config.HUD.Enabled end,
-        function(v) Config.HUD.Enabled = v end)
-    slider(p3, "Speed text size",
-        function() return Config.HUD.SpeedSize end,
-        function(v) Config.HUD.SpeedSize = v end, 1, 10, 40)
-    slider(p3, "Info text size",
-        function() return Config.HUD.InfoSize end,
-        function(v) Config.HUD.InfoSize = v end, 1, 8, 30)
-    slider(p3, "Screen margin X",
-        function() return Config.HUD.XOffset end,
-        function(v) Config.HUD.XOffset = v end, 2, 0, 400)
-    slider(p3, "Screen margin Y",
-        function() return Config.HUD.YOffset end,
-        function(v) Config.HUD.YOffset = v end, 2, 0, 600)
-    note(p3, "Live speed/gear/RPM - the same numbers the game's own gauges use.")
-
     -- ---------------- Visuals ----------------
-    local p4 = pages[4]
+    local p4 = pages[3]
     section(p4, "Player ESP")
     toggle(p4, "Player ESP",
         function() return Config.ESP.Enabled end,
@@ -2189,12 +2090,7 @@ local function buildMenu()
         function(v) Config.Misc.Fullbright = v; setFullbright(v) end)
 
     -- ---------------- Money ----------------
-    local p5 = pages[5]
-    section(p5, "Cash")
-    toggle(p5, "Show cash on HUD",
-        function() return Config.Money.ShowHud end,
-        function(v) Config.Money.ShowHud = v end)
-    note(p5, "Reads leaderstats.Cash and updates live.")
+    local p5 = pages[4]
     section(p5, "Auto farm  (driving income)")
     toggle(p5, "Auto farm (auto drive)",
         function() return Config.Farm.Enabled end,
@@ -2236,7 +2132,7 @@ local function buildMenu()
     note(p5, "Auto-run finishes any race you enter (Race tab settings apply). Auto-queue re-joins the same track after each race. Toggle off to stop.")
 
     -- ---------------- Misc ----------------
-    local p6 = pages[6]
+    local p6 = pages[5]
     section(p6, "Utility")
     toggle(p6, "Anti-AFK",
         function() return Config.Misc.AntiAFK end,
@@ -2282,7 +2178,7 @@ local function buildMenu()
     note(p6, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
 
     -- ---------------- Race ----------------
-    local p7 = pages[7]
+    local p7 = pages[6]
     section(p7, "Race assist")
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
     section(p7, "Payout info")
@@ -2338,7 +2234,6 @@ track(RunService.RenderStepped:Connect(function()
                 chassis.ExternalMaxSpeedMPH = nil
             end
         end
-        updateHud(chassis)
         farmTick(chassis)
         applyGrip(chassis)
         applyBrake(chassis)
