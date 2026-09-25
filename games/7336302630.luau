@@ -4900,7 +4900,7 @@ do
 
     local GUI_STRUCTURE = {
         { Category = "Aimbot",  Subs = { "Main", "Ballistics" } },
-        { Category = "ESP",     Subs = { "Player", "NPC", "Drops", "Radar" } },
+        { Category = "ESP",     Subs = { "Player", "NPC", "Misc", "Radar" } },
         { Category = "Players", Subs = { "Main" } },
         { Category = "Weapon",  Subs = { "Main" } },
         { Category = "Misc",    Subs = { "Main", "Viewmodel" } },
@@ -5163,26 +5163,26 @@ do
         addValue ("ESP", "NPC", "Landmine distance", function() return Config.NPC.LandmineDistance end,
             function(v) Config.NPC.LandmineDistance = v end, 50, 50, 4500, function(v) return tostring(math.floor(v)) end)
 
-        addSection("ESP", "Drops", "Items")
-        addToggle("ESP", "Drops", "Items",        function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
-        addToggle("ESP", "Drops", "Item filled",  function() return Config.Drops.Item.Filled ~= false end,  function(v) Config.Drops.Item.Filled = v end)
-        addValue ("ESP", "Drops", "Item fill opacity", function() return Config.Drops.Item.Opacity end,
+        addSection("ESP", "Misc", "Items")
+        addToggle("ESP", "Misc", "Items",        function() return Config.Drops.Item.Enabled end, function(v) Config.Drops.Item.Enabled = v end)
+        addToggle("ESP", "Misc", "Item filled",  function() return Config.Drops.Item.Filled ~= false end,  function(v) Config.Drops.Item.Filled = v end)
+        addValue ("ESP", "Misc", "Item fill opacity", function() return Config.Drops.Item.Opacity end,
             function(v) Config.Drops.Item.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
-        addColor ("ESP", "Drops", "Item colour",  Config.Drops.Item, "")
-        addToggle("ESP", "Drops", "Item names",   function() return Config.Drops.ShowItemNames end, function(v) Config.Drops.ShowItemNames = v end)
+        addColor ("ESP", "Misc", "Item colour",  Config.Drops.Item, "")
+        addToggle("ESP", "Misc", "Item names",   function() return Config.Drops.ShowItemNames end, function(v) Config.Drops.ShowItemNames = v end)
 
-        addSection("ESP", "Drops", "Corpses")
-        addToggle("ESP", "Drops", "Corpses",       function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
-        addToggle("ESP", "Drops", "Corpse filled", function() return Config.Drops.Corpse.Filled ~= false end, function(v) Config.Drops.Corpse.Filled = v end)
-        addValue ("ESP", "Drops", "Corpse fill opacity", function() return Config.Drops.Corpse.Opacity end,
+        addSection("ESP", "Misc", "Corpses")
+        addToggle("ESP", "Misc", "Corpses",       function() return Config.Drops.Corpse.Enabled end, function(v) Config.Drops.Corpse.Enabled = v end)
+        addToggle("ESP", "Misc", "Corpse filled", function() return Config.Drops.Corpse.Filled ~= false end, function(v) Config.Drops.Corpse.Filled = v end)
+        addValue ("ESP", "Misc", "Corpse fill opacity", function() return Config.Drops.Corpse.Opacity end,
             function(v) Config.Drops.Corpse.Opacity = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
-        addColor ("ESP", "Drops", "Corpse colour", Config.Drops.Corpse, "")
-        addToggle("ESP", "Drops", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
+        addColor ("ESP", "Misc", "Corpse colour", Config.Drops.Corpse, "")
+        addToggle("ESP", "Misc", "Corpse names",  function() return Config.Drops.ShowCorpseNames end, function(v) Config.Drops.ShowCorpseNames = v end)
 
-        addSection("ESP", "Drops", "Display")
-        addValue ("ESP", "Drops", "Max distance", function() return Config.Drops.MaxDistance end,
+        addSection("ESP", "Misc", "Display")
+        addValue ("ESP", "Misc", "Max distance", function() return Config.Drops.MaxDistance end,
             function(v) Config.Drops.MaxDistance = v end, 50, 100, 10000, function(v) return tostring(math.floor(v)) end)
-        addValue ("ESP", "Drops", "Label size", function() return Config.Drops.LabelSize end,
+        addValue ("ESP", "Misc", "Label size", function() return Config.Drops.LabelSize end,
             function(v) Config.Drops.LabelSize = v end, 1, 8, 24, function(v) return tostring(math.floor(v)) end)
 
         addSection("ESP", "Radar", "Radar")
