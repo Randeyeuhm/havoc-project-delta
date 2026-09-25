@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v45"
+local SCRIPT_VERSION = "de-v46"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,6 +60,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
+    Delivery = { Enabled = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -193,6 +194,7 @@ Config.Race.CarLimitPad = math.clamp(tonumber(Config.Race.CarLimitPad) or 1.25, 
 Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
+Config.Delivery.Enabled = Config.Delivery.Enabled == true
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1876,6 +1878,126 @@ end)
 refreshTeleportQueue(true)
 
 -- ============================================================
+-- DELIVERY AUTO-FARM (Money tab)
+-- ============================================================
+-- The delivery job is server-driven: the client reacts to DeliveryStateChanged
+-- (pickup / destination positions, items carried) and reports interactions
+-- with the same fireServer events the game's own prompts use:
+--   RequestStartJobSession("Delivery", "jobPad", "Safe") - start a shift
+--   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
+-- The farm teleports the car onto whichever location the state names, fires
+-- the interaction, and repeats.
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false }
+
+local function deliveryLocationPart(pos)
+    if not pos then return nil end
+    local best, bestD = nil, 300
+    local ok = pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("DeliveryLocation")) do
+            local p = trackEntryPart(inst)
+            if p then
+                local d = (p.Position - pos).Magnitude
+                if d < bestD then best, bestD = p, d end
+            end
+        end
+    end)
+    if ok then return best, bestD end
+    return nil
+end
+
+local function deliveryTick()
+    if Config.Delivery.Enabled ~= true then return end
+    if raceBusy then return end  -- the race assist has the car
+    local st = deliveryFarm.state
+    local now = os.clock()
+
+    if not st then
+        -- no delivery assigned: make sure the shift is running (the server
+        -- marks the player with a JobId attribute)
+        local jobId = LocalPlayer:GetAttribute("JobId")
+        if jobId ~= "Delivery" and (now - deliveryFarm.lastStart) > 30 then
+            deliveryFarm.lastStart = now
+            if Remotes and type(Remotes.fireServer) == "function" then
+                pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", "Safe")
+                print("[driving-empire] delivery farm: requested a Delivery shift (Safe)")
+            end
+        end
+        return
+    end
+
+    if st.IsCollecting or st.IsDropping then return end  -- server is processing
+    local veh = getLocalVehicleModel()
+    if not veh then return end
+
+    local carrying = (tonumber(st.ItemsCarried) or 0) > 0
+    local target = carrying and st.DestinationPosition or st.PickupPosition
+    if not target then return end
+
+    local d = (veh:GetPivot().Position - target).Magnitude
+    if d > 70 then
+        if (now - deliveryFarm.lastMove) > 6 then
+            deliveryFarm.lastMove = now
+            local cf = veh:GetPivot()
+            teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position))
+            print(("[driving-empire] delivery farm: teleporting to %s (%.0f studs away)"):format(
+                carrying and "dropoff" or "pickup", d))
+        end
+        return
+    end
+
+    if (now - deliveryFarm.lastInteract) < 5 then return end
+    local part = deliveryLocationPart(target)
+    if part then
+        if Remotes and type(Remotes.fireServer) == "function" then
+            pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
+            deliveryFarm.lastInteract = now
+            print(("[driving-empire] delivery farm: %s interaction fired (%.0f studs)"):format(
+                carrying and "dropoff" or "pickup", d))
+        end
+    elseif not deliveryFarm.warned then
+        deliveryFarm.warned = true
+        print("[driving-empire] delivery farm: no DeliveryLocation part near " .. tostring(target))
+    end
+end
+
+local function installDeliveryProbe()
+    local evState = waitPath(ReplicatedStorage, { "Remotes", "DeliveryStateChanged" })
+    if evState and evState.OnClientEvent then
+        if vehicleHooks.deliveryStateConn then pcall(function() vehicleHooks.deliveryStateConn:Disconnect() end) end
+        vehicleHooks.deliveryStateConn = evState.OnClientEvent:Connect(function(s)
+            deliveryFarm.state = s
+        end)
+    end
+    local evDone = waitPath(ReplicatedStorage, { "Remotes", "DeliveryCompleted" })
+    if evDone and evDone.OnClientEvent then
+        if vehicleHooks.deliveryDoneConn then pcall(function() vehicleHooks.deliveryDoneConn:Disconnect() end) end
+        vehicleHooks.deliveryDoneConn = evDone.OnClientEvent:Connect(function(info)
+            deliveryFarm.state = nil
+            local reward = info and tonumber(info.CashReward)
+            local failure = info and info.FailureReason
+            print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s"):format(
+                tostring(info and info.CashReward), tostring(failure)))
+            if Config.Delivery.Enabled == true then
+                if failure then
+                    notify(("Delivery auto-farm: failed - %s"):format(tostring(failure)))
+                elseif reward and reward > 0 then
+                    notify(("Delivery auto-farm: +%s"):format(formatCash(reward)))
+                end
+            end
+        end)
+    end
+end
+
+installDeliveryProbe()
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(deliveryTick)
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -2040,6 +2162,26 @@ local function buildMenu()
     button(p5, "Queue now (last track)", function()
         queueJoinNow()
     end)
+
+    section(p5, "Delivery auto-farm")
+    toggle(p5, "Auto-run deliveries",
+        function() return Config.Delivery.Enabled end,
+        function(v)
+            Config.Delivery.Enabled = v
+            if v then
+                deliveryFarm.lastStart = 0
+                notify("Delivery auto-farm on - starting a Safe shift")
+            else
+                notify("Delivery auto-farm off")
+            end
+        end)
+    button(p5, "End delivery shift", function()
+        if Remotes and type(Remotes.fireServer) == "function" then
+            pcall(Remotes.fireServer, "RequestEndJobSession", "jobPad")
+        end
+        notify("Delivery shift end requested")
+    end)
+    note(p5, "Teleports to each pickup/dropoff like the race assist - stay in a car. Safe mode (no outlaws).")
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
