@@ -2410,9 +2410,13 @@ local function buildMenu()
         function() return Config.ESP.MaxDistance end,
         function(v) Config.ESP.MaxDistance = v end, 50, 100, 10000)
     section(p4, "Box")
-    toggle(p4, "Corner box",
+    toggle(p4, "Box",
         function() return Config.ESP.Box end,
         function(v) Config.ESP.Box = v end)
+    dropdown(p4, "Box style",
+        function() return { "Corner", "Full" } end,
+        function() return Config.ESP.BoxStyle end,
+        function(v) Config.ESP.BoxStyle = v end)
     slider(p4, "Corner length",
         function() return Config.ESP.BoxCornerLength end,
         function(v) Config.ESP.BoxCornerLength = v end, 1, 0, 40)
@@ -2468,6 +2472,21 @@ local function buildMenu()
         function() return Config.ESP.ChamsTransparency end,
         function(v) Config.ESP.ChamsTransparency = v end, 0.05, 0, 1)
     color(p4, "Chams colour", Config.ESP, "Chams")
+    section(p4, "Tracers")
+    toggle(p4, "Tracers",
+        function() return Config.ESP.Tracers end,
+        function(v) Config.ESP.Tracers = v end)
+    dropdown(p4, "Origin",
+        function() return { "Bottom", "Center" } end,
+        function() return Config.ESP.TracerOrigin end,
+        function(v) Config.ESP.TracerOrigin = v end)
+    slider(p4, "Tracer thickness",
+        function() return Config.ESP.TracerThickness end,
+        function(v) Config.ESP.TracerThickness = v end, 1, 1, 5)
+    slider(p4, "Tracer opacity",
+        function() return Config.ESP.TracerTransparency end,
+        function(v) Config.ESP.TracerTransparency = v end, 0.05, 0, 1)
+    color(p4, "Tracer colour", Config.ESP, "Tracer")
     note(p4, "Opacity sliders: 1 = fully visible.")
     section(p4, "World")
     toggle(p4, "Fullbright",
