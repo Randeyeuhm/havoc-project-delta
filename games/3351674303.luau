@@ -18,7 +18,7 @@
       • Misc      - anti-AFK, rejoin, reset character
 
     Menu key: RightShift (locked). Config: driving_empire_config.json.
-    Requires uilib.luau + espui.luau from the hub loader (or local copies).
+    Requires uilib.luau + esp.luau from the hub loader (or local copies).
 ]]
 
 if setstackhidden then pcall(setstackhidden, true) end
@@ -61,7 +61,7 @@ local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
     Delivery = { Enabled = false, Hard = true },
-    -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
+    -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
     Misc     = { Fullbright = false, AntiAFK = true, TeleportExec = true },
@@ -95,7 +95,7 @@ local function saveConfigDebounced()
     end)
 end
 
--- The file is read now but merged LATER (after espui has filled the ESP
+-- The file is read now but merged LATER (after esp.luau has filled the ESP
 -- section), so saved customizer settings can actually restore.
 local savedFromFile = nil
 if type(isfile) == "function" and isfile(CONFIG_FILE) and type(readfile) == "function" then
@@ -141,21 +141,21 @@ do
     end
 end
 
-local ESPUI_FILE = "espui.luau"
+local ESP_FILE = "esp.luau"
 local ESPUI
 do
     local ok, res = pcall(function()
-        local src = moduleSource(ESPUI_FILE)
+        local src = moduleSource(ESP_FILE)
         if not src then error("no source (loader stash empty, no local file)") end
-        local chunk, compileErr = loadstring(src, "@" .. ESPUI_FILE)
+        local chunk, compileErr = loadstring(src, "@" .. ESP_FILE)
         if not chunk then error("compile error: " .. tostring(compileErr)) end
         return chunk()
     end)
     if ok and type(res) == "table" then
         ESPUI = res
-        print("[driving-empire] espui " .. tostring(ESPUI.VERSION or "?") .. " loaded")
+        print("[driving-empire] esp " .. tostring(ESPUI.VERSION or "?") .. " loaded")
     else
-        warn("[driving-empire] espui.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
+        warn("[driving-empire] esp.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
     end
 end
 
@@ -970,7 +970,7 @@ end
 task.spawn(installGameAFKGuard)
 
 -- ============================================================
--- FEATURES: PLAYER ESP  (rendering lives in espui.luau)
+-- FEATURES: PLAYER ESP  (rendering lives in esp.luau)
 -- ============================================================
 local espRenderer = ESPUI and ESPUI.newRenderer(function() return Config.ESP end)
 
@@ -2390,7 +2390,7 @@ local function buildMenu()
                 notify = notify,
             }
         else
-            notify("espui.luau not loaded - customizer unavailable")
+            notify("esp.luau not loaded - customizer unavailable")
         end
     end)
     bindrow(p4, hotkeyById.ToggleESP)

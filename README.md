@@ -17,7 +17,7 @@ Adding support for a new game is just dropping a `<PlaceId>.luau` file into `gam
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Randeyeuhm/havoc-project-delta/main/loader.luau"))()
 ```
 
-Everything runs through `loadstring` — the loader fetches the matching script plus the shared modules (`uilib.luau` and `espui.luau`) and loads them straight into memory. Nothing is copied into your executor's workspace; only your config files are written there.
+Everything runs through `loadstring` — the loader fetches the matching script plus the shared modules (`uilib.luau` and `esp.luau`) and loads them straight into memory. Nothing is copied into your executor's workspace; only your config files are written there.
 
 ## Games
 
@@ -47,14 +47,14 @@ Built against the game's decompiled source — vehicle physics run client-side:
 Generic toolkit for games without a dedicated script:
 
 - **Camera aimbot** — FOV circle, smoothing, team check, optional visibility check, Hold-RMB or Always activation
-- **Player ESP (fully customizable)** — boxes / fills / corner brackets, names, health bars + text, distance, tracers, head dots, skeletons, look lines, off-screen arrows and chams, with static / team / rainbow / gradient colour modes
+- **Player ESP (fully customizable)** — corner box, name, health, distance and head/body highlight chams, with the two-window customizer (character preview + settings)
 - **ESP Customizer** — two-window editor: a preview window with a real player model showing exactly how your ESP will look, plus a settings window for every element's style, placement, offsets and colours
 - **Movement** — walk speed, jump power, infinite jump, fly
 - **Misc** — fullbright, anti-AFK, rejoin server
 
 ## Manual setup (without the loader)
 
-Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's workspace folder and execute it. The shared modules (`uilib.luau`, and `espui.luau` for the universal script) are only needed if nothing fetched them for you — without them the affected menu / ESP features are skipped with a warning.
+Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's workspace folder and execute it. The shared modules (`uilib.luau` and `esp.luau`) are only needed if nothing fetched them for you — without them the affected menu / ESP features are skipped with a warning.
 
 ## Files
 
@@ -65,7 +65,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's wo
 | `games/3351674303.luau` | Driving Empire (vehicle performance, teleports, speedometer HUD) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
 | `uilib.luau` | Shared UI toolkit — Project Delta-style window shell (dot header, drawn-X close, searchable left-rail tabs, footer), widgets, toasts, rebind capture, popup management |
-| `espui.luau` | ESP schema, Drawing renderer and two-window customizer (preview + settings) used by every script |
+| `esp.luau` | One-file ESP library — Project Delta based engine (corner box, name/health/distance, highlights) + two-window customizer (preview + settings) used by every script |
 | `StructureDumper.Luau` | Dev tool — dumps a game's structure for keeping detection logic up to date |
 | `Libraries_Im_Using.txt` | Reference list of the executor APIs this project relies on |
 

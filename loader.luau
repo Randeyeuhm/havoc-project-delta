@@ -20,10 +20,10 @@
     Adding support for a new game = drop a "<PlaceId>.luau" file into the
     repo's games/ folder and push. No loader changes needed.
 
-    It also fetches uilib.luau + espui.luau + esp.luau (shared UI toolkit,
-    ESP customizer and the Project Delta based ESP engine) and hands their
-    sources to the game script, which loads them with loadstring - nothing
-    is ever written to the executor's workspace.
+    It also fetches uilib.luau + esp.luau (the shared UI toolkit and the
+    one-file ESP library - engine + customizer) and hands their sources to
+    the game script, which loads them with loadstring - nothing is ever
+    written to the executor's workspace.
 ]]
 
 local USER   = "Randeyeuhm"
@@ -33,7 +33,6 @@ local BRANCH = "main"
 local GAMES_DIR      = "games/"
 local UNIVERSAL_FILE = GAMES_DIR .. "universal.luau"
 local UILIB_FILE     = "uilib.luau"
-local ESPUI_FILE     = "espui.luau"
 local ESP_FILE       = "esp.luau"
 
 -- Sub places of a game have their own PlaceId but share ONE GameId. Map a
@@ -110,16 +109,12 @@ log(("fetched %s (%.1f KB)"):format(baseName(gamePath), #gameSrc / 1024))
 -- 2) Shared modules - fetched here and handed to the game script as SOURCES
 --    (it loadstring()s them). Nothing is written to the workspace.
 local moduleSources = {}
-for _, name in ipairs({ UILIB_FILE, ESPUI_FILE, ESP_FILE }) do
+for _, name in ipairs({ UILIB_FILE, ESP_FILE }) do
     local src = fetch(name)
     if src then
         moduleSources[name] = src
         log(("%s: %.1f KB"):format(name, #src / 1024))
-        if name == ESPUI_FILE then
-            -- Echo the build string so a stale module is obvious.
-            local ver = src:match("ESPUI%.VERSION%s*=%s*\"([^\"]+)\"")
-            log("espui build: " .. (ver or "unknown"))
-        elseif name == UILIB_FILE then
+        if name == UILIB_FILE then
             local ver = src:match("UILib%.VERSION%s*=%s*\"([^\"]+)\"")
             log("uilib build: " .. (ver or "unknown"))
         elseif name == ESP_FILE then

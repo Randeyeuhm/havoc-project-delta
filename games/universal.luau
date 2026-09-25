@@ -145,15 +145,15 @@ do
 end
 
 -- ============================================================
--- ESP MODULE (espui.luau: schema, renderer, customizer)
+-- ESP LIBRARY (esp.luau: one file - engine + customizer)
 -- ============================================================
-local ESPUI_FILE = "espui.luau"
+local ESP_FILE = "esp.luau"
 local ESPUI
 do
     local ok, res = pcall(function()
-        local src = moduleSource(ESPUI_FILE)
+        local src = moduleSource(ESP_FILE)
         if not src then error("no source (loader stash empty, no local file)") end
-        local chunk, compileErr = loadstring(src, "@" .. ESPUI_FILE)
+        local chunk, compileErr = loadstring(src, "@" .. ESP_FILE)
         if not chunk then error("compile error: " .. tostring(compileErr)) end
         return chunk()
     end)
@@ -162,12 +162,12 @@ do
         ESPUI.fill(Config.ESP)
         ESPUI.sanitize(Config.ESP)
         if ESPUI.VERSION then
-            print("[universal] espui " .. tostring(ESPUI.VERSION) .. " loaded")
+            print("[universal] esp " .. tostring(ESPUI.VERSION) .. " loaded")
         else
-            warn("[universal] espui.luau has no version marker - it is an OLD build; re-run the loader to update it")
+            warn("[universal] esp.luau has no version marker - it is an OLD build; re-run the loader to update it")
         end
     else
-        warn("[Havoc Hub] espui.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
+        warn("[Havoc Hub] esp.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
     end
 end
 
@@ -340,7 +340,7 @@ track(LocalPlayer.Idled:Connect(function()
 end))
 
 -- ============================================================
--- FEATURES: PLAYER ESP  (rendering lives in espui.luau)
+-- FEATURES: PLAYER ESP  (rendering lives in esp.luau)
 -- ============================================================
 local espRenderer = ESPUI and ESPUI.newRenderer(function() return Config.ESP end)
 
@@ -713,7 +713,7 @@ local function buildMenu()
                 notify = notify,
             }
         else
-            notify("espui.luau not loaded - customizer unavailable")
+            notify("esp.luau not loaded - customizer unavailable")
         end
     end)
     bindrow(p2, hotkeyById.ToggleESP)
