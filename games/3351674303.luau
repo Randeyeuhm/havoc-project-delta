@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v46"
+local SCRIPT_VERSION = "de-v47"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,7 +60,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
-    Delivery = { Enabled = false },
+    Delivery = { Enabled = false, Hard = true },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -195,6 +195,7 @@ Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
 Config.Delivery.Enabled = Config.Delivery.Enabled == true
+Config.Delivery.Hard = Config.Delivery.Hard ~= false
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1883,7 +1884,8 @@ refreshTeleportQueue(true)
 -- The delivery job is server-driven: the client reacts to DeliveryStateChanged
 -- (pickup / destination positions, items carried) and reports interactions
 -- with the same fireServer events the game's own prompts use:
---   RequestStartJobSession("Delivery", "jobPad", "Safe") - start a shift
+--   RequestStartJobSession("Delivery", "jobPad", mode) - start a shift
+--     (mode = HighRisk by default - more cash, outlaws can steal)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
@@ -1919,8 +1921,9 @@ local function deliveryTick()
         if jobId ~= "Delivery" and (now - deliveryFarm.lastStart) > 30 then
             deliveryFarm.lastStart = now
             if Remotes and type(Remotes.fireServer) == "function" then
-                pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", "Safe")
-                print("[driving-empire] delivery farm: requested a Delivery shift (Safe)")
+                local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
+                pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
+                print(("[driving-empire] delivery farm: requested a Delivery shift (%s)"):format(mode))
             end
         end
         return
@@ -2170,10 +2173,16 @@ local function buildMenu()
             Config.Delivery.Enabled = v
             if v then
                 deliveryFarm.lastStart = 0
-                notify("Delivery auto-farm on - starting a Safe shift")
+                notify("Delivery auto-farm on - requesting a shift")
             else
                 notify("Delivery auto-farm off")
             end
+        end)
+    toggle(p5, "Hard shifts (HighRisk)",
+        function() return Config.Delivery.Hard ~= false end,
+        function(v)
+            Config.Delivery.Hard = v
+            notify(v and "Deliveries: Hard - more cash, outlaws can steal" or "Deliveries: Safe - less cash")
         end)
     button(p5, "End delivery shift", function()
         if Remotes and type(Remotes.fireServer) == "function" then
@@ -2181,7 +2190,7 @@ local function buildMenu()
         end
         notify("Delivery shift end requested")
     end)
-    note(p5, "Teleports to each pickup/dropoff like the race assist - stay in a car. Safe mode (no outlaws).")
+    note(p5, "Teleports to each pickup/dropoff like the race assist - stay in a car. Hard pays more; outlaws can steal.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
