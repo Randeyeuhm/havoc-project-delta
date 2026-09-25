@@ -4665,42 +4665,17 @@ do
     end
 
     local function addInvRow(index, itemName, iconString)
-        local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, 0, 0, 30)
-        row.BackgroundColor3 = C_PANEL
-        row.BorderSizePixel = 0
-        row.LayoutOrder = index
-        row.Parent = invEsp.list
-        corner(row, 6)
-
-        local iconBg = Instance.new("Frame")
-        iconBg.Size = UDim2.new(0, 24, 0, 24)
-        iconBg.Position = UDim2.new(0, 4, 0.5, -12)
-        iconBg.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-        iconBg.BorderSizePixel = 0
-        iconBg.Parent = row
-        corner(iconBg, 4)
-
-        local iconLbl = Instance.new("ImageLabel")
-        iconLbl.Size = UDim2.new(0, 18, 0, 18)
-        iconLbl.Position = UDim2.new(0.5, -9, 0.5, -9)
-        iconLbl.BackgroundTransparency = 1
-        iconLbl.Image = iconString ~= "" and iconString or ""
-        iconLbl.Parent = iconBg
-
-        local nameLbl = Instance.new("TextLabel")
-        nameLbl.Size = UDim2.new(1, -42, 1, 0)
-        nameLbl.Position = UDim2.new(0, 36, 0, 0)
-        nameLbl.BackgroundTransparency = 1
-        nameLbl.TextColor3 = C_TEXT
-        nameLbl.TextSize = 11
-        nameLbl.Font = Enum.Font.GothamMedium
-        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        nameLbl.Text = itemName
-        nameLbl.Parent = row
-
-        table.insert(invEsp.rows, row)
+        -- Row UI comes from uilib (makeRow); this script only feeds it the
+        -- item name + icon.
+        local row = UILib.makeRow(invEsp.list, {
+            height = 30,
+            cornerRadius = 6,
+            textSize = 11,
+            text = itemName,
+            icon = iconString,
+            layoutOrder = index,
+        })
+        table.insert(invEsp.rows, row.frame)
     end
 
     local function buildInventoryESP()
@@ -4713,20 +4688,21 @@ do
         local ok = pcall(function() gui.Parent = CoreGui end)
         if not ok then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        -- Slim panel: narrow card that grows to show the whole inventory (no
-        -- scrolling - every item stays visible), sized for 1080p.
-        local card = Instance.new("Frame")
-        card.Name = "Card"
-        card.AnchorPoint = Vector2.new(0, 1)
-        card.Position = UDim2.new(0, 20, 1, -180)
-        card.Size = UDim2.new(0, 185, 0, 0)
-        card.AutomaticSize = Enum.AutomaticSize.Y
-        card.BackgroundColor3 = C_BG
-        card.BorderSizePixel = 0
-        card.Active = true
-        card.Draggable = true
-        card.Parent = gui
-        corner(card, 8); stroke(card)
+        -- Card UI comes from uilib (makePanel/makeProfile/makeRow); this
+        -- script only feeds it content.
+        local panel = UILib and UILib.makePanel and UILib.makePanel(gui, {
+            name = "Card",
+            title = "INVENTORY",
+            size = UDim2.new(0, 185, 0, 0),
+            position = UDim2.new(0, 20, 1, -180),
+            anchorPoint = Vector2.new(0, 1),
+            dotColor = C_ACCENT,
+        })
+        if not panel then
+            pcall(function() gui:Destroy() end)
+            return
+        end
+        local card = panel.frame
 
         do
             local saved = Config.Misc.InvPosition
@@ -4748,134 +4724,18 @@ do
             end)
         end
 
-        local header = Instance.new("Frame")
-        header.Size = UDim2.new(1, 0, 0, 28)
-        header.BackgroundColor3 = C_HEADER
-        header.BorderSizePixel = 0
-        header.Parent = card
-        corner(header, 8)
-        local headerBottom = Instance.new("Frame")
-        headerBottom.Size = UDim2.new(1, 0, 0, 8)
-        headerBottom.Position = UDim2.new(0, 0, 1, -8)
-        headerBottom.BackgroundColor3 = C_HEADER
-        headerBottom.BorderSizePixel = 0
-        headerBottom.Parent = header
-
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0, 6, 0, 6)
-        dot.Position = UDim2.new(0, 12, 0.5, -3)
-        dot.BackgroundColor3 = C_ACCENT
-        dot.BorderSizePixel = 0
-        dot.Parent = header
-        corner(dot, 3)
-
-        local titleLbl = Instance.new("TextLabel")
-        titleLbl.Size = UDim2.new(1, -86, 1, 0)
-        titleLbl.Position = UDim2.new(0, 26, 0, 0)
-        titleLbl.BackgroundTransparency = 1
-        titleLbl.Text = "INVENTORY"
-        titleLbl.TextColor3 = C_TEXT
-        titleLbl.TextSize = 11
-        titleLbl.Font = Enum.Font.GothamBold
-        titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-        titleLbl.Parent = header
-
-        local countLbl = Instance.new("TextLabel")
-        countLbl.Size = UDim2.new(0, 40, 1, 0)
-        countLbl.Position = UDim2.new(1, -52, 0, 0)
-        countLbl.BackgroundTransparency = 1
-        countLbl.Text = "0"
-        countLbl.TextColor3 = C_ACCENT
-        countLbl.TextSize = 11
-        countLbl.Font = Enum.Font.GothamBold
-        countLbl.TextXAlignment = Enum.TextXAlignment.Right
-        countLbl.Parent = header
-
-        local profile = Instance.new("Frame")
-        profile.Size = UDim2.new(1, -12, 0, 56)
-        profile.Position = UDim2.new(0, 6, 0, 34)
-        profile.BackgroundColor3 = C_PANEL
-        profile.BorderSizePixel = 0
-        profile.Parent = card
-        corner(profile, 6)
-
-        local avatarFrame = Instance.new("Frame")
-        avatarFrame.Size = UDim2.new(0, 44, 0, 44)
-        avatarFrame.Position = UDim2.new(0, 6, 0.5, -22)
-        avatarFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-        avatarFrame.BorderSizePixel = 0
-        avatarFrame.Parent = profile
-        corner(avatarFrame, 22); stroke(avatarFrame)
-
-        local avatar = Instance.new("ImageLabel")
-        avatar.Size = UDim2.new(1, -4, 1, -4)
-        avatar.Position = UDim2.new(0, 2, 0, 2)
-        avatar.BackgroundTransparency = 1
-        avatar.Image = ""
-        avatar.Parent = avatarFrame
-        corner(avatar, 20)
-
-        local nameLbl = Instance.new("TextLabel")
-        nameLbl.Size = UDim2.new(1, -70, 0, 18)
-        nameLbl.Position = UDim2.new(0, 58, 0, 6)
-        nameLbl.BackgroundTransparency = 1
-        nameLbl.Text = "Hover a player"
-        nameLbl.TextColor3 = C_TEXT
-        nameLbl.TextSize = 12
-        nameLbl.Font = Enum.Font.GothamBold
-        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        nameLbl.Parent = profile
-
-        local statsLbl = Instance.new("TextLabel")
-        statsLbl.Size = UDim2.new(1, -70, 0, 15)
-        statsLbl.Position = UDim2.new(0, 58, 0, 24)
-        statsLbl.BackgroundTransparency = 1
-        statsLbl.Text = "K/D  —"
-        statsLbl.TextColor3 = C_TEXT_DIM
-        statsLbl.TextSize = 11
-        statsLbl.Font = Enum.Font.GothamMedium
-        statsLbl.TextXAlignment = Enum.TextXAlignment.Left
-        statsLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        statsLbl.Parent = profile
-
-        local ageLbl = Instance.new("TextLabel")
-        ageLbl.Size = UDim2.new(1, -70, 0, 14)
-        ageLbl.Position = UDim2.new(0, 58, 0, 39)
-        ageLbl.BackgroundTransparency = 1
-        ageLbl.Text = ""
-        ageLbl.TextColor3 = C_TEXT_DIM
-        ageLbl.TextSize = 10
-        ageLbl.Font = Enum.Font.Gotham
-        ageLbl.TextXAlignment = Enum.TextXAlignment.Left
-        ageLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        ageLbl.Parent = profile
-
-        local list = Instance.new("Frame")
-        list.Position = UDim2.new(0, 0, 0, 96)
-        list.Size = UDim2.new(1, 0, 0, 0)
-        list.AutomaticSize = Enum.AutomaticSize.Y
-        list.BackgroundTransparency = 1
-        list.Parent = card
-
-        local pad = Instance.new("UIPadding")
-        pad.PaddingBottom = UDim.new(0, 6)
-        pad.PaddingLeft = UDim.new(0, 6)
-        pad.PaddingRight = UDim.new(0, 6)
-        pad.Parent = list
-
-        local listLayout = Instance.new("UIListLayout")
-        listLayout.Padding = UDim.new(0, 3)
-        listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        listLayout.Parent = list
+        local profile = UILib.makeProfile(panel.body, {
+            name = "Hover a player",
+            stats = "K/D  —",
+        })
 
         invEsp.gui        = gui
-        invEsp.list       = list
-        invEsp.countLbl   = countLbl
-        invEsp.avatar     = avatar
-        invEsp.nameLbl    = nameLbl
-        invEsp.statsLbl   = statsLbl
-        invEsp.ageLbl     = ageLbl
+        invEsp.list       = panel.body
+        invEsp.countLbl   = panel.countLabel
+        invEsp.avatar     = profile.avatarLabel
+        invEsp.nameLbl    = profile.nameLabel
+        invEsp.statsLbl   = profile.statsLabel
+        invEsp.ageLbl     = profile.ageLabel
         invEsp.rows       = {}
     end
 
@@ -5070,17 +4930,21 @@ do
         local ok = pcall(function() gui.Parent = CoreGui end)
         if not ok then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        local frame = Instance.new("Frame")
-        frame.Name = "HUD"
-        frame.AnchorPoint = Vector2.new(1, 0)
-        frame.Size = UDim2.new(0, 200, 0, 30)
-        frame.AutomaticSize = Enum.AutomaticSize.Y
-        frame.BackgroundColor3 = C_BG
-        frame.BorderSizePixel = 0
-        frame.Active = true
-        frame.Draggable = true
-        frame.Parent = gui
-        corner(frame, 8); stroke(frame)
+        -- Panel + rows come from uilib (makePanel/makeRow); this script only
+        -- feeds the feature list in.
+        local panel = UILib and UILib.makePanel and UILib.makePanel(gui, {
+            name = "HUD",
+            title = "STATUS",
+            size = UDim2.new(0, 200, 0, 0),
+            position = UDim2.new(1, -20, 0, 60),
+            anchorPoint = Vector2.new(1, 0),
+            dotColor = C_GREEN,
+        })
+        if not panel then
+            pcall(function() gui:Destroy() end)
+            return
+        end
+        local frame = panel.frame
 
         do
             local saved = Config.Misc.HudPosition
@@ -5104,107 +4968,21 @@ do
             end)
         end
 
-        local header = Instance.new("Frame")
-        header.Size = UDim2.new(1, 0, 0, 28)
-        header.BackgroundColor3 = C_HEADER
-        header.BorderSizePixel = 0
-        header.Parent = frame
-        corner(header, 8)
-        local headerBottom = Instance.new("Frame")
-        headerBottom.Size = UDim2.new(1, 0, 0, 8)
-        headerBottom.Position = UDim2.new(0, 0, 1, -8)
-        headerBottom.BackgroundColor3 = C_HEADER
-        headerBottom.BorderSizePixel = 0
-        headerBottom.Parent = header
-
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0, 6, 0, 6)
-        dot.Position = UDim2.new(0, 12, 0.5, -3)
-        dot.BackgroundColor3 = C_GREEN
-        dot.BorderSizePixel = 0
-        dot.Parent = header
-        corner(dot, 3)
-
-        local titleLbl = Instance.new("TextLabel")
-        -- Was (1, -60): ran 14px into the counter on the right.
-        titleLbl.Size = UDim2.new(1, -86, 1, 0)
-        titleLbl.Position = UDim2.new(0, 26, 0, 0)
-        titleLbl.BackgroundTransparency = 1
-        titleLbl.Text = "STATUS"
-        titleLbl.TextColor3 = C_TEXT
-        titleLbl.TextSize = 11
-        titleLbl.Font = Enum.Font.GothamBold
-        titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-        titleLbl.Parent = header
-
-        local countLbl = Instance.new("TextLabel")
-        countLbl.Size = UDim2.new(0, 40, 1, 0)
-        countLbl.Position = UDim2.new(1, -52, 0, 0)
-        countLbl.BackgroundTransparency = 1
-        countLbl.Text = "0"
-        countLbl.TextColor3 = C_ACCENT
-        countLbl.TextSize = 11
-        countLbl.Font = Enum.Font.GothamBold
-        countLbl.TextXAlignment = Enum.TextXAlignment.Right
-        countLbl.Parent = header
-
-        local container = Instance.new("Frame")
-        container.Name = "List"
-        container.Position = UDim2.new(0, 0, 0, 28)
-        container.Size = UDim2.new(1, 0, 0, 0)
-        container.AutomaticSize = Enum.AutomaticSize.Y
-        container.BackgroundTransparency = 1
-        container.Parent = frame
-
-        local pad = Instance.new("UIPadding")
-        pad.PaddingTop = UDim.new(0, 6)
-        pad.PaddingLeft = UDim.new(0, 6)
-        pad.PaddingRight = UDim.new(0, 6)
-        pad.PaddingBottom = UDim.new(0, 6)
-        pad.Parent = container
-
-        local layout = Instance.new("UIListLayout")
-        layout.Padding = UDim.new(0, 3)
-        layout.SortOrder = Enum.SortOrder.LayoutOrder
-        layout.Parent = container
-
         hud.gui = gui
         hud.frame = frame
         hud.rows = {}
-        hud.countLbl = countLbl
+        hud.countLbl = panel.countLabel
 
         for i, entry in ipairs(HUD_ENTRIES) do
-            local row = Instance.new("Frame")
-            row.Name = entry.Id
-            row.Size = UDim2.new(1, 0, 0, 20)
-            row.BackgroundColor3 = C_PANEL
-            row.BorderSizePixel = 0
-            row.LayoutOrder = i
-            row.Visible = false
-            row.Parent = container
-            corner(row, 4)
-
-            local rdot = Instance.new("Frame")
-            rdot.Size = UDim2.new(0, 6, 0, 6)
-            rdot.Position = UDim2.new(0, 8, 0.5, -3)
-            rdot.BackgroundColor3 = C_GREEN
-            rdot.BorderSizePixel = 0
-            rdot.Parent = row
-            corner(rdot, 3)
-
-            local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(1, -28, 1, 0)
-            lbl.Position = UDim2.new(0, 20, 0, 0)
-            lbl.BackgroundTransparency = 1
-            lbl.Text = entry.Label
-            lbl.TextColor3 = C_TEXT
-            lbl.TextSize = 11
-            lbl.Font = Enum.Font.GothamMedium
-            lbl.TextXAlignment = Enum.TextXAlignment.Left
-            lbl.TextTruncate = Enum.TextTruncate.AtEnd
-            lbl.Parent = row
-
-            hud.rows[entry.Id] = row
+            local row = UILib.makeRow(panel.body, {
+                name = entry.Id,
+                height = 20,
+                text = entry.Label,
+                dot = C_GREEN,
+                layoutOrder = i,
+                visible = false,
+            })
+            hud.rows[entry.Id] = row.frame
         end
     end
 

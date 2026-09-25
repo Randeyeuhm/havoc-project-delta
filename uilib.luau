@@ -1728,6 +1728,296 @@ local function makeHitmarker(parent)
 end
 
 -- ============================================================
+-- PANELS  (draggable card: header with dot + title + optional count
+-- label, and an auto-height body with padding + list layout - hosts
+-- add makeRow rows (or their own sub-frames) into panel.body)
+-- ============================================================
+local function makePanel(parent, opts)
+    opts = opts or {}
+    local headerH = opts.headerHeight or 28
+
+    local frame = create("Frame", {
+        Name = opts.name or "Panel",
+        AnchorPoint = opts.anchorPoint or Vector2.new(0, 0),
+        Size = opts.size or UDim2.new(0, 200, 0, 0),
+        Position = opts.position or UDim2.fromOffset(20, 60),
+        BackgroundColor3 = opts.color or THEME.BG,
+        BorderSizePixel = 0,
+        Active = true,
+        Draggable = true,
+        AutomaticSize = opts.autosizeY == false and nil or Enum.AutomaticSize.Y,
+        ZIndex = opts.zindex or 20,
+        Parent = parent,
+    })
+    corner(frame, opts.cornerRadius or 8)
+    stroke(frame, THEME.STROKE)
+
+    local header = create("Frame", {
+        Size = UDim2.new(1, 0, 0, headerH),
+        BackgroundColor3 = THEME.HEADER,
+        BorderSizePixel = 0,
+        ZIndex = 21,
+        Parent = frame,
+    })
+    corner(header, opts.cornerRadius or 8)
+    create("Frame", {
+        -- square lower strip so only the top corners stay rounded
+        Size = UDim2.new(1, 0, 0, 8),
+        Position = UDim2.new(0, 0, 1, -8),
+        BackgroundColor3 = THEME.HEADER,
+        BorderSizePixel = 0,
+        ZIndex = 21,
+        Parent = header,
+    })
+
+    local dot = create("Frame", {
+        Size = UDim2.fromOffset(6, 6),
+        Position = UDim2.new(0, 12, 0.5, -3),
+        BackgroundColor3 = opts.dotColor or THEME.ACCENT,
+        BorderSizePixel = 0,
+        ZIndex = 22,
+        Parent = header,
+    })
+    corner(dot, 3)
+
+    local titleLabel = create("TextLabel", {
+        Size = UDim2.new(1, -86, 1, 0),
+        Position = UDim2.new(0, 26, 0, 0),
+        BackgroundTransparency = 1,
+        Text = opts.title or "",
+        TextColor3 = THEME.TEXT,
+        TextSize = opts.titleSize or 11,
+        Font = FONTS.BOLD,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 22,
+        Parent = header,
+    })
+
+    local countLabel
+    if opts.count ~= false then
+        countLabel = create("TextLabel", {
+            Size = UDim2.new(0, 40, 1, 0),
+            Position = UDim2.new(1, -52, 0, 0),
+            BackgroundTransparency = 1,
+            Text = "0",
+            TextColor3 = opts.countColor or THEME.ACCENT,
+            TextSize = 11,
+            Font = FONTS.BOLD,
+            TextXAlignment = Enum.TextXAlignment.Right,
+            ZIndex = 22,
+            Parent = header,
+        })
+    end
+
+    local body = create("Frame", {
+        Name = "List",
+        Position = UDim2.new(0, 0, 0, headerH),
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        ZIndex = 21,
+        Parent = frame,
+    })
+    local padding = opts.padding or 6
+    create("UIPadding", {
+        PaddingTop = UDim.new(0, opts.paddingTop or padding),
+        PaddingBottom = UDim.new(0, opts.paddingBottom or padding),
+        PaddingLeft = UDim.new(0, padding),
+        PaddingRight = UDim.new(0, padding),
+        Parent = body,
+    })
+    create("UIListLayout", {
+        Padding = UDim.new(0, opts.rowGap or 3),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Parent = body,
+    })
+
+    local P = {
+        frame = frame,
+        header = header,
+        body = body,
+        dot = dot,
+        titleLabel = titleLabel,
+        countLabel = countLabel,
+    }
+    P.setTitle = function(t) titleLabel.Text = tostring(t) end
+    P.setCount = function(n) if countLabel then countLabel.Text = tostring(n) end end
+    P.setDotColor = function(c) dot.BackgroundColor3 = c end
+    P.destroy = function() frame:Destroy() end
+    return P
+end
+
+-- ============================================================
+-- ROWS  (one list line: [dot] [icon] text; makeRow(parent, opts)
+-- returns { frame, label, dot, icon, setText, setTextColor, setIcon,
+-- setDotColor, setVisible, destroy })
+-- ============================================================
+local function makeRow(parent, opts)
+    opts = opts or {}
+    local height = opts.height or 20
+
+    local frame = create("Frame", {
+        Name = opts.name or "Row",
+        Size = UDim2.new(1, 0, 0, height),
+        BackgroundColor3 = opts.color or THEME.PANEL,
+        BorderSizePixel = 0,
+        LayoutOrder = opts.layoutOrder or 0,
+        Visible = opts.visible ~= false,
+        ZIndex = 22,
+        Parent = parent,
+    })
+    corner(frame, opts.cornerRadius or 4)
+
+    local dot
+    if opts.dot then
+        dot = create("Frame", {
+            Size = UDim2.fromOffset(6, 6),
+            Position = UDim2.new(0, 8, 0.5, -3),
+            BackgroundColor3 = opts.dot,
+            BorderSizePixel = 0,
+            ZIndex = 23,
+            Parent = frame,
+        })
+        corner(dot, 3)
+    end
+
+    local icon
+    if opts.icon ~= nil then
+        local iconBg = create("Frame", {
+            Size = UDim2.fromOffset(24, 24),
+            Position = UDim2.new(0, 4, 0.5, -12),
+            BackgroundColor3 = Color3.fromRGB(18, 18, 24),
+            BorderSizePixel = 0,
+            ZIndex = 23,
+            Parent = frame,
+        })
+        corner(iconBg, 4)
+        icon = create("ImageLabel", {
+            Size = UDim2.fromOffset(18, 18),
+            Position = UDim2.new(0.5, -9, 0.5, -9),
+            BackgroundTransparency = 1,
+            Image = (opts.icon ~= "" and opts.icon) or "",
+            ZIndex = 24,
+            Parent = iconBg,
+        })
+    end
+
+    local labelX = (icon ~= nil) and 36 or ((dot ~= nil) and 20 or 8)
+    local label = create("TextLabel", {
+        Size = UDim2.new(1, -(labelX + 8), 1, 0),
+        Position = UDim2.new(0, labelX, 0, 0),
+        BackgroundTransparency = 1,
+        Text = opts.text or "",
+        TextColor3 = opts.textColor or THEME.TEXT,
+        TextSize = opts.textSize or 11,
+        Font = opts.font or FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 23,
+        Parent = frame,
+    })
+
+    local R = { frame = frame, label = label, dot = dot, icon = icon }
+    R.setText = function(t) label.Text = tostring(t) end
+    R.setTextColor = function(c) label.TextColor3 = c end
+    R.setIcon = function(img) if icon then icon.Image = img or "" end end
+    R.setDotColor = function(c) if dot then dot.BackgroundColor3 = c end end
+    R.setVisible = function(v) frame.Visible = v ~= false end
+    R.destroy = function() frame:Destroy() end
+    return R
+end
+
+-- ============================================================
+-- PROFILE  (avatar circle + name + two info lines; makeProfile(parent)
+-- returns { frame, avatarLabel, nameLabel, statsLabel, ageLabel })
+-- ============================================================
+local function makeProfile(parent, opts)
+    opts = opts or {}
+
+    local frame = create("Frame", {
+        Name = "Profile",
+        Size = UDim2.new(1, 0, 0, opts.height or 56),
+        BackgroundColor3 = THEME.PANEL,
+        BorderSizePixel = 0,
+        LayoutOrder = opts.layoutOrder or 0,
+        ZIndex = 22,
+        Parent = parent,
+    })
+    corner(frame, 6)
+
+    local avatarFrame = create("Frame", {
+        Size = UDim2.fromOffset(44, 44),
+        Position = UDim2.new(0, 6, 0.5, -22),
+        BackgroundColor3 = Color3.fromRGB(18, 18, 24),
+        BorderSizePixel = 0,
+        ZIndex = 23,
+        Parent = frame,
+    })
+    corner(avatarFrame, 22)
+    stroke(avatarFrame, THEME.STROKE)
+
+    local avatarLabel = create("ImageLabel", {
+        Size = UDim2.new(1, -4, 1, -4),
+        Position = UDim2.fromOffset(2, 2),
+        BackgroundTransparency = 1,
+        Image = "",
+        ZIndex = 24,
+        Parent = avatarFrame,
+    })
+    corner(avatarLabel, 20)
+
+    local nameLabel = create("TextLabel", {
+        Size = UDim2.new(1, -70, 0, 18),
+        Position = UDim2.new(0, 58, 0, 6),
+        BackgroundTransparency = 1,
+        Text = opts.name or "",
+        TextColor3 = THEME.TEXT,
+        TextSize = 12,
+        Font = FONTS.BOLD,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 23,
+        Parent = frame,
+    })
+
+    local statsLabel = create("TextLabel", {
+        Size = UDim2.new(1, -70, 0, 15),
+        Position = UDim2.new(0, 58, 0, 24),
+        BackgroundTransparency = 1,
+        Text = opts.stats or "",
+        TextColor3 = THEME.TEXT_DIM,
+        TextSize = 11,
+        Font = FONTS.MEDIUM,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 23,
+        Parent = frame,
+    })
+
+    local ageLabel = create("TextLabel", {
+        Size = UDim2.new(1, -70, 0, 14),
+        Position = UDim2.new(0, 58, 0, 39),
+        BackgroundTransparency = 1,
+        Text = opts.age or "",
+        TextColor3 = THEME.TEXT_DIM,
+        TextSize = 10,
+        Font = FONTS.REGULAR,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 23,
+        Parent = frame,
+    })
+
+    return {
+        frame = frame,
+        avatarLabel = avatarLabel,
+        nameLabel = nameLabel,
+        statsLabel = statsLabel,
+        ageLabel = ageLabel,
+    }
+end
+
+-- ============================================================
 -- WINDOW  (the one standard scaffold for every panel: draggable frame,
 -- header + accent rule, optional tab rail with scrolling pages, close
 -- button, and a popup layer that dropdown lists are parented to, so an
@@ -2219,6 +2509,9 @@ UILib.makeInput         = makeInput
 UILib.makeWindow        = makeWindow
 UILib.makeBanner        = makeBanner
 UILib.makeHitmarker     = makeHitmarker
+UILib.makePanel         = makePanel
+UILib.makeRow           = makeRow
+UILib.makeProfile       = makeProfile
 UILib.makeToaster       = makeToaster
 UILib.restoreIdentity   = restoreIdentity
 
