@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v7"
+local SCRIPT_VERSION = "de-v8"
 
 local Connections = {}
 local function track(conn)
@@ -51,7 +51,7 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
@@ -177,6 +177,7 @@ Config.Vehicle.SpeedMult = math.clamp(tonumber(Config.Vehicle.SpeedMult) or 1, 1
 Config.Vehicle.TorqueMult = math.clamp(tonumber(Config.Vehicle.TorqueMult) or 1, 1, 10)
 Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 500)
 Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 10)
+Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 10)
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
@@ -453,6 +454,23 @@ local function applyBrake(chassis)
     end
     local want = base * Config.Vehicle.BrakeMult
     if pu.BrakeMult ~= want then pu.BrakeMult = want end
+end
+
+-- STEER: the sim scales the wheel steer angle by
+-- performanceConfig.TurnRadiusMult (angle = Tune.TurnRadius * TurnRadiusMult
+-- * input), so scaling that field scales how hard the car turns. Same
+-- marker-key base trick as the brake multiplier.
+local function applySteer(chassis)
+    if not chassis then return end
+    local pc = chassis.performanceConfig
+    if type(pc) ~= "table" then return end
+    local base = pc.__hubSteerBase
+    if base == nil then
+        base = tonumber(pc.TurnRadiusMult) or 1
+        pc.__hubSteerBase = base
+    end
+    local want = base * Config.Vehicle.SteerMult
+    if pc.TurnRadiusMult ~= want then pc.TurnRadiusMult = want end
 end
 
 -- ============================================================
@@ -1014,6 +1032,9 @@ local function buildMenu()
     slider(p1, "Brake multiplier",
         function() return Config.Vehicle.BrakeMult end,
         function(v) Config.Vehicle.BrakeMult = v end, 0.05, 1, 10)
+    slider(p1, "Steer strength",
+        function() return Config.Vehicle.SteerMult end,
+        function(v) Config.Vehicle.SteerMult = v end, 0.05, 1, 10)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -1021,9 +1042,9 @@ local function buildMenu()
     toggle(p1, "Ignore speed caps",
         function() return Config.Vehicle.NoSpeedCap end,
         function(v) Config.Vehicle.NoSpeedCap = v end)
-    note(p1, "Multipliers scale the driven car's engine, torque, tyre grip and " ..
-        "brakes - they reset when you switch cars. Speed changes may stand out " ..
-        "in races; keep 1.0 for events you care about.")
+    note(p1, "Multipliers scale the driven car's engine, torque, tyre grip, " ..
+        "steering and brakes - they reset when you switch cars. Speed changes " ..
+        "may stand out in races; keep 1.0 for events you care about.")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -1226,6 +1247,7 @@ track(RunService.RenderStepped:Connect(function()
         farmTick(chassis)
         applyGrip(chassis)
         applyBrake(chassis)
+        applySteer(chassis)
     end)
 
     pcall(renderESP, cam)
