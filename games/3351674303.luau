@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v16"
+local SCRIPT_VERSION = "de-v17"
 
 local Connections = {}
 local function track(conn)
@@ -187,9 +187,9 @@ Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
 Config.HUD.YOffset = math.clamp(tonumber(Config.HUD.YOffset) or 40, 0, 600)
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
 Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
-Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.1, 0, 1)
-Config.Race.ServerWait = math.clamp(tonumber(Config.Race.ServerWait) or 0.6, 0.1, 1.5)
-Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 30)
+Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.1, 0, 5)
+Config.Race.ServerWait = math.clamp(tonumber(Config.Race.ServerWait) or 0.6, 0.1, 5)
+Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1387,7 +1387,34 @@ local function runRaceRoutine()
                     elseif res == "novh" then
                         error("couldn't move your car - make sure you're sitting in it", 0)
                     else
-                        error(("checkpoint %d was rejected by the server (%s)"):format(i, res), 0)
+                        -- Server rejected this crossing. Loop back through the
+                        -- previous checkpoint (and nudge the server with a
+                        -- direct invoke in case its state lags), then approach
+                        -- this gate again - and keep going once it clears.
+                        local prev = i > 1 and (i - 1) or #cps
+                        notify(("Race assist: checkpoint %d rejected (%s) - looping back to checkpoint %d"):format(i, tostring(res), prev))
+                        local cleared = false
+                        for _ = 1, 3 do
+                            crossCheckpoint(cps[prev], dirs[prev])
+                            task.wait(Config.Race.HopDelay or 0.1)
+                            if Remotes and type(Remotes.invokeServer) == "function" then
+                                pcall(function() Remotes.invokeServer("RaceCheckpoint", prev) end)
+                            end
+                            task.wait(0.25)
+                            local res2 = crossCheckpoint(cps[i], dirs[i])
+                            if res2 == "ok" then
+                                cleared = true
+                                break
+                            end
+                            if res2 == "novh" then
+                                error("couldn't move your car - make sure you're sitting in it", 0)
+                            end
+                        end
+                        if not cleared then
+                            error(("checkpoint %d kept getting rejected (%s) - press the button again once the race catches up (progress is kept)"):format(i, tostring(res)), 0)
+                        end
+                        taken = taken + 1
+                        notify(("Race assist: checkpoint %d accepted after looping back"):format(i))
                     end
                     task.wait(Config.Race.HopDelay or 0.1)  -- hop delay (Race tab slider)
                 end
@@ -1724,21 +1751,22 @@ local function buildMenu()
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
-        function(v) Config.Race.HopDelay = v end, 0.05, 0, 1)
+        function(v) Config.Race.HopDelay = v end, 0.05, 0, 5)
     slider(p7, "Server wait (s)",
         function() return Config.Race.ServerWait end,
-        function(v) Config.Race.ServerWait = v end, 0.05, 0.1, 1.5)
+        function(v) Config.Race.ServerWait = v end, 0.05, 0.1, 5)
     slider(p7, "Sweep distance",
         function() return Config.Race.SweepDist end,
-        function(v) Config.Race.SweepDist = v end, 1, 6, 30)
+        function(v) Config.Race.SweepDist = v end, 1, 6, 60)
     note(p7, "Hop delay: pause between checkpoints. Server wait: how long " ..
         "each crossing waits for the server's answer. Sweep distance: how far " ..
         "before/after each gate the car is placed. Defaults: 0.1 / 0.6 / 12.")
     note(p7, "Jumps your car through every checkpoint of the race you are " ..
-        "in - in order - then across the finish line. You must be in a race " ..
-        "with your car spawned; wait for the countdown (GO) before pressing. " ..
-        "Race records and leaderboards are monitored - use it on tracks you " ..
-        "don't care about.")
+        "in - in order - then across the finish line. If the server rejects " ..
+        "a crossing it loops back through the previous checkpoint and retries " ..
+        "instead of giving up. You must be in a race with your car spawned; " ..
+        "wait for the countdown (GO) before pressing. Race records and " ..
+        "leaderboards are monitored - use it on tracks you don't care about.")
     note(p7, "Tip: the Vehicle tab's 'Remove tires' toggle keeps the wheels " ..
         "from flailing around during the jumps.")
 
