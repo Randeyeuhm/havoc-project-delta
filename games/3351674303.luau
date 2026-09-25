@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v37"
+local SCRIPT_VERSION = "de-v38"
 
 local Connections = {}
 local function track(conn)
@@ -1920,8 +1920,8 @@ end
 -- ============================================================
 -- "Auto-run" starts the normal race assist (same routine as the button,
 -- same Race tab timing settings) whenever a race goes live. "Auto-queue"
--- re-joins the same track + mode after each race using the game's own
--- queue call: Remotes.fireServer("RaceQueue", track, mode, "Join").
+-- re-joins the same track after each race using the game's own queue call:
+-- Remotes.invokeServer("JoinRacingQueue", track) -> (ok, ticketOrMessage).
 local function farmRaceMode()
     if MatchmakingUtil and type(MatchmakingUtil.isMatchmakingPlace) == "function" then
         local okG, isG = pcall(MatchmakingUtil.isMatchmakingPlace)
@@ -1930,16 +1930,34 @@ local function farmRaceMode()
     return "Exhibition"
 end
 
+-- Queue join = the JoinRacingQueue RemoteFunction (from the game's own
+-- MatchmakingController): invokeServer(queueId) returns (ok, ticket ||
+-- refusal message). Runs in a task so a slow answer never stalls the farm
+-- loop; the reply is logged and toasted.
 local function queueJoinNow()
     local track = farmRace.lastTrack or "Circuit"
-    local mode = farmRace.lastMode or "GlobalMultiplayer"
-    if not Remotes or type(Remotes.fireServer) ~= "function" then
-        notify("Queue join failed - game remotes not loaded")
-        return false
-    end
-    local ok = pcall(Remotes.fireServer, "RaceQueue", track, mode, "Join")
-    print(("[driving-empire] auto-queue: RaceQueue Join track=%s mode=%s ok=%s"):format(tostring(track), tostring(mode), tostring(ok)))
-    return ok
+    task.spawn(function()
+        local pok, v1, v2
+        if Remotes and type(Remotes.invokeServer) == "function" then
+            pok, v1, v2 = pcall(Remotes.invokeServer, "JoinRacingQueue", track)
+        else
+            local node = waitPath(ReplicatedStorage, { "Remotes", "JoinRacingQueue" })
+            if node then
+                pok, v1, v2 = pcall(function() return node:InvokeServer(track) end)
+            end
+        end
+        print(("[driving-empire] auto-queue: JoinRacingQueue(%s) pcall=%s ok=%s result=%s"):format(
+            tostring(track), tostring(pok), tostring(v1), tostring(v2)))
+        if pok == nil then
+            notify("Queue join failed - JoinRacingQueue not found")
+        elseif not pok then
+            notify("Queue join error - see console")
+        elseif v1 == true then
+            notify(("Queued for %s - waiting for the race"):format(tostring(track)))
+        else
+            notify(("Queue refused: %s"):format(tostring(v2 or v1)))
+        end
+    end)
 end
 
 task.spawn(function()
@@ -1998,10 +2016,7 @@ task.spawn(function()
                     farmRace.rejoinTries = farmRace.rejoinTries + 1
                     farmRace.lastJoinAt = os.clock()
                     farmRace.pendingAt = os.clock() + 45  -- retry window
-                    if queueJoinNow() then
-                        notify(("Race auto-farm: queued %s (%s) - waiting for the race"
-                            ):format(tostring(farmRace.lastTrack or "?"), tostring(farmRace.lastMode or "?")))
-                    end
+                    queueJoinNow()
                 end
             end
         end
@@ -2277,18 +2292,15 @@ local function buildMenu()
                 or "Auto-queue off")
         end)
     button(p5, "Queue now (last track)", function()
-        local track = farmRace.lastTrack or "Circuit"
-        local mode = farmRace.lastMode or "GlobalMultiplayer"
-        if queueJoinNow() then
-            notify(("Queued %s (%s)"):format(tostring(track), tostring(mode)))
-        end
+        queueJoinNow()
     end)
     note(p5, "Auto-run: every race you enter is finished automatically - it " ..
         "watches for GO and runs the same routine as the Race tab button " ..
         "with your Race timing settings (hop, sweep, payout buffer, car " ..
-        "time pad). Auto-queue: after a race it re-joins the same track + " ..
-        "mode with the game's own queue call, so the loop keeps farming " ..
-        "until you toggle it off. Works wherever the game lets you queue.")
+        "time pad). Auto-queue: after a race it re-joins the same track " ..
+        "with the game's own queue call, so the loop keeps farming until " ..
+        "you toggle it off. The queue reply (accepted or refused + reason) " ..
+        "is toasted and logged.")
 
     -- ---------------- Misc ----------------
     local p6 = pages[6]
