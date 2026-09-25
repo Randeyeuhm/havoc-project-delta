@@ -67,7 +67,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w5-toast-center"
+UILib.VERSION = "w6-callback-identity"
 
 -- ============================================================
 -- UI THEME
@@ -148,9 +148,32 @@ end
 -- DECORATORS / SMALL HELPERS
 -- ============================================================
 
+-- Signal callbacks (button clicks etc.) can resume on engine threads whose
+-- identity/capability set is lower than the executor's own - on current
+-- client builds, accessing `Instance` from such a thread fails with
+-- "lacking capability Plugin". Capturing our identity at load time and
+-- restoring it before creating instances keeps every widget working no
+-- matter which thread a callback runs on.
+local OUR_IDENTITY
+do
+    local ok, id = pcall(function()
+        return getthreadidentity and getthreadidentity()
+    end)
+    if ok and type(id) == "number" then OUR_IDENTITY = id end
+end
+
+local function restoreIdentity()
+    if OUR_IDENTITY and setthreadidentity then
+        pcall(setthreadidentity, OUR_IDENTITY)
+    end
+end
+
 -- Instance.new with a property table. Parent (if given) is assigned last so
 -- the instance is fully configured before it enters the tree.
 local function create(className, props)
+    -- Callbacks may run at a lower thread identity - restore ours first so
+    -- Instance access always works (see restoreIdentity above).
+    restoreIdentity()
     local inst = Instance.new(className)
     for k, v in pairs(props) do
         if k ~= "Parent" then inst[k] = v end
@@ -1488,6 +1511,8 @@ local function makeToaster(parentGui)
 
     return function(text)
         text = tostring(text)
+        restoreIdentity()
+        local ok, err = pcall(function()
         local width, height = measure(text)
 
         local slot
@@ -1561,6 +1586,14 @@ local function makeToaster(parentGui)
             end
             if slots[slot] and slots[slot].frame == frame then slots[slot] = nil end
         end)
+        end)
+        if not ok then
+            -- Rare builds could still refuse GUI creation on callback
+            -- threads - print instead so the message still arrives and the
+            -- console stays free of raw errors.
+            warn("[UILib] toast failed: " .. tostring(err) .. " (printing instead)")
+            print("[UILib] " .. text)
+        end
     end
 end
 
@@ -1805,6 +1838,7 @@ UILib.makeButton        = makeButton
 UILib.makeInput         = makeInput
 UILib.makeWindow        = makeWindow
 UILib.makeToaster       = makeToaster
+UILib.restoreIdentity   = restoreIdentity
 
 print(("[uilib] %s loaded"):format(UILib.VERSION))
 

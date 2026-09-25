@@ -37,7 +37,7 @@ local ESPUI = {}
 -- Bumped whenever behaviour changes. Printed here on load and reported by
 -- the loader, so "is my copy actually the new one?" is always answerable
 -- from the console.
-ESPUI.VERSION = "v15-health-name"
+ESPUI.VERSION = "v16-callback-id"
 
 -- ============================================================
 -- SCHEMA  (flat table; colours stored as R/G/B numbers so uilib's
@@ -1665,6 +1665,9 @@ function ESPUI.open(ctx)
     if type(ctx) ~= "table" or not ctx.cfg or not ctx.uilib or not ctx.screenGui then
         return false, "espui.open needs { cfg, uilib, screenGui }"
     end
+    -- Called from a click callback: restore the executor thread identity
+    -- before any window building happens (see uilib.restoreIdentity).
+    if ctx.uilib.restoreIdentity then ctx.uilib.restoreIdentity() end
     if OPEN.ui and OPEN.ui.screenGui == ctx.screenGui then
         local ui = OPEN.ui
         local showing = ui.preview.Visible or ui.options.Visible
