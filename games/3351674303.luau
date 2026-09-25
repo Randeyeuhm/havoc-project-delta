@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v14"
+local SCRIPT_VERSION = "de-v15"
 
 local Connections = {}
 local function track(conn)
@@ -1457,20 +1457,359 @@ end))
 -- MENU
 -- ============================================================
 local function buildMenu()
-    local win = UILib.makeWindow{
-        parent = screenGui,
-        name = "Main",
-        title = "HAVOC HUB  ·  DRIVING EMPIRE",
-        subtitle = "PlaceId " .. tostring(game.PlaceId),
-        size = UDim2.new(0, 560, 0, 380),
-        position = UDim2.new(0, 30, 0, 40),
-        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc", "Race" },
-        onClose = function()
-            screenGui.Enabled = false
-            notify("Menu hidden - press RightShift to reopen")
-        end,
-    }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6), win.tab(7) }
+    -- Window shell in the Project Delta style: dot header with drawn-X close,
+    -- search bar, left category rail with accent bars, content area, and a
+    -- footer with the reopen hint + live status.
+    local T = UILib.THEME
+    if UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+
+    local viewport = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1920, 1080)
+    local winW = math.clamp(viewport.X - 60, 420, 560)
+    local winH = math.clamp(viewport.Y - 80, 380, 720)
+
+    local main = Instance.new("Frame")
+    main.Name = "Main"
+    main.Size = UDim2.new(0, winW, 0, winH)
+    main.Position = UDim2.new(0, 30, 0, 40)
+    main.BackgroundColor3 = T.BG
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.Draggable = true
+    main.Parent = screenGui
+    UILib.corner(main, 10); UILib.stroke(main, T.STROKE)
+
+    local title = Instance.new("Frame")
+    title.Size = UDim2.new(1, 0, 0, 36)
+    title.BackgroundColor3 = T.HEADER
+    title.BorderSizePixel = 0
+    title.Parent = main
+    UILib.corner(title, 10)
+    local titleBottom = Instance.new("Frame")
+    titleBottom.Size = UDim2.new(1, 0, 0, 10)
+    titleBottom.Position = UDim2.new(0, 0, 1, -10)
+    titleBottom.BackgroundColor3 = T.HEADER
+    titleBottom.BorderSizePixel = 0
+    titleBottom.Parent = title
+
+    local accentLine = Instance.new("Frame")
+    accentLine.Size = UDim2.new(1, 0, 0, 2)
+    accentLine.Position = UDim2.new(0, 0, 0, 36)
+    accentLine.BackgroundColor3 = T.ACCENT
+    accentLine.BorderSizePixel = 0
+    accentLine.ZIndex = 2
+    accentLine.Parent = main
+
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.new(0, 8, 0, 8)
+    dot.Position = UDim2.new(0, 14, 0.5, -4)
+    dot.BackgroundColor3 = T.ACCENT
+    dot.BorderSizePixel = 0
+    dot.Parent = title
+    UILib.corner(dot, 4)
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -220, 1, 0)
+    titleLbl.Position = UDim2.new(0, 30, 0, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = "HAVOC HUB  ·  DRIVING EMPIRE"
+    titleLbl.TextColor3 = T.TEXT
+    titleLbl.TextSize = 13
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Parent = title
+
+    local verLbl = Instance.new("TextLabel")
+    verLbl.Size = UDim2.new(0, 150, 1, 0)
+    verLbl.Position = UDim2.new(1, -190, 0, 0)
+    verLbl.BackgroundTransparency = 1
+    verLbl.Text = ("PlaceId %d  ·  %s"):format(game.PlaceId, SCRIPT_VERSION)
+    verLbl.TextColor3 = T.TEXT_DIM
+    verLbl.TextSize = 10
+    verLbl.Font = Enum.Font.GothamMedium
+    verLbl.TextXAlignment = Enum.TextXAlignment.Right
+    verLbl.Parent = title
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position = UDim2.new(1, -36, 0.5, -12)
+    closeBtn.BackgroundColor3 = T.RED
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = ""
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = title
+    UILib.corner(closeBtn, 6)
+
+    -- X drawn from two frames: Gotham's "×" glyph renders off-centre.
+    for i = 1, 2 do
+        local arm = Instance.new("Frame")
+        arm.AnchorPoint = Vector2.new(0.5, 0.5)
+        arm.Position = UDim2.new(0.5, 0, 0.5, 0)
+        arm.Size = UDim2.new(0, 12, 0, 2)
+        arm.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        arm.BorderSizePixel = 0
+        arm.Rotation = (i == 1) and 45 or -45
+        arm.Parent = closeBtn
+        UILib.corner(arm, 1)
+    end
+
+    closeBtn.MouseEnter:Connect(function() UILib.tween(closeBtn, 0.1, { BackgroundColor3 = T.RED_HI }) end)
+    closeBtn.MouseLeave:Connect(function() UILib.tween(closeBtn, 0.1, { BackgroundColor3 = T.RED }) end)
+    closeBtn.MouseButton1Click:Connect(function()
+        screenGui.Enabled = false
+        notify("Menu hidden - press RightShift to reopen")
+    end)
+
+    -- Search bar under the header.
+    local searchFrame = Instance.new("Frame")
+    searchFrame.Size = UDim2.new(1, -24, 0, 30)
+    searchFrame.Position = UDim2.new(0, 12, 0, 44)
+    searchFrame.BackgroundColor3 = T.PANEL
+    searchFrame.BorderSizePixel = 0
+    searchFrame.Parent = main
+    UILib.corner(searchFrame, 6); UILib.stroke(searchFrame, T.STROKE)
+
+    local lens = Instance.new("Frame")
+    lens.Size = UDim2.new(0, 10, 0, 10)
+    lens.Position = UDim2.new(0, 14, 0, 10)
+    lens.BackgroundTransparency = 1
+    lens.Parent = searchFrame
+    UILib.corner(lens, 5)
+    local lensRing = UILib.stroke(lens, T.TEXT_DIM)
+    lensRing.Thickness = 1.5
+
+    local lensHandle = Instance.new("Frame")
+    lensHandle.Size = UDim2.new(0, 6, 0, 2)
+    lensHandle.AnchorPoint = Vector2.new(0, 0.5)
+    lensHandle.Position = UDim2.new(0, 22, 0, 19)
+    lensHandle.Rotation = 45
+    lensHandle.BackgroundColor3 = T.TEXT_DIM
+    lensHandle.BorderSizePixel = 0
+    lensHandle.Parent = searchFrame
+    UILib.corner(lensHandle, 1)
+
+    local searchBox = Instance.new("TextBox")
+    searchBox.Size = UDim2.new(1, -44, 1, 0)
+    searchBox.Position = UDim2.new(0, 38, 0, 0)
+    searchBox.BackgroundTransparency = 1
+    searchBox.Text = ""
+    searchBox.PlaceholderText = "Search settings…"
+    searchBox.PlaceholderColor3 = T.TEXT_DIM
+    searchBox.TextColor3 = T.TEXT
+    searchBox.TextSize = 12
+    searchBox.Font = Enum.Font.Gotham
+    searchBox.TextXAlignment = Enum.TextXAlignment.Left
+    searchBox.ClearTextOnFocus = false
+    searchBox.Parent = searchFrame
+
+    -- Left category rail + content area (single-level: DE's tabs are flat).
+    local rail = Instance.new("Frame")
+    rail.Size = UDim2.new(0, 116, 1, -132)
+    rail.Position = UDim2.new(0, 12, 0, 82)
+    rail.BackgroundColor3 = T.RAIL
+    rail.BorderSizePixel = 0
+    rail.Parent = main
+    UILib.corner(rail, 8); UILib.stroke(rail, T.STROKE)
+
+    local railLayout = Instance.new("UIListLayout")
+    railLayout.Padding = UDim.new(0, 4)
+    railLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    railLayout.Parent = rail
+    local railPad = Instance.new("UIPadding")
+    railPad.PaddingTop = UDim.new(0, 6); railPad.PaddingLeft = UDim.new(0, 6)
+    railPad.PaddingRight = UDim.new(0, 6); railPad.PaddingBottom = UDim.new(0, 6)
+    railPad.Parent = rail
+
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, -152, 1, -132)
+    content.Position = UDim2.new(0, 140, 0, 82)
+    content.BackgroundTransparency = 1
+    content.Parent = main
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 6
+    scroll.ScrollBarImageColor3 = T.STROKE
+    scroll.ScrollBarImageTransparency = 0.1
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = content
+    local scrollPad = Instance.new("UIPadding")
+    scrollPad.PaddingRight = UDim.new(0, 12)
+    scrollPad.Parent = scroll
+
+    local searchResults = Instance.new("Frame")
+    searchResults.Size = UDim2.new(1, 0, 0, 0)
+    searchResults.BackgroundTransparency = 1
+    searchResults.AutomaticSize = Enum.AutomaticSize.Y
+    searchResults.Visible = false
+    searchResults.Parent = scroll
+    local srLayout = Instance.new("UIListLayout")
+    srLayout.Padding = UDim.new(0, 6)
+    srLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    srLayout.Parent = searchResults
+
+    local noResults = Instance.new("TextLabel")
+    noResults.Size = UDim2.new(1, 0, 0, 44)
+    noResults.BackgroundColor3 = T.PANEL
+    noResults.BorderSizePixel = 0
+    noResults.Text = "No settings match your search."
+    noResults.TextColor3 = T.TEXT_DIM
+    noResults.TextSize = 12
+    noResults.Font = Enum.Font.Gotham
+    noResults.Visible = false
+    noResults.LayoutOrder = -1
+    noResults.Parent = searchResults
+    UILib.corner(noResults, 6); UILib.stroke(noResults, T.STROKE)
+
+    -- Footer: reopen hint + live status (active tab, or search result count).
+    local footer = Instance.new("Frame")
+    footer.Size = UDim2.new(1, -24, 0, 30)
+    footer.Position = UDim2.new(0, 12, 1, -42)
+    footer.BackgroundColor3 = T.RAIL
+    footer.BorderSizePixel = 0
+    footer.Parent = main
+    UILib.corner(footer, 8); UILib.stroke(footer, T.STROKE)
+
+    local footerHint = Instance.new("TextLabel")
+    footerHint.Size = UDim2.new(1, -162, 1, 0)
+    footerHint.Position = UDim2.new(0, 12, 0, 0)
+    footerHint.BackgroundTransparency = 1
+    footerHint.Text = "RightShift — show / hide this menu"
+    footerHint.TextColor3 = T.TEXT_DIM
+    footerHint.TextSize = 11
+    footerHint.Font = Enum.Font.Gotham
+    footerHint.TextXAlignment = Enum.TextXAlignment.Left
+    footerHint.Parent = footer
+
+    local footerStatus = Instance.new("TextLabel")
+    footerStatus.Size = UDim2.new(0, 130, 1, 0)
+    footerStatus.Position = UDim2.new(1, -142, 0, 0)
+    footerStatus.BackgroundTransparency = 1
+    footerStatus.Text = ""
+    footerStatus.TextColor3 = T.ACCENT_HI
+    footerStatus.TextSize = 11
+    footerStatus.Font = Enum.Font.GothamBold
+    footerStatus.TextXAlignment = Enum.TextXAlignment.Right
+    footerStatus.Parent = footer
+
+    local TAB_NAMES = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc", "Race" }
+    local pages, catButtons, catBars, catLabels = {}, {}, {}, {}
+    for i, name in ipairs(TAB_NAMES) do
+        local page = Instance.new("Frame")
+        page.Size = UDim2.new(1, 0, 0, 0)
+        page.BackgroundTransparency = 1
+        page.AutomaticSize = Enum.AutomaticSize.Y
+        page.Visible = false
+        page.Parent = scroll
+        local fl = Instance.new("UIListLayout")
+        fl.Padding = UDim.new(0, 6)
+        fl.SortOrder = Enum.SortOrder.LayoutOrder
+        fl.Parent = page
+        pages[i] = page
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(1, 0, 0, 32)
+        btn.BackgroundColor3 = T.PANEL
+        btn.BorderSizePixel = 0
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.LayoutOrder = i
+        btn.Parent = rail
+        UILib.corner(btn, 6)
+
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(0, 3, 0, 18)
+        bar.AnchorPoint = Vector2.new(0, 0.5)
+        bar.Position = UDim2.new(0, 10, 0.5, 0)
+        bar.BackgroundColor3 = T.ACCENT
+        bar.BorderSizePixel = 0
+        bar.Visible = false
+        bar.Parent = btn
+        UILib.corner(bar, 2)
+        catBars[i] = bar
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -34, 1, 0)
+        lbl.Position = UDim2.new(0, 22, 0, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = name
+        lbl.TextColor3 = T.TEXT_DIM
+        lbl.TextSize = 12
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextTruncate = Enum.TextTruncate.AtEnd
+        lbl.Parent = btn
+        catLabels[i] = lbl
+        catButtons[i] = btn
+    end
+
+    local currentCat = 1
+    local function showCategory(idx)
+        currentCat = idx
+        for i = 1, #pages do
+            pages[i].Visible = (i == idx)
+            local btn = catButtons[i]
+            if btn then
+                btn.BackgroundColor3 = (i == idx) and T.PANEL_HI or T.PANEL
+                catLabels[i].TextColor3 = (i == idx) and Color3.fromRGB(255, 255, 255) or T.TEXT_DIM
+                catBars[i].Visible = (i == idx)
+            end
+        end
+        footerStatus.Text = TAB_NAMES[idx] or ""
+    end
+
+    for i, btn in ipairs(catButtons) do
+        btn.MouseEnter:Connect(function()
+            if currentCat ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = T.PANEL_HI }) end
+        end)
+        btn.MouseLeave:Connect(function()
+            if currentCat ~= i then UILib.tween(btn, 0.1, { BackgroundColor3 = T.PANEL }) end
+        end)
+        btn.MouseButton1Click:Connect(function() showCategory(i) end)
+    end
+
+    local function setSearchActive(active)
+        searchResults.Visible = active
+        if active then
+            for i = 1, #pages do pages[i].Visible = false end
+        else
+            for _, ctrl in ipairs(guiControls) do
+                if ctrl.row and ctrl.homeParent then
+                    ctrl.row.Parent = ctrl.homeParent
+                    ctrl.row.Visible = true
+                end
+            end
+            showCategory(currentCat)
+        end
+    end
+
+    local function applySearch(query)
+        query = tostring(query or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+        if query == "" then
+            setSearchActive(false)
+            return
+        end
+        setSearchActive(true)
+        local matches = 0
+        for _, ctrl in ipairs(guiControls) do
+            if ctrl.row and ctrl.searchText then
+                local match = ctrl.searchText:lower():find(query, 1, true) ~= nil
+                if match then
+                    ctrl.row.Parent = searchResults
+                    matches = matches + 1
+                end
+                ctrl.row.Visible = match
+            end
+        end
+        noResults.Visible = (matches == 0)
+        footerStatus.Text = ("%d result%s"):format(matches, matches == 1 and "" or "s")
+    end
+
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        applySearch(searchBox.Text)
+    end)
 
     local builtCount = 0
     local function guard(what, fn)
@@ -1478,6 +1817,8 @@ local function buildMenu()
         if ok and type(e) == "table" then
             builtCount = builtCount + 1
             addControl(e)
+            -- Remember where each row lives so search can put it back.
+            if e.row then e.homeParent = e.row.Parent end
             return e
         end
         warn(("[driving-empire] widget '%s' failed: %s"):format(what, tostring(e)))
@@ -1736,7 +2077,7 @@ local function buildMenu()
     note(p7, "Tip: the Vehicle tab's 'Remove tires' toggle keeps the wheels " ..
         "from flailing around during the jumps.")
 
-    win.setTab(1)
+    showCategory(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
 end
 
