@@ -2461,9 +2461,9 @@ local function buildMenu()
     color(p4, "Distance colour", Config.ESP, "Distance")
     section(p4, "Chams")
     multiselect(p4, "Parts to highlight", { "Head", "Body" }, Config.ESP, "Chams")
-    toggle(p4, "Hollow (outline only)",
-        function() return Config.ESP.ChamsHollow end,
-        function(v) Config.ESP.ChamsHollow = v end)
+    toggle(p4, "Filled",
+        function() return Config.ESP.ChamsFilled ~= false end,
+        function(v) Config.ESP.ChamsFilled = v end)
     slider(p4, "Chams opacity",
         function() return Config.ESP.ChamsTransparency end,
         function(v) Config.ESP.ChamsTransparency = v end, 0.05, 0, 1)

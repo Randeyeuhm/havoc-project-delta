@@ -11,7 +11,7 @@
           distance labels and chams (Highlight)
       ESP.newObjects(cfg)
           world objects (drops / loot / corpses): Highlight + name label
-          per object kind (cfg[kind] holds Enabled / Hollow / R,G,B)
+          per object kind (cfg[kind] holds Enabled / Filled / Opacity / R,G,B)
 
         local esp = ESP.new(function() return Config.ESP end)
         esp:Ensure(model)     -- start tracking a model (idempotent)
@@ -30,7 +30,7 @@
         the box's short side
       - name / health / distance labels (outlined Text)
       - Highlights (chams) - a multi-select chooses any parts (Head /
-        Body), with shared colour, opacity and hollow settings
+        Body), with shared colour, opacity and fill settings
 
     Health works for player rigs (Humanoid) AND vehicle-style NPCs that
     keep health as an attribute on the model / PrimaryPart / Chassis.
@@ -95,10 +95,10 @@ local DEFAULTS = {
     DistanceR = 200, DistanceG = 200, DistanceB = 200,
 
     -- chams (Highlight) - ONE picker decides what gets highlighted; the
-    -- colour/opacity/hollow settings are shared by whatever part(s) are on
+    -- colour/opacity/filled settings are shared by whatever part(s) are on
     ChamsHead = false,     -- multi-select: any combination of parts
     ChamsBody = false,
-    ChamsHollow = false,
+    ChamsFilled = true,
     ChamsTransparency = 0.7,
     ChamsR = 255, ChamsG = 80, ChamsB = 80,
 }
@@ -148,7 +148,7 @@ local LEGACY_KEYS = {
     -- booleans above are migrated from it in fill)
     "ShowCornerBox", "CornerBoxLength", "CornerBoxTransparency",
     "ShowName", "ShowDistance", "ShowHealth",
-    "ShowHeadHighlight", "ShowBodyHighlight", "ChamsPart",
+    "ShowHeadHighlight", "ShowBodyHighlight", "ChamsPart", "ChamsHollow",
 }
 
 function ESP.fill(cfg)
@@ -170,12 +170,17 @@ function ESP.fill(cfg)
             cfg.ChamsHead = wasHead
             cfg.ChamsBody = wasBody
             local src = (wasBody and "Body" or "Head") .. "Highlight"
-            if cfg[src .. "Hollow"] ~= nil then cfg.ChamsHollow = cfg[src .. "Hollow"] == true end
+            if cfg[src .. "Hollow"] ~= nil then cfg.ChamsFilled = cfg[src .. "Hollow"] ~= true end
             if cfg[src .. "Transparency"] ~= nil then cfg.ChamsTransparency = cfg[src .. "Transparency"] end
             if cfg[src .. "R"] ~= nil then cfg.ChamsR = cfg[src .. "R"] end
             if cfg[src .. "G"] ~= nil then cfg.ChamsG = cfg[src .. "G"] end
             if cfg[src .. "B"] ~= nil then cfg.ChamsB = cfg[src .. "B"] end
         end
+    end
+    -- "Hollow" was the old name with the opposite sense; the fill is on by
+    -- default and the opacity slider controls it (same look as before).
+    if cfg.ChamsFilled == nil and cfg.ChamsHollow ~= nil then
+        cfg.ChamsFilled = cfg.ChamsHollow ~= true
     end
     for k, v in pairs(DEFAULTS) do
         if cfg[k] == nil then cfg[k] = v end
@@ -207,6 +212,7 @@ function ESP.sanitize(cfg)
     if CHOICES.NameSource[cfg.NameSource] ~= true then cfg.NameSource = "Username" end
     cfg.ChamsHead = cfg.ChamsHead == true
     cfg.ChamsBody = cfg.ChamsBody == true
+    cfg.ChamsFilled = cfg.ChamsFilled ~= false
     return cfg
 end
 
@@ -352,7 +358,7 @@ local LINE_TEMPLATE = {
 }
 
 -- Shared chams updater: creates the Highlight on first use, then keeps its
--- colour / opacity / hollow in sync every frame.
+-- colour / opacity / filled in sync every frame.
 local function applyCham(d, cfg, field, name, adornee, parent)
     local hl = d[field]
     if not hl then
@@ -365,7 +371,7 @@ local function applyCham(d, cfg, field, name, adornee, parent)
     local t = guiT(cfg.ChamsTransparency)
     hl.FillColor = rgb(cfg.ChamsR, cfg.ChamsG, cfg.ChamsB)
     hl.OutlineColor = hl.FillColor
-    hl.FillTransparency = cfg.ChamsHollow and 1 or t
+    hl.FillTransparency = (cfg.ChamsFilled ~= false) and t or 1
     hl.OutlineTransparency = t
     hl.Enabled = true
 end
@@ -442,7 +448,7 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
     end
 
     -- Chams (Highlight): the multi-select decides which part(s) get
-    -- highlighted - any combination; colour, opacity and hollow are shared.
+    -- highlighted - any combination; colour, opacity and filled are shared.
     if cfg.ChamsHead == true then
         applyCham(d, cfg, "HeadHighlight", "HavocESPHeadCham", head, head)
     elseif d.HeadHighlight then
@@ -676,7 +682,7 @@ end
 -- ============================================================
 -- The host scans the world and calls obj:Ensure(model, kind); the class
 -- draws each tracked object from cfg:
---   cfg[kind]                 = { Enabled, Hollow, R, G, B }
+--   cfg[kind]                 = { Enabled, Filled, Opacity, R, G, B }
 --   cfg["Show"..kind.."Names"] = name label toggle (default on)
 --   cfg.MaxDistance, cfg.LabelSize
 -- Retire objects with obj:Remove(model) / obj:Prune(seen) / obj:Clear().
@@ -792,7 +798,11 @@ local function renderOneObject(cfg, model, d, cam)
     if d.hl then
         d.hl.FillColor = col
         d.hl.OutlineColor = col
-        d.hl.FillTransparency = kcfg.Hollow and 1 or 0.3
+        local fillT = 1
+        if kcfg.Filled ~= false then
+            fillT = 1 - math.clamp(tonumber(kcfg.Opacity) or 0.7, 0, 1)
+        end
+        d.hl.FillTransparency = fillT
         d.hl.Enabled = on
     end
     local showNames = cfg["Show" .. kind .. "Names"] ~= false
