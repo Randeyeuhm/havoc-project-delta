@@ -29,8 +29,8 @@
       - box: Corner (8 Line segments, fixed corner length capped at 30% of
         the box's short side) or Full (4 edge lines)
       - name / health / distance labels (outlined Text)
-      - tracers (Line from the screen origin to the target) and a head dot
-        (Circle), both with their own colour / opacity settings
+      - tracers (Line from the screen origin to the target), with its own
+        colour / opacity settings
       - Highlights (chams) - a multi-select chooses any parts (Head /
         Body), with shared colour, opacity and fill settings
 
@@ -111,12 +111,6 @@ local DEFAULTS = {
     TracerThickness = 1,
     TracerTransparency = 0.5,  -- opacity
     TracerR = 255, TracerG = 255, TracerB = 255,
-
-    -- head dot (small filled marker on the head)
-    HeadDot = false,
-    HeadDotSize = 4,
-    HeadDotTransparency = 0.8, -- opacity
-    HeadDotR = 255, HeadDotG = 255, HeadDotB = 255,
 }
 ESP.DEFAULTS = DEFAULTS
 
@@ -143,7 +137,9 @@ local LEGACY_KEYS = {
     "DistanceAnchor", "DistanceOffsetX", "DistanceOffsetY", "DistanceUnit",
     "DistanceDecimals", "DistanceOutline", "DistanceColorMode",
     "TracerOffsetX", "TracerOffsetY", "TracerColorMode",
+    "HeadDot", "HeadDotSize", "HeadDotTransparency",
     "HeadDotColorMode",
+    "HeadDotR", "HeadDotG", "HeadDotB",
     "Skeleton", "SkeletonThickness", "SkeletonTransparency",
     "SkeletonColorMode", "SkeletonR", "SkeletonG", "SkeletonB",
     "LookLine", "LookLineLength", "LookLineThickness", "LookLineTransparency",
@@ -229,10 +225,7 @@ function ESP.sanitize(cfg)
     if CHOICES.TracerOrigin[cfg.TracerOrigin] ~= true then cfg.TracerOrigin = "Bottom" end
     cfg.TracerThickness = num(cfg.TracerThickness, 1, 5, 1)
     cfg.TracerTransparency = num(cfg.TracerTransparency, 0, 1, 0.5)
-    cfg.HeadDotSize = num(cfg.HeadDotSize, 2, 12, 4)
-    cfg.HeadDotTransparency = num(cfg.HeadDotTransparency, 0, 1, 0.8)
     cfg.Tracers = cfg.Tracers == true
-    cfg.HeadDot = cfg.HeadDot == true
     cfg.ChamsHead = cfg.ChamsHead == true
     cfg.ChamsBody = cfg.ChamsBody == true
     cfg.ChamsFilled = cfg.ChamsFilled ~= false
@@ -335,7 +328,7 @@ ESP.entityHealth = entityHealth
 -- ============================================================
 local LABEL_KEYS = {
     "TL_V", "TL_H", "TR_V", "TR_H", "BL_V", "BL_H", "BR_V", "BR_H",
-    "NameLabel", "DistanceLabel", "HealthLabel", "Tracer", "HeadDot",
+    "NameLabel", "DistanceLabel", "HealthLabel", "Tracer",
 }
 
 local function newLine()
@@ -351,13 +344,6 @@ local function newText()
     t.Visible, t.Font, t.Size = false, Drawing.Fonts.UI, 16
     t.Outline, t.OutlineColor, t.Center = true, Color3.fromRGB(0, 0, 0), false
     return t
-end
-
-local function newCircle()
-    local ok, c = pcall(Drawing.new, "Circle")
-    if not ok or not c then return nil end
-    c.Visible, c.Thickness, c.Filled, c.Transparency, c.ZIndex = false, 1, true, 1, 2
-    return c
 end
 
 local function hideData(d)
@@ -571,25 +557,6 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
         end
     end
 
-    -- Head dot - a small filled marker on the head.
-    if d.HeadDot then
-        if cfg.HeadDot then
-            local headPos, headVis = cam:WorldToViewportPoint(head.Position)
-            if headVis and headPos.Z > 0 then
-                local dot = d.HeadDot
-                dot.Position = Vector2.new(headPos.X, headPos.Y)
-                dot.Radius = tonumber(cfg.HeadDotSize) or 4
-                dot.Color = rgb(cfg.HeadDotR, cfg.HeadDotG, cfg.HeadDotB)
-                dot.Transparency = drawT(cfg.HeadDotTransparency)
-                dot.Visible = true
-            else
-                d.HeadDot.Visible = false
-            end
-        else
-            d.HeadDot.Visible = false
-        end
-    end
-
     return true
 end
 
@@ -636,7 +603,6 @@ function ESPClass:Ensure(model)
         DistanceLabel = newText(),
         HealthLabel = newText(),
         Tracer = newLine(),
-        HeadDot = newCircle(),
     }
     self.Objects[model] = d
     return d

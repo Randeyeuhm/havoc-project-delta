@@ -5172,13 +5172,6 @@ do
             addValue (cat, sub, "Tracer opacity", function() return cfg.TracerTransparency end,
                 function(v) cfg.TracerTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
             addColor (cat, sub, "Tracer colour", cfg, "Tracer")
-            addSection(cat, sub, "Head dot")
-            addToggle(cat, sub, "Head dot", function() return cfg.HeadDot end, function(v) cfg.HeadDot = v end)
-            addValue (cat, sub, "Dot size", function() return cfg.HeadDotSize end,
-                function(v) cfg.HeadDotSize = v end, 1, 2, 12, function(v) return tostring(math.floor(v)) end)
-            addValue (cat, sub, "Dot opacity", function() return cfg.HeadDotTransparency end,
-                function(v) cfg.HeadDotTransparency = v end, 0.05, 0, 1, function(v) return string.format("%.2f", v) end)
-            addColor (cat, sub, "Dot colour", cfg, "HeadDot")
         end
 
         buildESPSection("ESP", "Player", Config.Player, "PlayerESP")
