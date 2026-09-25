@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v19"
+local SCRIPT_VERSION = "de-v20"
 
 local Connections = {}
 local function track(conn)
@@ -298,6 +298,7 @@ end)()
 local ChassisUtils, ClientVehicles, VehicleController
 local Remotes, RaceUtil, RaceController, TeleportDetection
 local ClientRaceHelper
+local VehicleStatTracker
 
 local function waitPath(root, segments)
     local node = root
@@ -472,6 +473,13 @@ local function initVehicleModules()
         if node then
             local ok, res = pcall(require, node)
             if ok and type(res) == "table" then ClientRaceHelper = res end
+        end
+    end
+    if not VehicleStatTracker then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Vehicles", "VehicleStatTracker" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then VehicleStatTracker = res end
         end
     end
     installInvokeProbe()
@@ -1539,6 +1547,129 @@ local function runRaceRoutine()
     end)
 end
 
+-- REMOTE RACE: report every checkpoint through the game's own RaceCheckpoint
+-- remote instead of moving the car - no teleports, no driving. The server is
+-- the only source of truth, so the routine walks 1..N per lap: accepted
+-- numbers advance, rejected ones (already taken, or lag) are retried once and
+-- then skipped. It offers the finish at every lap boundary until the server
+-- takes it, holding for the payout minimum first. If it stops early, press it
+-- again - it resumes from wherever the server is.
+local function invokeRaceRemote(name, ...)
+    if not Remotes or type(Remotes.invokeServer) ~= "function" then
+        return false, "Remotes module not loaded"
+    end
+    local ret = table.pack(pcall(Remotes.invokeServer, name, ...))
+    if not ret[1] then return false, "invoke failed: " .. tostring(ret[2]) end
+    if ret[2] then return true, nil end
+    return false, tostring(ret[3] or "no reason given")
+end
+
+local function runRemoteRaceRoutine()
+    if raceBusy then
+        notify("Race assist is already running")
+        return
+    end
+    if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+    local trackModel = findRaceTrackModel()
+    if not trackModel then
+        notify("Race assist: join a race first (with your car spawned)")
+        return
+    end
+    local cpCount = 0
+    for _, e in ipairs(trackModel.Checkpoints:GetChildren()) do
+        if trackEntryPart(e) then cpCount = cpCount + 1 end
+    end
+    if cpCount == 0 then
+        notify("Race assist: couldn't read this race's checkpoints")
+        return
+    end
+    if not Remotes or type(Remotes.invokeServer) ~= "function" then
+        notify("Race assist: Remotes module not loaded")
+        return
+    end
+    local lapsKnown, minTime = raceTrackInfo(trackModel)
+    local laps = math.clamp(lapsKnown or 4, 1, 8)
+    local startClock = os.clock()
+    raceBusy = true
+    task.spawn(function()
+        if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+        notify(("Race assist (remote): reporting %d checkpoints x%d lap(s) - no teleports"):format(cpCount, laps))
+        local ok, err = pcall(function()
+            local accepted, lastReason = 0, nil
+            local function remoteFinish()
+                if accepted > 0 then
+                    waitForPayout(minTime, startClock)
+                end
+                local stats = nil
+                if VehicleStatTracker and type(VehicleStatTracker.get) == "function" then
+                    local okGet, resGet = pcall(VehicleStatTracker.get)
+                    if okGet then stats = resGet end
+                end
+                return invokeRaceRemote("RaceFinishLine", stats, false)
+            end
+            local budget = (laps * cpCount) + cpCount  -- expected sends + one spare lap
+            local sends, fails = 0, 0
+            local n = 1
+            local t0 = os.clock()
+            while sends < budget and os.clock() - t0 < 600 do
+                local okSend, reason = invokeRaceRemote("RaceCheckpoint", n)
+                if not okSend then
+                    task.wait(RACE_SERVER_WAIT)  -- give the server a beat, then try once more
+                    okSend, reason = invokeRaceRemote("RaceCheckpoint", n)
+                end
+                sends = sends + 1
+                if okSend then
+                    accepted = accepted + 1
+                    fails = 0
+                    if accepted % 5 == 0 then
+                        notify(("Race assist (remote): %d checkpoints accepted"):format(accepted))
+                    end
+                else
+                    fails = fails + 1
+                    lastReason = reason
+                end
+                if fails >= cpCount then
+                    -- a whole lap of rejections: either only the finish is
+                    -- left, or the race isn't running
+                    local fok, freason = remoteFinish()
+                    if fok then
+                        notify("Race assist: race finished!")
+                        return
+                    end
+                    error(("the server stopped accepting checkpoints (%s) - if the race is running, press the button again"):format(tostring(lastReason or freason)), 0)
+                end
+                task.wait(RACE_SERVER_WAIT)  -- pacing between sends
+                n = n % cpCount + 1
+                if n == 1 and sends >= cpCount then
+                    -- lap boundary: offer the finish (rejected while there
+                    -- are laps left - harmless)
+                    local fok, freason = remoteFinish()
+                    if fok then
+                        notify("Race assist: race finished!")
+                        return
+                    end
+                    lastReason = freason or lastReason
+                end
+            end
+            -- budget spent: a few last finish attempts
+            for _ = 1, 3 do
+                local fok, freason = remoteFinish()
+                if fok then
+                    notify("Race assist: race finished!")
+                    return
+                end
+                lastReason = freason or lastReason
+                task.wait(1)
+            end
+            error(("the finish wasn't accepted via remote (%s) - press this button again (it resumes from where the server is)"):format(tostring(lastReason)), 0)
+        end)
+        raceBusy = false
+        if not ok then
+            notify("Race assist (remote): " .. tostring(err))
+        end
+    end)
+end
+
 -- ============================================================
 -- INPUT
 -- ============================================================
@@ -1822,6 +1953,13 @@ local function buildMenu()
     local p7 = pages[7]
     section(p7, "Race assist")
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
+    button(p7, "Finish race via remote (no teleports)", function() runRemoteRaceRoutine() end)
+    note(p7, "Remote mode reports every checkpoint straight to the server " ..
+        "through the game's own RaceCheckpoint remote - no teleports, so " ..
+        "nothing moves for the anti-cheat to flag. Press it right after GO: " ..
+        "it walks 1..N each lap, skips gates the server already has, waits " ..
+        "out the payout minimum, then sends the finish. If it stops early " ..
+        "it prints the server's reason - press it again to resume.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
