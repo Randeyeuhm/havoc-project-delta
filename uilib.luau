@@ -2018,6 +2018,104 @@ local function makeProfile(parent, opts)
 end
 
 -- ============================================================
+-- CANVAS  (borderless square plotting surface: crosshair + centre dot
+-- + a pooled set of blips; hosts plot pixel offsets from the centre and
+-- call hideFrom(used+1)/hideAll() after each pass)
+-- makeCanvas(parent, opts) -> { frame, dot(i), plot(i,x,y,color,transp),
+-- hideFrom(from), hideAll(), destroy() }
+-- ============================================================
+local function makeCanvas(parent, opts)
+    opts = opts or {}
+    local size = opts.size or 168
+    local dotSize = opts.dotSize or 5
+
+    local frame = create("Frame", {
+        Name = opts.name or "Canvas",
+        AnchorPoint = opts.anchorPoint or Vector2.new(1, 1),
+        Position = opts.position or UDim2.new(1, -20, 1, -20),
+        Size = UDim2.new(0, size, 0, size),
+        BackgroundColor3 = opts.color or THEME.BG,
+        BackgroundTransparency = opts.transparency or 0.15,
+        BorderSizePixel = 0,
+        Active = true,
+        Draggable = opts.draggable ~= false,
+        ZIndex = opts.zindex or 20,
+        Parent = parent,
+    })
+    corner(frame, opts.cornerRadius or 10)
+    stroke(frame, THEME.STROKE)
+
+    if opts.crosshair ~= false then
+        local inset = opts.crosshairInset or 10
+        create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 0, 0.5, 0),
+            Size = UDim2.new(1, -inset * 2, 0, 1),
+            BackgroundColor3 = THEME.STROKE,
+            BackgroundTransparency = 0.35,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 0, 0.5, 0),
+            Size = UDim2.new(0, 1, 1, -inset * 2),
+            BackgroundColor3 = THEME.STROKE,
+            BackgroundTransparency = 0.35,
+            BorderSizePixel = 0,
+            Parent = frame,
+        })
+        local centre = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.new(0.5, 0, 0.5, 0),
+            Size = UDim2.new(0, 4, 0, 4),
+            BackgroundColor3 = THEME.ACCENT_HI,
+            BorderSizePixel = 0,
+            ZIndex = 2,
+            Parent = frame,
+        })
+        corner(centre, 2)
+    end
+
+    local dots = {}
+    local C = { frame = frame }
+    C.dot = function(i)
+        local d = dots[i]
+        if d then return d end
+        d = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Size = UDim2.new(0, dotSize, 0, dotSize),
+            BorderSizePixel = 0,
+            ZIndex = 3,
+            Visible = false,
+            Parent = frame,
+        })
+        corner(d, dotSize / 2)
+        dots[i] = d
+        return d
+    end
+    C.plot = function(i, x, y, color, transparency)
+        local d = C.dot(i)
+        d.Position = UDim2.new(0.5, x, 0.5, y)
+        if color then d.BackgroundColor3 = color end
+        d.BackgroundTransparency = math.clamp(tonumber(transparency) or 0, 0, 1)
+        d.Visible = true
+        return d
+    end
+    C.hideFrom = function(from)
+        for i = from, #dots do
+            local d = dots[i]
+            if d then d.Visible = false end
+        end
+    end
+    C.hideAll = function()
+        for _, d in pairs(dots) do d.Visible = false end
+    end
+    C.destroy = function() frame:Destroy() end
+    return C
+end
+
+-- ============================================================
 -- WINDOW  (the one standard scaffold for every panel: draggable frame,
 -- header + accent rule, optional tab rail with scrolling pages, close
 -- button, and a popup layer that dropdown lists are parented to, so an
@@ -2512,6 +2610,7 @@ UILib.makeHitmarker     = makeHitmarker
 UILib.makePanel         = makePanel
 UILib.makeRow           = makeRow
 UILib.makeProfile       = makeProfile
+UILib.makeCanvas        = makeCanvas
 UILib.makeToaster       = makeToaster
 UILib.restoreIdentity   = restoreIdentity
 

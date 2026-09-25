@@ -5026,7 +5026,7 @@ end
 -- camera. Reuses the objects PlayerESP/NpcESP already track.
 -- ============================================================
 do
-    local radar = { gui = nil, panel = nil, dots = {} }
+    local radar = { gui = nil, panel = nil, canvas = nil }
 
     local RADAR_SIZE = 168
     local DOT_SIZE   = 5
@@ -5040,18 +5040,20 @@ do
         local ok = pcall(function() gui.Parent = CoreGui end)
         if not ok then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        local panel = Instance.new("Frame")
-        panel.Name = "Panel"
-        panel.AnchorPoint = Vector2.new(1, 1)
-        panel.Position = UDim2.new(1, -20, 1, -20)
-        panel.Size = UDim2.new(0, RADAR_SIZE, 0, RADAR_SIZE)
-        panel.BackgroundColor3 = THEME.BG
-        panel.BackgroundTransparency = 0.15
-        panel.BorderSizePixel = 0
-        panel.Active = true
-        panel.Draggable = true
-        panel.Parent = gui
-        corner(panel, 10); stroke(panel)
+        -- Surface UI comes from uilib (makeCanvas): panel, crosshair and
+        -- the pooled dots; this script only feeds positions/colours in.
+        local canvas = UILib and UILib.makeCanvas and UILib.makeCanvas(gui, {
+            size = RADAR_SIZE,
+            anchorPoint = Vector2.new(1, 1),
+            position = UDim2.new(1, -20, 1, -20),
+            transparency = 0.15,
+            dotSize = DOT_SIZE,
+        })
+        if not canvas then
+            pcall(function() gui:Destroy() end)
+            return
+        end
+        local panel = canvas.frame
 
         do
             local saved = Config.Misc.RadarPosition
@@ -5073,45 +5075,13 @@ do
             end)
         end
 
-        local hLine = Instance.new("Frame")
-        hLine.AnchorPoint = Vector2.new(0.5, 0.5)
-        hLine.Position = UDim2.new(0.5, 0, 0.5, 0)
-        hLine.Size = UDim2.new(1, -20, 0, 1)
-        hLine.BackgroundColor3 = THEME.STROKE
-        hLine.BackgroundTransparency = 0.35
-        hLine.BorderSizePixel = 0
-        hLine.Parent = panel
-
-        local vLine = hLine:Clone()
-        vLine.Size = UDim2.new(0, 1, 1, -20)
-        vLine.Parent = panel
-
-        local centre = Instance.new("Frame")
-        centre.AnchorPoint = Vector2.new(0.5, 0.5)
-        centre.Position = UDim2.new(0.5, 0, 0.5, 0)
-        centre.Size = UDim2.new(0, 4, 0, 4)
-        centre.BackgroundColor3 = THEME.ACCENT_HI
-        centre.BorderSizePixel = 0
-        centre.Parent = panel
-        corner(centre, 2)
-
-        radar.gui   = gui
-        radar.panel = panel
+        radar.gui    = gui
+        radar.canvas = canvas
+        radar.panel  = panel
     end
 
     local function dotFor(i)
-        local d = radar.dots[i]
-        if d then return d end
-        local f = Instance.new("Frame")
-        f.AnchorPoint = Vector2.new(0.5, 0.5)
-        f.Size = UDim2.new(0, DOT_SIZE, 0, DOT_SIZE)
-        f.BorderSizePixel = 0
-        f.ZIndex = 2
-        f.Visible = false
-        f.Parent = radar.panel
-        corner(f, DOT_SIZE / 2)
-        radar.dots[i] = f
-        return f
+        return radar.canvas.dot(i)
     end
 
     local function dotColor(target)
@@ -5147,7 +5117,7 @@ do
         local char = LocalPlayer.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         if not hrp then
-            for _, d in ipairs(radar.dots) do d.Visible = false end
+            radar.canvas.hideAll()
             return
         end
 
@@ -5203,9 +5173,7 @@ do
             end
         end
 
-        for i = used + 1, #radar.dots do
-            radar.dots[i].Visible = false
-        end
+        radar.canvas.hideFrom(used + 1)
     end
 
     buildRadar()
