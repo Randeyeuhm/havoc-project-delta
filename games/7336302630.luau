@@ -191,7 +191,7 @@ local saveConfig, saveConfigDebounced
 local Hotkeys, keyMap, rebuildKeyMap
 local updateVelocityTracker, getTrackedVelocity, cleanupVelocityTracker
 local PlayerESP, NpcESP, Aimbot
-local renderDrops, dropRegistry, dropWatchConnection
+local renderDrops, dropEngine, dropWatchConnection
 local fovCircle
 local getEquippedTool, velocityCache, refreshVelocityCache, getMuzzleVelocityCached, getServerVelocityHint, computeAimPoint
 local applySpringSuppression, resetSpringSuppression, findFpsInstance
@@ -1559,9 +1559,17 @@ Aimbot = Config.Aimbot
 state.PlayerESP, state.NpcESP, state.Aimbot = PlayerESP, NpcESP, Aimbot
 
 -- ============================================================
--- DROPS
+-- DROPS  (rendering lives in esp.luau's Object ESP class)
 -- ============================================================
-dropRegistry = { Item = {}, Corpse = {} }
+dropEngine = ESPUI and ESPUI.newObjects(function() return Config.Drops end)
+if not dropEngine then
+    -- Library missing: keep the scan plumbing alive without drawing.
+    dropEngine = {
+        Objects = {},
+        Ensure = function() end, Remove = function() end, Clear = function() end,
+        Prune = function() end, HideAll = function() end, Render = function() end,
+    }
+end
 do
     local function categorizeDrop(model)
         if not model:IsA("Model") then return nil end
@@ -1570,107 +1578,16 @@ do
         return nil
     end
 
-    local function createDropEntry(model, cat)
-        local hl = Instance.new("Highlight")
-        hl.Name = "HavocDropHighlight"
-        hl.OutlineTransparency = 0.2
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Adornee = model
-        hl.Parent = model
-        local label = Drawing.new("Text")
-        label.Visible = false
-        label.Font = Drawing.Fonts.UI
-        label.Size = Config.Drops.LabelSize or 14
-        label.Outline = true
-        label.OutlineColor = Color3.fromRGB(0, 0, 0)
-        label.Center = true
-        label.Color = Color3.fromRGB(255, 255, 255)
-        dropRegistry[cat][model] = { hl = hl, label = label }
-    end
-
     local function scanDrops()
         local folder = resolvePath(PATHS.DroppedItems); if not folder then return end
         for _, model in ipairs(folder:GetChildren()) do
             local cat = categorizeDrop(model)
-            if cat and not dropRegistry[cat][model] then createDropEntry(model, cat) end
+            if cat then dropEngine:Ensure(model, cat) end
         end
-    end
-
-    local function getDropAnchor(model)
-        local primary = model.PrimaryPart or model:FindFirstChild("Part") or model:FindFirstChild("Head")
-        if not primary then return nil end
-        return primary.Position + Vector3.new(0, (primary.Size.Y / 2) + 0.8, 0)
-    end
-
-    local function renderOneDrop(entry, model, cfg, col, maxDist, showNames, labelSize, camPos)
-        if not model or not model.Parent then
-            if entry.label then entry.label.Visible = false end
-            if entry.hl then entry.hl.Enabled = false end
-            return false
-        end
-        local anchor = getDropAnchor(model)
-        if not anchor then
-            if entry.hl then entry.hl.Enabled = false end
-            if entry.label then entry.label.Visible = false end
-            return true
-        end
-        local dist = (anchor - camPos).Magnitude
-        local inRange = dist <= maxDist
-        if entry.hl then
-            entry.hl.FillColor = col
-            entry.hl.OutlineColor = col
-            entry.hl.FillTransparency = cfg.Hollow and 1 or 0.3
-            entry.hl.Enabled = cfg.Enabled and inRange
-        end
-        if cfg.Enabled and inRange and showNames and entry.label then
-            local screenPos, onScreen = Camera:WorldToViewportPoint(anchor)
-            if onScreen then
-                entry.label.Text = model.Name
-                entry.label.Position = Vector2.new(screenPos.X, screenPos.Y)
-                entry.label.Color = col
-                entry.label.Size = labelSize
-                entry.label.Visible = true
-            else entry.label.Visible = false end
-        elseif entry.label then entry.label.Visible = false end
-        return true
     end
 
     function renderDrops()
-        local cfg = Config.Drops
-        local itemCfg, corpseCfg = cfg.Item, cfg.Corpse
-        local maxDist         = cfg.MaxDistance or ESP_MAX_DISTANCE
-        local showItemNames   = cfg.ShowItemNames   ~= false
-        local showCorpseNames = cfg.ShowCorpseNames ~= false
-        local labelSize       = cfg.LabelSize or 14
-        local itemCol   = Color3.fromRGB(itemCfg.R,   itemCfg.G,   itemCfg.B)
-        local corpseCol = Color3.fromRGB(corpseCfg.R, corpseCfg.G, corpseCfg.B)
-        local camPos    = Camera.CFrame.Position
-
-        local function renderCategory(cat, c, col, showNames)
-            local reg = dropRegistry[cat]
-            local removals = nil
-            for model, entry in pairs(reg) do
-                if not renderOneDrop(entry, model, c, col, maxDist, showNames,
-                                     labelSize, camPos) then
-                    removals = removals or {}
-                    table.insert(removals, model)
-                end
-            end
-            if removals then
-                for i = 1, #removals do
-                    local m = removals[i]
-                    local e = reg[m]
-                    if e then
-                        if e.hl    then pcall(function() e.hl:Destroy() end) end
-                        if e.label then pcall(function() e.label:Remove()  end) end
-                    end
-                    reg[m] = nil
-                end
-            end
-        end
-
-        renderCategory("Item",   itemCfg,   itemCol,   showItemNames)
-        renderCategory("Corpse", corpseCfg, corpseCol, showCorpseNames)
+        dropEngine:Render(Camera)
     end
 
     local function attachDropWatcher()
@@ -1686,7 +1603,7 @@ do
         dropWatchConnection = folder.DescendantAdded:Connect(function(desc)
             if desc:IsA("Model") and desc.Parent == folder then
                 local cat = categorizeDrop(desc)
-                if cat and not dropRegistry[cat][desc] then createDropEntry(desc, cat) end
+                if cat then dropEngine:Ensure(desc, cat) end
             end
         end)
         track(dropWatchConnection)

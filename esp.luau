@@ -3,14 +3,24 @@
     HAVOC HUB - ESP LIBRARY  (esp.luau)
     ============================================
 
-    ONE file of ESP CLASSES. The engine (ported from Project Delta's ESP
-    class) draws player / NPC rigs; the settings UI lives in each game's
-    menu - this library stays UI-free. Every game script can use it:
+    ONE file of ESP CLASSES. The settings UI lives in each game's menu -
+    this library stays UI-free. Two engines:
+
+      ESP.new(cfg) / ESP.newHumanoid(cfg)
+          humanoid rigs (players / NPCs): corner box, name / health /
+          distance labels and chams (Highlight)
+      ESP.newObjects(cfg)
+          world objects (drops / loot / corpses): Highlight + name label
+          per object kind (cfg[kind] holds Enabled / Hollow / R,G,B)
 
         local esp = ESP.new(function() return Config.ESP end)
         esp:Ensure(model)     -- start tracking a model (idempotent)
         esp:Prune(seenSet)    -- drop everything not in the set
         esp:Render(camera)    -- draw one frame
+
+        local objs = ESP.newObjects(function() return Config.Drops end)
+        objs:Ensure(model, "Item")   -- kind picks the cfg sub-table
+        objs:Render(camera)
 
     RULE: every ESP feature/option lives in THIS file; any new UI widget
     or generic UI option belongs in uilib.luau instead.
@@ -489,8 +499,11 @@ local function renderOne(cfg, model, d, cam, maxDist, viewportH, fovTan, localRo
 end
 
 -- ============================================================
--- ESP CLASS
+-- HUMANOID ESP CLASS (player / NPC rigs)
 -- ============================================================
+-- Box + name/health/distance + chams for anything rig-like (players, NPCs,
+-- vehicle NPCs handled through npcRoot). The object twin for world loot is
+-- ESP.newObjects further down.
 local ESPClass = {}
 ESPClass.__index = ESPClass
 
@@ -500,6 +513,9 @@ function ESP.new(settings)
         Objects = {},
     }, ESPClass)
 end
+
+-- Explicit alias so call sites can say which class they mean.
+ESP.newHumanoid = ESP.new
 
 -- Resolution helper: the config can be a live table or a getter function.
 function ESPClass:Settings()
@@ -653,6 +669,168 @@ function ESP.newRenderer(getCfg)
     end
 
     return R
+end
+
+-- ============================================================
+-- OBJECT ESP CLASS (world objects: drops / loot / corpses)
+-- ============================================================
+-- The host scans the world and calls obj:Ensure(model, kind); the class
+-- draws each tracked object from cfg:
+--   cfg[kind]                 = { Enabled, Hollow, R, G, B }
+--   cfg["Show"..kind.."Names"] = name label toggle (default on)
+--   cfg.MaxDistance, cfg.LabelSize
+-- Retire objects with obj:Remove(model) / obj:Prune(seen) / obj:Clear().
+local ObjectClass = {}
+ObjectClass.__index = ObjectClass
+
+function ESP.newObjects(settings)
+    return setmetatable({
+        cfg = settings or {},
+        Objects = {},   -- model -> { model, kind, hl, label }
+        kinds = {},     -- model -> kind
+    }, ObjectClass)
+end
+
+function ObjectClass:Settings()
+    local s = self.cfg
+    if type(s) == "function" then
+        local ok, res = pcall(s)
+        return ok and res or nil
+    end
+    return s
+end
+
+function ObjectClass:Ensure(model, kind)
+    if not model or typeof(model) ~= "Instance" or not model.Parent then return nil end
+    local d = self.Objects[model]
+    if d then
+        -- The host may refine the kind after first sighting; last one wins.
+        if kind and self.kinds[model] ~= kind then
+            self.kinds[model] = kind
+            d.kind = kind
+        end
+        return d
+    end
+    local hl = Instance.new("Highlight")
+    hl.Name = "HavocESPObjCham"
+    hl.OutlineTransparency = 0.2
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = model
+    hl.Parent = model
+    local label
+    local okLbl, lbl = pcall(Drawing.new, "Text")
+    if okLbl and lbl then
+        label = lbl
+        label.Visible = false
+        label.Font = Drawing.Fonts.UI
+        label.Size = 14
+        label.Outline = true
+        label.OutlineColor = Color3.fromRGB(0, 0, 0)
+        label.Center = true
+        label.Color = Color3.fromRGB(255, 255, 255)
+    end
+    d = { model = model, kind = kind, hl = hl, label = label }
+    self.Objects[model] = d
+    self.kinds[model] = kind
+    return d
+end
+
+function ObjectClass:Remove(model)
+    local d = self.Objects[model]; if not d then return end
+    if d.hl then pcall(function() d.hl:Destroy() end) end
+    if d.label then pcall(function() d.label:Remove() end) end
+    self.Objects[model] = nil
+    self.kinds[model] = nil
+end
+
+function ObjectClass:Clear()
+    for model in pairs(self.Objects) do self:Remove(model) end
+end
+
+function ObjectClass:Prune(seen)
+    local removals = nil
+    for model in pairs(self.Objects) do
+        if (not seen or not seen[model]) or not model.Parent then
+            removals = removals or {}
+            table.insert(removals, model)
+        end
+    end
+    if removals then
+        for i = 1, #removals do self:Remove(removals[i]) end
+    end
+end
+
+function ObjectClass:HideAll()
+    for _, d in pairs(self.Objects) do
+        if d.hl then d.hl.Enabled = false end
+        if d.label then d.label.Visible = false end
+    end
+end
+
+-- Anchor above the object (the same lift Project Delta's drop labels use).
+local function objectAnchor(model)
+    local primary = model.PrimaryPart or model:FindFirstChild("Part") or model:FindFirstChild("Head")
+    if not primary then return nil end
+    return primary.Position + Vector3.new(0, (primary.Size.Y / 2) + 0.8, 0)
+end
+
+local function renderOneObject(cfg, model, d, cam)
+    if not model.Parent then return false end
+    local kind = d.kind
+    local kcfg = kind and cfg[kind]
+    if type(kcfg) ~= "table" then return true end
+    local anchor = objectAnchor(model)
+    if not anchor then
+        if d.hl then d.hl.Enabled = false end
+        if d.label then d.label.Visible = false end
+        return true
+    end
+    local dist = (anchor - cam.CFrame.Position).Magnitude
+    local inRange = dist <= (tonumber(cfg.MaxDistance) or 2000)
+    local col = rgb(kcfg.R, kcfg.G, kcfg.B)
+    local on = kcfg.Enabled ~= false and inRange
+    if d.hl then
+        d.hl.FillColor = col
+        d.hl.OutlineColor = col
+        d.hl.FillTransparency = kcfg.Hollow and 1 or 0.3
+        d.hl.Enabled = on
+    end
+    local showNames = cfg["Show" .. kind .. "Names"] ~= false
+    if on and showNames and d.label then
+        local screenPos, onScreen = cam:WorldToViewportPoint(anchor)
+        if onScreen then
+            d.label.Text = model.Name
+            d.label.Position = Vector2.new(screenPos.X, screenPos.Y)
+            d.label.Color = col
+            d.label.Size = tonumber(cfg.LabelSize) or 14
+            d.label.Visible = true
+        else
+            d.label.Visible = false
+        end
+    elseif d.label then
+        d.label.Visible = false
+    end
+    return true
+end
+
+-- Draw one frame for every tracked object.
+function ObjectClass:Render(cam)
+    local cfg = self:Settings()
+    if type(cfg) ~= "table" then return end
+    cam = cam or workspace.CurrentCamera
+    if not cam then return end
+
+    local removals = nil
+    for model, d in pairs(self.Objects) do
+        local ok, keep = pcall(renderOneObject, cfg, model, d, cam)
+        if not ok or keep == false then
+            removals = removals or {}
+            table.insert(removals, model)
+        end
+    end
+    if removals then
+        for i = 1, #removals do self:Remove(removals[i]) end
+    end
 end
 
 -- ============================================================
