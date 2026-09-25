@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v53"
+local SCRIPT_VERSION = "de-v54"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2006,7 +2006,7 @@ local function deliveryTick()
         -- marks the player with a JobId attribute)
         local jobId = LocalPlayer:GetAttribute("JobId")
         if jobId ~= "Delivery" then
-            if (now - deliveryFarm.lastStart) > 30 then
+            if (now - deliveryFarm.lastStart) > 6 then
                 deliveryFarm.lastStart = now
                 if Remotes and type(Remotes.fireServer) == "function" then
                     local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
@@ -2029,7 +2029,7 @@ local function deliveryTick()
     local maxCap = tonumber(st.MaxCapacity) or 4
     if items ~= deliveryFarm.lastItems then
         if deliveryFarm.lastItems >= 0 then
-            print(("[driving-empire] delivery farm: items %d/%d"):format(items, maxCap))
+            print(("[driving-empire] delivery farm: items %d/%d (+%.1fs)"):format(items, maxCap, now - (deliveryFarm.itemsAt or now)))
         end
         deliveryFarm.lastItems = items
         deliveryFarm.itemsAt = now
@@ -2170,6 +2170,27 @@ local function installDeliveryProbe()
 end
 
 installDeliveryProbe()
+
+-- One-off: print the live server pace so the job's speed is measurable
+-- (PerItemCollectSeconds is a live RemoteConfig value, not in the dump).
+task.spawn(function()
+    local ok, res = pcall(function()
+        local utilInst = waitPath(ReplicatedStorage, { "Modules", "Shared", "Jobs", "Delivery", "DeliveryUtil" })
+        if not utilInst then return nil end
+        local util = require(utilInst)
+        return {
+            perItem = util.GetPerItemCollectSeconds and util.GetPerItemCollectSeconds(false),
+            maxPkgs = util.GetMaxPackages and util.GetMaxPackages(false),
+            radius = util.GetPickupRadius and util.GetPickupRadius(),
+        }
+    end)
+    if ok and res then
+        print(("[driving-empire] delivery server pace: 1 item per %ss, up to %s per trip, pickup radius %s"):format(
+            tostring(res.perItem), tostring(res.maxPkgs), tostring(res.radius)))
+    else
+        print("[driving-empire] delivery server pace: could not read DeliveryUtil")
+    end
+end)
 
 -- FREEZE: while the delivery farm is on, pin the car in place - the whole
 -- job runs on teleports, and a rolling or pushed car can slide out of the
