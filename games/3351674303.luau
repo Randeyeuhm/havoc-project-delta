@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v51"
+local SCRIPT_VERSION = "de-v52"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -926,6 +926,48 @@ track(LocalPlayer.Idled:Connect(function()
         end)
     end
 end))
+
+-- Driving Empire runs its own idle detection (PlayerIdleDetectionController,
+-- ReplicatedStorage.Modules.Client.AFK): ~2 min without real input shows an
+-- "AFK Detected" prompt, and after TeleportIdleTime it fires PlayerAFK ->
+-- the client asks the server to move you to the AFK server. Both signals are
+-- only consumed by that teleporter, so with Anti-AFK on we neutralise their
+-- Fire - no prompt, no teleport. Manual AFK-server joins (pad/button) still
+-- work, and the VirtualUser handler above still covers Roblox's own
+-- 20-minute Idled kick.
+local afkGuard = { mod = nil, orig = {} }
+local function applyGameAFKGuard()
+    if not afkGuard.mod then return end
+    local suppress = Config.Misc.AntiAFK == true
+    for name, orig in pairs(afkGuard.orig) do
+        pcall(function()
+            afkGuard.mod[name].Fire = suppress and function() end or orig
+        end)
+    end
+end
+local function installGameAFKGuard()
+    local ok = pcall(function()
+        local modInst = waitPath(ReplicatedStorage, { "Modules", "Client", "AFK", "PlayerIdleDetectionController" })
+        if not modInst then error("PlayerIdleDetectionController not found") end
+        local mod = require(modInst)
+        if type(mod) ~= "table" then error("module is not a table") end
+        for _, name in ipairs({ "PlayerIdle", "PlayerAFK" }) do
+            local sig = mod[name]
+            if type(sig) == "table" and type(sig.Fire) == "function" then
+                afkGuard.orig[name] = sig.Fire
+            end
+        end
+        afkGuard.mod = mod
+        applyGameAFKGuard()
+    end)
+    if ok and next(afkGuard.orig) then
+        print("[driving-empire] afk guard: game idle prompt + AFK-server teleport " ..
+            (Config.Misc.AntiAFK and "suppressed" or "left on (Anti-AFK is off)"))
+    else
+        print("[driving-empire] afk guard: could not patch PlayerIdleDetectionController - idle prompt may still appear")
+    end
+end
+task.spawn(installGameAFKGuard)
 
 -- ============================================================
 -- FEATURES: PLAYER ESP  (rendering lives in espui.luau)
@@ -2367,7 +2409,11 @@ local function buildMenu()
     section(p6, "Utility")
     toggle(p6, "Anti-AFK",
         function() return Config.Misc.AntiAFK end,
-        function(v) Config.Misc.AntiAFK = v end)
+        function(v)
+            Config.Misc.AntiAFK = v
+            applyGameAFKGuard()
+            notify(v and "Anti-AFK: idle prompt + AFK teleport blocked" or "Anti-AFK off")
+        end)
     button(p6, "Reset Character", function()
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
