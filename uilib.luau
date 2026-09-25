@@ -419,13 +419,11 @@ local function isPointerDown(input)
     return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
 end
 
--- Pointer space vs GUI space: raw pointer positions and AbsolutePosition can
--- disagree by the top-bar inset, and which side of the inset the input sits
--- on has changed between client builds (the isOver note below says the same).
--- Guessing a sign here kept breaking the colour picker, so Y-sensitive drags
--- instead LEARN the offset from the engine's own MouseMoved coordinates
--- (always widget space) - see feedPointerSample. Until a sample arrives the
--- offset is zero, which is what current builds need.
+-- Pointer positions are compared with AbsolutePosition raw, with no inset
+-- shifting. Every inset guess so far ("shift ignore-inset guis" / "shift
+-- default guis") only ever fixed one ScreenGui mode while breaking the other,
+-- and sample-based conversions did not survive contact with the live client
+-- either - raw is the only mapping that has held up.
 
 local function isOver(gui, pos)
     if not gui or not gui.Parent then return false end
@@ -451,37 +449,17 @@ local function isOver(gui, pos)
     return false
 end
 
-local drag = nil          -- { gui, move, finish, offset, calibrated } while a drag runs
+local drag = nil          -- { gui, move, finish } while a pointer drag runs
 local inputHandle = nil   -- the live attachInput() handle, if any
 local warnedNoInput = false
-local lastPointer = nil       -- latest raw pointer position (Vector2)
-local pendingSample = nil     -- engine-reported GUI-space point (MouseMoved)
-local pendingWith = nil       -- the raw pointer position at that sample
+local pickerDebugLeft = 3 -- temporary: colour picker click diagnostic prints
 
 local function dragMove(pos)
     local gui = drag.gui
     local size = gui.AbsoluteSize
     if size.X <= 0 or size.Y <= 0 then return end
-    -- Only calibrated drags apply the learned pointer offset.
-    local off = drag.calibrated and drag.offset or Vector2.zero
-    local rel = ((pos - off) - gui.AbsolutePosition) / size
+    local rel = (pos - gui.AbsolutePosition) / size
     drag.move(math.clamp(rel.X, 0, 1), math.clamp(rel.Y, 0, 1))
-end
-
--- Called by widgets the pointer is over, with the point in the widget's own
--- (GUI) space. MouseMoved hands out coordinates relative to the widget, so
--- pairing them with the raw pointer position measures the exact offset
--- between the two spaces for this client build - and re-learns it if a
--- build ever flips it again (a stale pair still measures the same constant).
--- Only a calibrated (= picker) drag consumes it; other widgets stay raw.
-local function feedPointerSample(guiPoint)
-    if not drag then
-        pendingSample = guiPoint
-        pendingWith = lastPointer
-    elseif drag.calibrated and lastPointer then
-        drag.offset = lastPointer - guiPoint
-        dragMove(lastPointer)
-    end
 end
 
 local function endDrag()
@@ -492,22 +470,14 @@ end
 
 -- Starts a drag across gui from a pointer-down input. move(rx, ry) gets the
 -- pointer's position over gui (each axis 0..1) now and on every movement;
--- finish() runs once on release. Only pass calibrated=true for widgets that
--- feed pointer samples (the colour picker): their drag applies the learned
--- offset; everything else stays raw - exact for X-only widgets, and raw is
--- the working default while no sample has been seen.
-local function beginDrag(input, gui, move, finish, calibrated)
+-- finish() runs once on release.
+local function beginDrag(input, gui, move, finish)
     if not inputHandle and not warnedNoInput then
         warnedNoInput = true
         warn("[UILib] UILib.attachInput() hasn't been called - drags won't follow the pointer")
     end
     endDrag()
-    -- A hover sample calibrates the very first click too (picker only).
-    local offset = Vector2.zero
-    if calibrated and pendingSample and pendingWith then
-        offset = pendingWith - pendingSample
-    end
-    drag = { gui = gui, move = move, finish = finish, offset = offset, calibrated = calibrated }
+    drag = { gui = gui, move = move, finish = finish }
     dragMove(Vector2.new(input.Position.X, input.Position.Y))
 end
 
@@ -522,9 +492,8 @@ function UILib.attachInput()
     local conns = {
         UserInputService.InputChanged:Connect(function(input)
             local t = input.UserInputType
-            if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
-                lastPointer = Vector2.new(input.Position.X, input.Position.Y)
-                if drag then dragMove(lastPointer) end
+            if drag and (t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch) then
+                dragMove(Vector2.new(input.Position.X, input.Position.Y))
             end
         end),
         UserInputService.InputEnded:Connect(function(input)
@@ -993,8 +962,6 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
 
     local h, s, v = 0, 0, 1
     local expanded, picking = false, false
-    local activePlot           -- "sv" | "hue" while that bar's drag runs
-    local svAt, hueAt          -- latest engine-reported points (GUI space)
 
     local function currentColor()
         return Color3.fromRGB(cfg[fields[1]] or 255, cfg[fields[2]] or 255, cfg[fields[3]] or 255)
@@ -1043,67 +1010,35 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
 
     local function dragDone()
         picking = false
-        activePlot = nil
         hooks.save()
     end
 
-    -- The engine's MouseMoved coordinates are relative to the widget, so they
-    -- are exact in every client build (raw pointer positions are not - their
-    -- offset from AbsolutePosition has flipped between builds). Clicks and
-    -- drags on a plot area are driven straight from them; the shared drag
-    -- takes over only once the pointer leaves the widget, using the offset
-    -- it learns from these same samples (feedPointerSample).
-    local function applySv(mx, my)
-        local sz = svHit.AbsoluteSize
-        if sz.X <= 0 or sz.Y <= 0 then return end
-        s = math.clamp(mx / sz.X, 0, 1)
-        v = 1 - math.clamp(my / sz.Y, 0, 1)
-        writeHSV()
+    -- Diagnostic (auto-stops after 3 clicks): raw click vs the widget rect,
+    -- so a still-off picker can be fixed from one report instead of guesses.
+    local function pickerSample(input)
+        if pickerDebugLeft <= 0 then return end
+        pickerDebugLeft = pickerDebugLeft - 1
+        local p, a, sz = input.Position, sv.AbsolutePosition, sv.AbsoluteSize
+        print(("[uilib] picker click: raw=(%.0f,%.0f) widget=(%.0f,%.0f) size=(%.0f,%.0f)")
+            :format(p.X, p.Y, a.X, a.Y, sz.X, sz.Y))
     end
-    local function applyHue(mx, my)
-        local sz = hueHit.AbsoluteSize
-        if sz.Y <= 0 then return end
-        h = math.min(math.clamp(my / sz.Y, 0, 1), 0.9999)
-        writeHSV()
-    end
-    svHit.MouseMoved:Connect(function(mx, my)
-        svAt = svHit.AbsolutePosition + Vector2.new(mx, my)
-        feedPointerSample(svAt)
-        if picking and activePlot == "sv" then applySv(mx, my) end
-    end)
-    hueHit.MouseMoved:Connect(function(mx, my)
-        hueAt = hueHit.AbsolutePosition + Vector2.new(mx, my)
-        feedPointerSample(hueAt)
-        if picking and activePlot == "hue" then applyHue(mx, my) end
-    end)
 
     svHit.InputBegan:Connect(function(input)
         if not isPointerDown(input) then return end
         picking = true
-        activePlot = "sv"
+        pickerSample(input)
         beginDrag(input, sv, function(rx, ry)
             s, v = rx, 1 - ry
             writeHSV()
-        end, dragDone, true)
-        -- Re-apply the engine's last sample so the click lands exactly even
-        -- if the raw-pointer offset was stale or one frame skewed.
-        if svAt then
-            local d = svAt - svHit.AbsolutePosition
-            applySv(d.X, d.Y)
-        end
+        end, dragDone)
     end)
     hueHit.InputBegan:Connect(function(input)
         if not isPointerDown(input) then return end
         picking = true
-        activePlot = "hue"
         beginDrag(input, hueBar, function(_, ry)
             h = math.min(ry, 0.9999)
             writeHSV()
-        end, dragDone, true)
-        if hueAt then
-            local d = hueAt - hueHit.AbsolutePosition
-            applyHue(d.X, d.Y)
-        end
+        end, dragDone)
     end)
 
     local function commit()
