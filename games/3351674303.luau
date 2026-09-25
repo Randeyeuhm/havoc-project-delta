@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v30"
+local SCRIPT_VERSION = "de-v31"
 
 local Connections = {}
 local function track(conn)
@@ -299,6 +299,7 @@ local ChassisUtils, ClientVehicles, VehicleController
 local Remotes, RaceUtil, RaceController, TeleportDetection
 local ClientRaceHelper
 local MatchmakingUtil
+local VehicleStatTracker
 
 local function waitPath(root, segments)
     local node = root
@@ -480,6 +481,13 @@ local function initVehicleModules()
         if node then
             local ok, res = pcall(require, node)
             if ok and type(res) == "table" then MatchmakingUtil = res end
+        end
+    end
+    if not VehicleStatTracker then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Vehicles", "VehicleStatTracker" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then VehicleStatTracker = res end
         end
     end
     installInvokeProbe()
@@ -1318,6 +1326,45 @@ local function fmtSecs(v)
     return tostring(math.round(v * 10) / 10)
 end
 
+-- The finish result the server receives includes the car's recorded top
+-- speed (VehicleStatTracker). Teleport runs never actually move fast, so
+-- that reading stays near zero - which can look impossible for the finish
+-- time and get the payout withheld. Report the car's true tune top speed
+-- instead (a number the car could really do), so the run stays plausible.
+local function legitimizeVehicleStats(chassis)
+    if not VehicleStatTracker or type(VehicleStatTracker.get) ~= "function" then return end
+    local ok, stats = pcall(VehicleStatTracker.get)
+    if not ok or type(stats) ~= "table" then return end
+    local top = 180
+    if chassis and chassis.Tune and type(chassis.Tune.TransmissionSpeeds) == "table" then
+        local t = chassis.Tune.TransmissionSpeeds
+        local v = tonumber(t[#t])
+        if v and v > 0 then top = v end
+    end
+    local plausible = math.clamp(top * 1.6, 120, 900)  -- mph-ish -> studs/s-ish
+    if type(stats.TopSpeedVectorMagnitude) == "number" and stats.TopSpeedVectorMagnitude < plausible then
+        stats.TopSpeedVectorMagnitude = plausible
+    end
+end
+
+-- Watch leaderstats.Cash after a finished race and report when the payout
+-- actually lands (or that it never came - then the server withheld it).
+local function watchRacePayout()
+    local before = getCash()
+    if not before then return end
+    task.spawn(function()
+        for _ = 1, 24 do
+            task.wait(2.5)
+            local now = getCash()
+            if now and now > before then
+                notify(("Race payout received: +%s"):format(formatCash(now - before)))
+                return
+            end
+        end
+        notify("No race payout landed in 60s - the server withheld it (stay on the server after finishing; matchmaking races are checked server-side)")
+    end)
+end
+
 -- Finishing too fast skips the payout - the server checks the total race
 -- time against the track's payout minimum. Park at the last checkpoint
 -- until the race clock clears it (+ the buffer).
@@ -1502,6 +1549,7 @@ local function runRaceRoutine()
             for pass = 1, laps do
                 local taken, skipped = 0, 0
                 for i = 1, #cps do
+                    legitimizeVehicleStats(chassis)
                     local res = crossCheckpoint(cps[i], dirs[i])
                     if res == "ok" then
                         taken = taken + 1
@@ -1550,6 +1598,7 @@ local function runRaceRoutine()
                     local fres = tryFinish(finish, finishDir, false)
                     if fres == "ok" then
                         notify("Race assist: race finished!")
+                        watchRacePayout()
                         return
                     end
                     error("no checkpoint answered - wait for the race to start (GO) and retry (if the checkpoints were already taken, press again for the finish)", 0)
@@ -1562,6 +1611,7 @@ local function runRaceRoutine()
                     local fres = tryFinish(finish, finishDir, false)
                     if fres == "ok" then
                         notify("Race assist: race finished!")
+                        watchRacePayout()
                         return
                     end
                     if fres == "novh" then
@@ -1576,6 +1626,7 @@ local function runRaceRoutine()
                 local fres = tryFinish(finish, finishDir, true)
                 if fres == "ok" then
                     notify("Race assist: race finished!")
+                    watchRacePayout()
                     return
                 end
                 if fres == "novh" then
@@ -1954,6 +2005,10 @@ local function buildMenu()
     note(p7, "Prints the live payout numbers to the executor console: every " ..
         "track's 1st-8th place cash + per-racer bonus, for the normal AND " ..
         "matchmaking tables, pulled straight from the game's own config.")
+    note(p7, "If a finished race pays nothing: stay on the server a moment " ..
+        "- the assist's cash watcher toasts 'Race payout received' when the " ..
+        "money lands. Matchmaking races are recorded and checked " ..
+        "server-side, so impossible-looking runs can be withheld.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
