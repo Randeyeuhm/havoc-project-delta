@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v10"
+local SCRIPT_VERSION = "de-v11"
 
 local Connections = {}
 local function track(conn)
@@ -51,7 +51,7 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
@@ -179,6 +179,7 @@ Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 
 Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 50)
 Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 50)
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
+Config.Vehicle.NoTires = Config.Vehicle.NoTires == true
 Config.HUD.SpeedSize = math.clamp(tonumber(Config.HUD.SpeedSize) or 18, 10, 40)
 Config.HUD.InfoSize = math.clamp(tonumber(Config.HUD.InfoSize) or 13, 8, 30)
 Config.HUD.XOffset = math.clamp(tonumber(Config.HUD.XOffset) or 14, 0, 400)
@@ -291,6 +292,7 @@ local vehicleHooks = (function()
 end)()
 
 local ChassisUtils, ClientVehicles, VehicleController
+local Remotes, RaceUtil, RaceController, TeleportDetection
 
 local function waitPath(root, segments)
     local node = root
@@ -353,6 +355,32 @@ local function installBoostRestore()
     end
 end
 
+-- RACE PROBE: the race client tells the server "I crossed checkpoint N"
+-- through invokeServer("RaceCheckpoint", N) and reads the answer back
+-- (ok, reason when rejected). Wrapping invokeServer lets the race assist
+-- watch those answers - accepted, rejected (with the server's own reason),
+-- or never sent (the game's crossing raycast didn't touch the checkpoint).
+local raceProbe = { seq = 0 }
+local function installInvokeProbe()
+    if not Remotes or type(Remotes.invokeServer) ~= "function" then return end
+    if type(vehicleHooks.origInvokeServer) ~= "function" then
+        vehicleHooks.origInvokeServer = Remotes.invokeServer
+    end
+    local orig = vehicleHooks.origInvokeServer
+    Remotes.invokeServer = function(name, ...)
+        local args = table.pack(...)
+        local ret = table.pack(orig(name, table.unpack(args, 1, args.n)))
+        if name == "RaceCheckpoint" or name == "RaceFinishLine" then
+            raceProbe.seq = raceProbe.seq + 1
+            raceProbe.kind = (name == "RaceFinishLine") and "finish" or "cp"
+            raceProbe.num = args[1]
+            raceProbe.ok = ret[1] and true or false
+            raceProbe.reason = ret[2]
+        end
+        return table.unpack(ret, 1, ret.n)
+    end
+end
+
 local function initVehicleModules()
     if not ChassisUtils then
         local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Vehicles", "ChassisUtils" })
@@ -375,6 +403,35 @@ local function initVehicleModules()
             if ok and type(res) == "table" then VehicleController = res end
         end
     end
+    if not Remotes then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Remotes" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then Remotes = res end
+        end
+    end
+    if not RaceUtil then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Races", "RaceUtil" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then RaceUtil = res end
+        end
+    end
+    if not RaceController then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Races", "RaceController" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then RaceController = res end
+        end
+    end
+    if not TeleportDetection then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Exploit", "VehicleTeleportDetectionController" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then TeleportDetection = res end
+        end
+    end
+    installInvokeProbe()
     if ChassisUtils then
         if not vehicleHooks.origSpeed then
             vehicleHooks.origSpeed = ChassisUtils.GetSpeedMult
@@ -430,6 +487,49 @@ local function getLocalVehicleModel()
     local ok, veh = pcall(function() return ClientVehicles.GetVehicleFromDriver(LocalPlayer) end)
     if ok and veh and veh.Object then return veh.Object end
     return nil
+end
+
+local function getLocalVehicleObject()
+    if not ClientVehicles then return nil end
+    local ok, veh = pcall(function() return ClientVehicles.GetVehicleFromDriver(LocalPlayer) end)
+    if ok and veh then return veh end
+    return nil
+end
+
+-- Tell the game's own teleport detector that a car teleport is coming - this
+-- is exactly what the game does before its own vehicle teleports (respawns,
+-- race exits), so ours don't read as unexplained position jumps.
+local function authorizeTeleport()
+    if TeleportDetection and type(TeleportDetection.AuthorizeNextTeleport) == "function" then
+        pcall(TeleportDetection.AuthorizeNextTeleport)
+    end
+end
+
+-- Move the driven car. Mirrors the game's own onVehicleTeleport: zero the
+-- velocity of every part, authorize the jump, then move via the weight part.
+local function teleportCarTo(target)
+    local veh = getLocalVehicleObject()
+    if not veh or not veh.Object then return false end
+    local model = veh.Object
+    local weight = veh.Components and veh.Components.Weight
+    local ok = pcall(function()
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") then
+                d.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+        authorizeTeleport()
+        if weight and model.PrimaryPart ~= weight then
+            model.PrimaryPart = weight
+        end
+        model:PivotTo(target)
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") then
+                d.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+            end
+        end
+    end)
+    return ok
 end
 
 initVehicleModules()
@@ -548,6 +648,65 @@ local function applyLockBypass(chassis)
             end
         end
         return orig(self, ...)
+    end
+end
+
+-- REMOVE TIRES: hides the wheel visuals and drops the wheels' collision on
+-- the player's current car (wheels come from the vehicle object's own
+-- Cache.Wheels - each entry has Wheel = the physics wheel part, and the
+-- visual rim/tire parts live in the wheel unit's "Parts" folder). Fully
+-- reversible: every part's original look is remembered until switched off.
+local tireState = { veh = nil, parts = {} }
+
+local function restoreTires()
+    for _, p in ipairs(tireState.parts) do
+        if p and p.Parent and p.__hubTire then
+            p.Transparency = p.__hubTire.t
+            p.CanCollide = p.__hubTire.c
+            p.__hubTire = nil
+        end
+    end
+    tireState.parts = {}
+    tireState.veh = nil
+end
+
+local function applyTires()
+    if not Config.Vehicle.NoTires then
+        if tireState.veh or #tireState.parts > 0 then restoreTires() end
+        return
+    end
+    local veh = getLocalVehicleObject()
+    if not veh then
+        if tireState.veh then restoreTires() end
+        return
+    end
+    if tireState.veh ~= veh then
+        restoreTires()
+        tireState.veh = veh
+    end
+    local cache = veh.Cache
+    local wheels = cache and cache.Wheels
+    if type(wheels) ~= "table" then return end
+    local function addPart(p)
+        if p == nil or not p:IsA("BasePart") then return end
+        if p.__hubTire == nil then
+            p.__hubTire = { t = p.Transparency, c = p.CanCollide }
+            table.insert(tireState.parts, p)
+        end
+        if p.Transparency ~= 1 then p.Transparency = 1 end
+        if p.CanCollide then p.CanCollide = false end
+    end
+    for _, w in ipairs(wheels) do
+        local wheelPart = w.Wheel
+        addPart(wheelPart)
+        local unit = wheelPart and wheelPart.Parent
+        local vis = unit and unit:FindFirstChild("Parts")
+        if vis then
+            for _, p in ipairs(vis:GetDescendants()) do addPart(p) end
+        end
+        if type(w.Tires) == "table" then
+            for _, p in ipairs(w.Tires) do addPart(p) end
+        end
     end
 end
 
@@ -824,8 +983,7 @@ local function teleportTo(partName, label)
     -- Seated? move the whole car (the character is welded to it).
     local vehModel = getLocalVehicleModel()
     if vehModel then
-        local ok = pcall(function() vehModel:PivotTo(target) end)
-        if ok then
+        if teleportCarTo(target) then
             notify("Teleported to " .. label)
             return
         end
@@ -894,19 +1052,23 @@ local function ensureSkyPlate()
 end
 
 local function teleportToPlate()
-    local model = getLocalVehicleModel()
-    if not model then
-        local char = LocalPlayer.Character
-        if char and char.PrimaryPart then model = char end
+    local vehModel = getLocalVehicleModel()
+    if vehModel then
+        local cf = vehModel:GetPivot()
+        if teleportCarTo(CFrame.new(Vector3.new(0, SKY_PLATE.Y + 10, 0)) * (cf - cf.Position)) then
+            skyState.lastTp = os.clock()
+            return true
+        end
     end
-    if not model then
-        notify("Get in a car first")
-        return false
+    local char = LocalPlayer.Character
+    if char and char.PrimaryPart then
+        local cf = char:GetPivot()
+        char:PivotTo(CFrame.new(Vector3.new(0, SKY_PLATE.Y + 10, 0)) * (cf - cf.Position))
+        skyState.lastTp = os.clock()
+        return true
     end
-    local cf = model:GetPivot()
-    model:PivotTo(CFrame.new(Vector3.new(0, SKY_PLATE.Y + 10, 0)) * (cf - cf.Position))
-    skyState.lastTp = os.clock()
-    return true
+    notify("Get in a car first")
+    return false
 end
 
 -- Runs from farmTick while the plate farm is on: watches for the edge and
@@ -1024,6 +1186,193 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- FEATURES: RACE ASSIST  (take every checkpoint, then the finish line)
+-- ============================================================
+-- The game's own race client detects a checkpoint crossing by raycasting
+-- from the car's front corners across the movement of the last frame - so
+-- jumping the car from one side of a checkpoint to the other reads as a
+-- crossing, and the game itself reports it to the server, in order. The
+-- routine walks the car through every checkpoint of the race you are in
+-- (the order matters - the server rejects wrong checkpoints), watches the
+-- server's answers through the invokeServer probe, then jumps the finish
+-- line. Failures surface the server's own rejection reason.
+local raceBusy = false
+
+local function findRaceTrackModel()
+    local g = workspace:FindFirstChild("Game")
+    local races = g and g:FindFirstChild("Races")
+    if not races then return nil end
+    local session = races:FindFirstChild("LocalSession")
+    if not session then
+        for _, d in ipairs(races:GetDescendants()) do
+            if d.Name == "LocalSession" then
+                session = d
+                break
+            end
+        end
+    end
+    if not session then return nil end
+    for _, m in ipairs(session:GetChildren()) do
+        if m:IsA("Model") and m:FindFirstChild("Checkpoints") and m:FindFirstChild("Finish") then
+            return m
+        end
+    end
+    return nil
+end
+
+local function trackEntryPart(entry)
+    if entry:IsA("BasePart") then return entry end
+    return entry.PrimaryPart or entry:FindFirstChildWhichIsA("BasePart")
+end
+
+local function raceLaps(model)
+    if not RaceUtil then return nil end
+    local names = { model.Name }
+    if RaceController then
+        local ok, decoded = pcall(function()
+            local s = RaceController.getRaceDataString(LocalPlayer)
+            return s and RaceUtil.decodeRaceData(s) or nil
+        end)
+        if ok and decoded and decoded.Checkpoint and decoded.Checkpoint.TrackName then
+            table.insert(names, decoded.Checkpoint.TrackName)
+        end
+    end
+    for _, nm in ipairs(names) do
+        local ok, res = pcall(function() return RaceUtil.getTrackInfo(nm) end)
+        if ok and res and tonumber(res.MaxLaps) then
+            return tonumber(res.MaxLaps)
+        end
+    end
+    return nil
+end
+
+-- One checkpoint sweep: appear just before the gate, then just past it -
+-- the game's crossing ray runs between those two frames and hits the
+-- checkpoint part. Returns "ok" / "rejected: <reason>" / "none" / "novh".
+local function sweepCheckpoint(cp, dir, dist, lift)
+    local rot = CFrame.lookAt(Vector3.new(0, 0, 0), dir).Rotation
+    local base = cp.Position + Vector3.new(0, lift or 0, 0)
+    local before = CFrame.new(base - dir * dist) * rot
+    local after = CFrame.new(base + dir * dist) * rot
+    local snap = raceProbe.seq
+    if not teleportCarTo(before) then return "novh", nil end
+    task.wait(0.1)
+    if not teleportCarTo(after) then return "novh", nil end
+    for _ = 1, 12 do
+        task.wait(0.05)
+        if raceProbe.seq > snap then
+            local res = raceProbe.ok and "ok" or ("rejected: " .. tostring(raceProbe.reason))
+            return res, raceProbe.kind
+        end
+    end
+    return "none", nil
+end
+
+local function crossCheckpoint(cp, dir)
+    local last = "none"
+    for _, v in ipairs({ { 12, 0 }, { 16, 4 } }) do
+        local res = sweepCheckpoint(cp, dir, v[1], v[2])
+        if res == "ok" then return "ok" end
+        if res ~= "none" then last = res end
+    end
+    return last
+end
+
+local function runRaceRoutine()
+    if raceBusy then
+        notify("Race assist is already running")
+        return
+    end
+    if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+    local trackModel = findRaceTrackModel()
+    if not trackModel then
+        notify("Race assist: join a race first (with your car spawned)")
+        return
+    end
+    local veh = getLocalVehicleObject()
+    if not veh or not veh.Object then
+        notify("Race assist: get in your car first")
+        return
+    end
+    local cps = {}
+    for _, e in ipairs(trackModel.Checkpoints:GetChildren()) do
+        local p = trackEntryPart(e)
+        if p then table.insert(cps, p) end
+    end
+    table.sort(cps, function(a, b) return (tonumber(a.Name) or 0) < (tonumber(b.Name) or 0) end)
+    local finish = trackEntryPart(trackModel.Finish)
+    if #cps == 0 or not finish then
+        notify("Race assist: couldn't read this race's checkpoints")
+        return
+    end
+    local laps = math.clamp(raceLaps(trackModel) or 4, 1, 8)
+    raceBusy = true
+    task.spawn(function()
+        if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+        local chassis = getActiveChassis()
+        if chassis then pcall(function() chassis.Teleporting = true end) end
+        notify(("Race assist: taking %d checkpoints x%d lap(s)"):format(#cps, laps))
+        local ok, err = pcall(function()
+            local function dirBetween(fromPart, toPart)
+                local d = (toPart.Position - fromPart.Position) * Vector3.new(1, 0, 1)
+                if d.Magnitude < 1 then
+                    d = toPart.CFrame.LookVector * Vector3.new(1, 0, 1)
+                    if d.Magnitude < 0.1 then d = Vector3.new(1, 0, 0) end
+                end
+                return d.Unit
+            end
+            local dirs = {}
+            for i = 1, #cps do
+                dirs[i] = dirBetween(cps[i - 1] or cps[#cps], cps[i])
+            end
+            local finishDir = dirBetween(cps[#cps], finish)
+            local finishReason = nil
+            for pass = 1, laps do
+                local taken, skipped = 0, 0
+                for i = 1, #cps do
+                    local res = crossCheckpoint(cps[i], dirs[i])
+                    if res == "ok" then
+                        taken = taken + 1
+                    elseif res == "none" then
+                        skipped = skipped + 1
+                    elseif res == "novh" then
+                        error("lost the car mid-run", 0)
+                    else
+                        error(("checkpoint %d was rejected by the server (%s)"):format(i, res), 0)
+                    end
+                end
+                local fres, fkind = sweepCheckpoint(finish, finishDir, 14, 0)
+                if not (fres == "ok" and fkind == "finish") then
+                    local r2, k2 = sweepCheckpoint(finish, finishDir, 18, 4)
+                    if r2 == "ok" and k2 == "finish" then
+                        fres, fkind = r2, k2
+                    elseif r2 and r2:sub(1, 8) == "rejected" then
+                        finishReason = r2
+                    end
+                end
+                if fres == "novh" then
+                    error("lost the car mid-run", 0)
+                end
+                if fres == "ok" and fkind == "finish" then
+                    notify("Race assist: race finished!")
+                    return
+                end
+                if pass == 1 and taken == 0 then
+                    error("no checkpoint answered - wait for the race to start (GO), stay in your car, then retry", 0)
+                end
+                notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
+            end
+            error(finishReason or "the finish line never accepted a crossing - press the button again", 0)
+        end)
+        if chassis then pcall(function() chassis.Teleporting = false end) end
+        raceBusy = false
+        if not ok then
+            notify("Race assist: " .. tostring(err))
+        end
+    end)
+end
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -1049,13 +1398,13 @@ local function buildMenu()
         subtitle = "PlaceId " .. tostring(game.PlaceId),
         size = UDim2.new(0, 560, 0, 380),
         position = UDim2.new(0, 30, 0, 40),
-        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc" },
+        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc", "Race" },
         onClose = function()
             screenGui.Enabled = false
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6), win.tab(7) }
 
     local builtCount = 0
     local function guard(what, fn)
@@ -1116,6 +1465,9 @@ local function buildMenu()
     toggle(p1, "Instant shifting",
         function() return Config.Vehicle.InstantShift end,
         function(v) Config.Vehicle.InstantShift = v end)
+    toggle(p1, "Remove tires (glitch)",
+        function() return Config.Vehicle.NoTires end,
+        function(v) Config.Vehicle.NoTires = v end)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -1293,6 +1645,18 @@ local function buildMenu()
     })
     note(p6, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
 
+    -- ---------------- Race ----------------
+    local p7 = pages[7]
+    section(p7, "Race assist")
+    button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
+    note(p7, "Jumps your car through every checkpoint of the race you are " ..
+        "in - in order - then across the finish line. You must be in a race " ..
+        "with your car spawned; wait for the countdown (GO) before pressing. " ..
+        "Race records and leaderboards are monitored - use it on tracks you " ..
+        "don't care about.")
+    note(p7, "Tip: the Vehicle tab's 'Remove tires' toggle keeps the wheels " ..
+        "from flailing around during the jumps.")
+
     win.setTab(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
 end
@@ -1330,6 +1694,7 @@ track(RunService.RenderStepped:Connect(function()
         applyBrake(chassis)
         applySteer(chassis)
         applyLockBypass(chassis)
+        applyTires()
     end)
 
     pcall(renderESP, cam)
