@@ -29,6 +29,16 @@ The original suite:
 - **ESP** — Player / NPC / Drops / Radar. Names, health, distance, team colors; vehicles (e.g. MI-24V) included; optional landmine overlay
 - **Inventory ESP**, HUD, radar, movement/misc tweaks, persistent config and rebindable hotkeys
 
+### Driving Empire — `games/3351674303.luau` (PlaceId 3351674303)
+
+Built against the game's decompiled source — vehicle physics run client-side:
+
+- **Vehicle** — speed multiplier and acceleration multiplier (scale the driven car's engine + torque in the client physics), infinite nitro, ignore speed caps
+- **Teleports** — Race Hub, main dealership, aviation + boat garages, drag strip, bank, police station, drawbridge
+- **HUD** — live speedometer (MPH, gear, RPM) straight from the car's chassis controller
+- **Visuals** — player ESP with the full customizer, fullbright
+- **Misc** — anti-AFK, reset character, rejoin server
+
 ### Universal — `games/universal.luau` (any other game)
 
 Generic toolkit for games without a dedicated script:
@@ -49,6 +59,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's wo
 | --- | --- |
 | `loader.luau` | Hub loader — picks by PlaceId, fetches modules, runs everything via loadstring |
 | `games/7336302630.luau` | Havoc Project Delta (game-specific suite) |
+| `games/3351674303.luau` | Driving Empire (vehicle performance, teleports, speedometer HUD) |
 | `games/universal.luau` | Universal aimbot / ESP / utilities fallback |
 | `uilib.luau` | Shared UI toolkit — window base, widgets, toasts, rebind capture, popup management |
 | `espui.luau` | ESP schema, Drawing renderer and two-window customizer (preview + settings) used by every script |
@@ -57,7 +68,7 @@ Copy `games/7336302630.luau` (or `games/universal.luau`) into your executor's wo
 
 ## Configuration
 
-- Havoc saves to `havoc_delta_config.json`, the universal script to `universal_hub_config.json` — the only files the hub writes to the executor workspace
+- Havoc saves to `havoc_delta_config.json`, Driving Empire to `driving_empire_config.json` and the universal script to `universal_hub_config.json` — the only files the hub writes to the executor workspace
 - Persists keybinds (including enabled/disabled state), feature toggles and values
 - To reset a script: delete its config file from the workspace folder and re-execute
 
