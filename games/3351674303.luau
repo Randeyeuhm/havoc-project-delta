@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v23"
+local SCRIPT_VERSION = "de-v24"
 
 local Connections = {}
 local function track(conn)
@@ -55,7 +55,7 @@ local DEFAULTS = {
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
     Money    = { ShowHud = true },
     Farm     = { Enabled = false, Steer = 0, Plate = false },
-    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 3 },
+    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1 },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -189,7 +189,7 @@ Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 10
 Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
-Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 3, 0, 60)
+Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0, 60)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -298,6 +298,7 @@ end)()
 local ChassisUtils, ClientVehicles, VehicleController
 local Remotes, RaceUtil, RaceController, TeleportDetection
 local ClientRaceHelper
+local MatchmakingUtil
 
 local function waitPath(root, segments)
     local node = root
@@ -472,6 +473,13 @@ local function initVehicleModules()
         if node then
             local ok, res = pcall(require, node)
             if ok and type(res) == "table" then ClientRaceHelper = res end
+        end
+    end
+    if not MatchmakingUtil then
+        local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Matchmaking", "MatchmakingUtil" })
+        if node then
+            local ok, res = pcall(require, node)
+            if ok and type(res) == "table" then MatchmakingUtil = res end
         end
     end
     installInvokeProbe()
@@ -1314,15 +1322,19 @@ local function waitForPayout(minTime, startClock)
         elapsed = os.clock() - startClock  -- fallback: since the assist started
     end
     if not elapsed then return end
-    local target = minTime + (Config.Race.PayoutBuffer or 3)
+    local target = minTime + (Config.Race.PayoutBuffer or 1)
     if elapsed >= target then return end
     local waitFor = math.min(target - elapsed, 600)
-    if waitFor > 1 then
-        notify(("Race assist: holding %.0fs before the finish - this race pays out after %ds"):format(waitFor, math.floor(minTime)))
+    if waitFor > 0.5 then
+        notify(("Race assist: holding %.1fs before the finish - this race pays out after %ds"):format(waitFor, math.floor(minTime)))
     end
+    -- wait precisely: half-second chunks until close, then tenths, so the
+    -- finish crossing lands right after the minimum
     local t0 = os.clock()
-    while os.clock() - t0 < waitFor do
-        task.wait(0.5)
+    while true do
+        local remain = waitFor - (os.clock() - t0)
+        if remain <= 0 then break end
+        task.wait(remain > 1.5 and 0.5 or 0.1)
     end
 end
 
@@ -1435,10 +1447,17 @@ local function runRaceRoutine()
         local minTxt = minTime and (" - payout after %ds"):format(math.floor(minTime)) or ""
         if trackName and RaceUtil then
             -- show the game's own payout numbers: fixed cash per finishing
-            -- place, plus a bonus for every extra racer (never car-based)
+            -- place, plus a bonus for every extra racer (never car-based).
+            -- Global matchmaking servers use their own payout table.
+            local gmmOpts = nil
+            if MatchmakingUtil and type(MatchmakingUtil.isMatchmakingPlace) == "function" then
+                local okG, isG = pcall(MatchmakingUtil.isMatchmakingPlace)
+                if okG and isG == true then gmmOpts = { IsGlobalMultiplayer = true } end
+            end
+            local payMode = gmmOpts and "GlobalMultiplayer" or "Exhibition"
             local okPay, cash, bonus = pcall(function()
-                local c = RaceUtil.calculateBaselinePayout and RaceUtil.calculateBaselinePayout("Exhibition", trackName, 1) or nil
-                local b = RaceUtil.calculatePayoutBonusPercent and RaceUtil.calculatePayoutBonusPercent("Exhibition", trackName, 2) or nil
+                local c = RaceUtil.calculateBaselinePayout and RaceUtil.calculateBaselinePayout(payMode, trackName, 1, gmmOpts) or nil
+                local b = RaceUtil.calculatePayoutBonusPercent and RaceUtil.calculatePayoutBonusPercent(payMode, trackName, 2, gmmOpts) or nil
                 return c, b
             end)
             if okPay and type(cash) == "number" and cash > 0 then
@@ -1852,9 +1871,10 @@ local function buildMenu()
         function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
     note(p7, "Hop delay: pause between checkpoints (0.5-1.5s). Sweep " ..
         "distance: how far before/after each gate the car is placed. " ..
-        "Payout buffer: extra wait at the finish so the race clears the " ..
-        "track's payout minimum time. Server wait is locked at 0.5s - that " ..
-        "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 3.")
+        "Payout buffer: extra wait at the finish so it lands just after the " ..
+        "track's live minimum time (default 1s - the crossing happens about " ..
+        "a second after the minimum). Server wait is locked at 0.5s - that " ..
+        "speed clears rejections almost entirely. Defaults: 0.5 / 12 / 1.")
     note(p7, "Minimum finish time per race (below it the payout is void): " ..
         "Circuit 150s, Cross Country 146s, Drag 3.7s, Highway 23s, " ..
         "Sofia Bay 55s, Drawbridge 59s. Cash pays by finishing place x " ..
