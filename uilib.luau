@@ -16,6 +16,10 @@
     App-specific pieces stay in the host script and are NOT here:
     HUD, radar, Inventory ESP, config persistence, hotkey actions.
 
+    RULE: any new widget or generic UI option belongs in THIS file. Hub
+    scripts and esp.luau only use these factories; anything ESP-specific
+    lives in esp.luau, anything game-specific stays in the game script.
+
     ---- Wiring it into a host script --------------------------
         local UILib = require(path.to.uilib)
 

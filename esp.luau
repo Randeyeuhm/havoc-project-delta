@@ -14,6 +14,12 @@
 
         ESP.open{ cfg, uilib, screenGui, save?, notify? }   -- customizer
 
+    RULE: every ESP feature/option lives in THIS file. Any new UI widget
+    or generic UI option belongs in uilib.luau instead - this customizer
+    only uses the uilib factories (makeToggle / makeSlider / makeDropdown
+    / makeColorPicker / makeButton / makeNote / makeSectionHeader /
+    makeWindow).
+
     What it draws (Project Delta's look):
       - corner box: 8 Line segments, fixed corner length capped at 30% of
         the box's short side
