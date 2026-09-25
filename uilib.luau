@@ -2124,9 +2124,13 @@ end
 
 -- makeWindow{ parent, title, subtitle?, size?, position?, zindex?,
 --             name?, closable? (default true), draggable? (default true),
---             tabs? (list of names), onClose?,
+--             tabs? (list of names), onClose?, onTabChanged?(name),
 --             controls? (widget handle list - adds the search bar),
---             footerHint? (string - adds the footer with this hint) }
+--             footerHint? (string - adds the footer with this hint),
+--             subtabs? = { ["TabName"] = { "Sub1", "Sub2", ... } } }
+-- `subtabs` adds a PINNED sub-rail under the search bar for every tab with
+-- 2+ subs; content scrolls below it and sub pages are read with
+-- w.subtab(tab, sub) / switched with w.setSubtab(tab, sub).
 -- The Project Delta shell: dot + title header with a drawn-X close button,
 -- optional search bar (filters the `controls` list live), a left category
 -- rail for the tabs, scrolling content, and an optional footer with the
@@ -2312,9 +2316,9 @@ local function makeWindow(opts)
     end
 
     -- Content area (only when something can go in it: tab pages or search).
-    local scroll
+    local scroll, content
     if names or hasSearch then
-        local content = create("Frame", {
+        content = create("Frame", {
             Size = UDim2.new(1, -152, 1, -(topPad + bottomPad)),
             Position = UDim2.new(0, 140, 0, topPad),
             BackgroundTransparency = 1,
@@ -2477,7 +2481,132 @@ local function makeWindow(opts)
         end
     end
 
-    local function setTab(idx)
+    local setTab, setSubtab   -- assigned below (rail buttons reference them)
+
+    -- Sub-tabs: opts.subtabs = { ["TabName"] = { "Sub1", "Sub2", ... } }.
+    -- The rail is PINNED between the search bar and the scrolling content
+    -- (Project Delta style); each tab with 2+ subs gets its own rail inside
+    -- the holder and one content frame per sub (W.subtab(name, sub)).
+    local subtabState, railHolder = {}, nil
+    if names and opts.subtabs then
+        for i, name in ipairs(names) do
+            local subs = opts.subtabs[name]
+            if subs and #subs >= 1 then
+                if not railHolder then
+                    railHolder = create("Frame", {
+                        Name = "SubRailHolder",
+                        Size = UDim2.new(1, 0, 0, 30),
+                        Position = UDim2.new(0, 0, 0, 0),
+                        BackgroundTransparency = 1,
+                        Visible = false,
+                        Parent = content,
+                    })
+                    -- the scrolling content moves below the pinned rail
+                    scroll.Position = UDim2.new(0, 0, 0, 36)
+                    scroll.Size = UDim2.new(1, 0, 1, -36)
+                end
+
+                local page = pages[i]
+                local rail = create("ScrollingFrame", {
+                    Name = "SubRail",
+                    Size = UDim2.new(1, 0, 1, 0),
+                    BackgroundColor3 = THEME.RAIL,
+                    BorderSizePixel = 0,
+                    ScrollingDirection = Enum.ScrollingDirection.X,
+                    ScrollBarThickness = 3,
+                    ScrollBarImageColor3 = THEME.STROKE,
+                    ScrollBarImageTransparency = 0.2,
+                    CanvasSize = UDim2.new(0, 0, 0, 0),
+                    AutomaticCanvasSize = Enum.AutomaticSize.X,
+                    Visible = false,
+                    Parent = railHolder,
+                })
+                corner(rail, 8); stroke(rail, THEME.STROKE)
+                create("UIListLayout", {
+                    FillDirection = Enum.FillDirection.Horizontal,
+                    Padding = UDim.new(0, 4),
+                    VerticalAlignment = Enum.VerticalAlignment.Center,
+                    SortOrder = Enum.SortOrder.LayoutOrder,
+                    Parent = rail,
+                })
+                create("UIPadding", {
+                    PaddingLeft = UDim.new(0, 4),
+                    PaddingRight = UDim.new(0, 8),
+                    Parent = rail,
+                })
+
+                local frames, buttons = {}, {}
+                for si, subName in ipairs(subs) do
+                    local btn = create("TextButton", {
+                        Size = UDim2.new(0, 84, 0, 24),
+                        LayoutOrder = si,
+                        BackgroundColor3 = THEME.PANEL,
+                        BorderSizePixel = 0,
+                        Text = subName,
+                        TextColor3 = THEME.TEXT_DIM,
+                        TextSize = 11,
+                        Font = FONTS.MEDIUM,
+                        AutoButtonColor = false,
+                        Parent = rail,
+                    })
+                    corner(btn, 6); stroke(btn, THEME.STROKE)
+                    buttons[subName] = btn
+
+                    local f = create("Frame", {
+                        Size = UDim2.new(1, 0, 0, 0),
+                        BackgroundTransparency = 1,
+                        AutomaticSize = Enum.AutomaticSize.Y,
+                        Visible = false,
+                        Parent = page,
+                    })
+                    create("UIListLayout", {
+                        Padding = UDim.new(0, 6),
+                        SortOrder = Enum.SortOrder.LayoutOrder,
+                        Parent = f,
+                    })
+                    frames[subName] = f
+                end
+
+                subtabState[i] = { rail = rail, frames = frames, buttons = buttons, order = subs, active = nil }
+
+                for subName, btn in pairs(buttons) do
+                    btn.MouseEnter:Connect(function()
+                        local st = subtabState[i]
+                        if st and st.active ~= subName then
+                            tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL_HI })
+                        end
+                    end)
+                    btn.MouseLeave:Connect(function()
+                        local st = subtabState[i]
+                        if st and st.active ~= subName then
+                            tween(btn, 0.1, { BackgroundColor3 = THEME.PANEL })
+                        end
+                    end)
+                    btn.MouseButton1Click:Connect(function()
+                        setSubtab(i, subName)
+                    end)
+                end
+            end
+        end
+    end
+
+    setSubtab = function(tabIdx, subName)
+        local st = subtabState[tabIdx]
+        if not st or not st.frames[subName] then return end
+        local changed = (st.active ~= subName)
+        st.active = subName
+        for s, f in pairs(st.frames) do f.Visible = (s == subName) end
+        for s, btn in pairs(st.buttons) do
+            local active = (s == subName)
+            btn.BackgroundColor3 = active and THEME.ACCENT or THEME.PANEL
+            btn.TextColor3 = active and Color3.fromRGB(255, 255, 255) or THEME.TEXT_DIM
+        end
+        if changed and opts.onSubtabChanged and names then
+            pcall(opts.onSubtabChanged, names[tabIdx], subName)
+        end
+    end
+
+    setTab = function(idx)
         activeTab = idx
         for i, page in ipairs(pages) do page.Visible = (i == idx) end
         for i, btn in ipairs(tabButtons) do
@@ -2486,6 +2615,27 @@ local function makeWindow(opts)
             tabBars[i].Visible = (i == idx)
         end
         if footerStatus and names then footerStatus.Text = names[idx] or "" end
+        if railHolder then
+            local st = subtabState[idx]
+            local multi = st ~= nil and #st.order > 1
+            railHolder.Visible = multi
+            if multi then
+                scroll.Position = UDim2.new(0, 0, 0, 36)
+                scroll.Size = UDim2.new(1, 0, 1, -36)
+            else
+                scroll.Position = UDim2.new(0, 0, 0, 0)
+                scroll.Size = UDim2.new(1, 0, 1, 0)
+            end
+            for ti, s in pairs(subtabState) do
+                s.rail.Visible = (ti == idx and #s.order > 1)
+            end
+            if st then
+                setSubtab(idx, st.active or st.order[1])
+            end
+        end
+        if opts.onTabChanged and names then
+            pcall(opts.onTabChanged, names[idx])
+        end
     end
 
     for i, btn in ipairs(tabButtons) do
@@ -2503,6 +2653,7 @@ local function makeWindow(opts)
     local function setSearchActive(active)
         if not hasSearch then return end
         searchResults.Visible = active
+        if railHolder then railHolder.Visible = not active end
         if active then
             for i, page in ipairs(pages) do page.Visible = false end
         else
@@ -2579,6 +2730,30 @@ local function makeWindow(opts)
     W.setControls = function(list)
         if type(list) == "table" then W._controls = list end
     end
+    local function tabIndex(nameOrIndex)
+        if type(nameOrIndex) == "number" then return nameOrIndex end
+        if names then
+            for i, n in ipairs(names) do
+                if n == nameOrIndex then return i end
+            end
+        end
+        return nil
+    end
+    W.subtab = function(tabNameOrIndex, subName)
+        local idx = tabIndex(tabNameOrIndex)
+        local st = idx and subtabState[idx]
+        if not st then return nil end
+        return st.frames[subName]
+    end
+    W.setSubtab = function(tabNameOrIndex, subName)
+        local idx = tabIndex(tabNameOrIndex)
+        if idx then setSubtab(idx, subName) end
+    end
+    W.activeSubtab = function(tabNameOrIndex)
+        local idx = tabIndex(tabNameOrIndex)
+        local st = idx and subtabState[idx]
+        return st and st.active
+    end
     W.show = function() frame.Visible = true end
     W.hide = function() frame.Visible = false end
     W.toggle = function() frame.Visible = not frame.Visible end
@@ -2608,7 +2783,6 @@ UILib.makeWindow        = makeWindow
 UILib.makeBanner        = makeBanner
 UILib.makeHitmarker     = makeHitmarker
 UILib.makePanel         = makePanel
-UILib.makeRow           = makeRow
 UILib.makeProfile       = makeProfile
 UILib.makeCanvas        = makeCanvas
 UILib.makeToaster       = makeToaster

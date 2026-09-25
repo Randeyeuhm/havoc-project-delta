@@ -5263,11 +5263,6 @@ do
         { Category = "Config",  Subs = { "Main" } },
     }
 
-    local catSubCounts = {}
-    for _, entry in ipairs(GUI_STRUCTURE) do
-        catSubCounts[entry.Category] = #entry.Subs
-    end
-
     function buildGUI()
         local gui = Instance.new("ScreenGui")
         gui.Name = "HavocUI"
@@ -5276,32 +5271,51 @@ do
         local ok = pcall(function() gui.Parent = CoreGui end)
         if not ok then gui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-        -- Size to the viewport so the window still fits on a small screen.
+        -- The whole shell (title bar, category rail, pinned sub-rail, search,
+        -- footer, scrolling content and the empty state) is built by
+        -- uilib.luau's makeWindow. This script only wires position persistence
+        -- and fills the per-category pages.
         local viewport = (Camera and Camera.ViewportSize) or Vector2.new(1920, 1080)
         local winW = math.clamp(viewport.X - 60, 380, 500)
         local winH = math.clamp(viewport.Y - 80, 340, 720)
 
-        local main = Instance.new("Frame")
-        main.Name = "Main"
-        main.Size = UDim2.new(0, winW, 0, winH)
-        main.BackgroundColor3 = C_BG
-        main.BorderSizePixel = 0
-        main.Active = true
-        main.Draggable = true
-        main.Parent = gui
-        corner(main, 10); stroke(main, C_STROKE)
+        local tabNames, subtabMap = {}, {}
+        for _, entry in ipairs(GUI_STRUCTURE) do
+            table.insert(tabNames, entry.Category)
+            subtabMap[entry.Category] = entry.Subs
+        end
+
+        local win = UILib.makeWindow({
+            parent = gui,
+            name = "HavocMain",
+            title = "HAVOC  ·  v9.9.28",
+            size = UDim2.new(0, winW, 0, winH),
+            tabs = tabNames,
+            subtabs = subtabMap,
+            controls = guiControls,
+            footerHint = "RightShift — show / hide this menu",
+            position = (function()
+                local saved = Config.Misc.GuiPosition
+                if saved then
+                    return UDim2.new(
+                        saved.xScale or 0, saved.xOff or 30,
+                        saved.yScale or 0, saved.yOff or 40
+                    )
+                end
+                return UDim2.new(0, 30, 0, 40)
+            end)(),
+            onClose = function()
+                gui.Enabled = false
+                -- Otherwise the menu just vanishes with no hint on how to get it back.
+                notify("Menu hidden — press RightShift to reopen")
+            end,
+            onTabChanged = function(cat)
+                state.currentCategory = cat
+            end,
+        })
+        local main = win.frame
 
         do
-            local saved = Config.Misc.GuiPosition
-            if saved then
-                main.Position = UDim2.new(
-                    saved.xScale or 0, saved.xOff or 30,
-                    saved.yScale or 0, saved.yOff or 40
-                )
-            else
-                main.Position = UDim2.new(0, 30, 0, 40)
-            end
-
             -- Keep the window reachable when a saved position is now off-screen
             -- (different resolution, or dragged most of the way off an edge).
             local function clampToViewport()
@@ -5333,473 +5347,19 @@ do
             end)
         end
 
-        local title = Instance.new("Frame")
-        title.Size = UDim2.new(1, 0, 0, 36)
-        title.BackgroundColor3 = C_HEADER
-        title.BorderSizePixel = 0
-        title.Parent = main
-        corner(title, 10)
-        local titleBottom = Instance.new("Frame")
-        titleBottom.Size = UDim2.new(1, 0, 0, 10)
-        titleBottom.Position = UDim2.new(0, 0, 1, -10)
-        titleBottom.BackgroundColor3 = C_HEADER
-        titleBottom.BorderSizePixel = 0
-        titleBottom.Parent = title
-
-        -- Thin accent rule separating the header from the content below.
-        local accentLine = Instance.new("Frame")
-        accentLine.Size = UDim2.new(1, 0, 0, 2)
-        accentLine.Position = UDim2.new(0, 0, 0, 36)
-        accentLine.BackgroundColor3 = C_ACCENT
-        accentLine.BorderSizePixel = 0
-        accentLine.ZIndex = 2
-        accentLine.Parent = main
-
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0, 8, 0, 8)
-        dot.Position = UDim2.new(0, 14, 0.5, -4)
-        dot.BackgroundColor3 = C_ACCENT
-        dot.BorderSizePixel = 0
-        dot.Parent = title
-        corner(dot, 4)
-
-        local titleLbl = Instance.new("TextLabel")
-        titleLbl.Size = UDim2.new(1, -74, 1, 0)
-        titleLbl.Position = UDim2.new(0, 30, 0, 0)
-        titleLbl.BackgroundTransparency = 1
-        titleLbl.Text = "HAVOC  ·  v9.9.28"
-        titleLbl.TextColor3 = C_TEXT
-        titleLbl.TextSize = 13
-        titleLbl.Font = Enum.Font.GothamBold
-        titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-        titleLbl.Parent = title
-
-        local closeBtn = Instance.new("TextButton")
-        closeBtn.Size = UDim2.new(0, 24, 0, 24)
-        closeBtn.Position = UDim2.new(1, -36, 0.5, -12)
-        closeBtn.BackgroundColor3 = C_RED
-        closeBtn.BorderSizePixel = 0
-        closeBtn.Text = ""
-        closeBtn.Parent = title
-        corner(closeBtn, 6)
-
-        -- X drawn from two frames: Gotham's "×" glyph rendered off-centre.
-        for i = 1, 2 do
-            local arm = Instance.new("Frame")
-            arm.AnchorPoint = Vector2.new(0.5, 0.5)
-            arm.Position = UDim2.new(0.5, 0, 0.5, 0)
-            arm.Size = UDim2.new(0, 12, 0, 2)
-            arm.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-            arm.BorderSizePixel = 0
-            arm.Rotation = (i == 1) and 45 or -45
-            arm.Parent = closeBtn
-            corner(arm, 1)
-        end
-
-        closeBtn.MouseEnter:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = C_RED_HI }) end)
-        closeBtn.MouseLeave:Connect(function() tween(closeBtn, 0.1, { BackgroundColor3 = C_RED }) end)
-        closeBtn.MouseButton1Click:Connect(function()
-            gui.Enabled = false
-            -- Otherwise the menu just vanishes with no hint on how to get it back.
-            notify("Menu hidden — press RightShift to reopen")
-        end)
-
-        local searchFrame = Instance.new("Frame")
-        searchFrame.Size = UDim2.new(1, -24, 0, 30)
-        searchFrame.Position = UDim2.new(0, 12, 0, 44)
-        searchFrame.BackgroundColor3 = C_PANEL
-        searchFrame.BorderSizePixel = 0
-        searchFrame.Parent = main
-        corner(searchFrame, 6); stroke(searchFrame, C_STROKE)
-
-        -- Magnifier drawn from frames rather than a glyph. The previous icon
-        -- was U+2315, which none of the game fonts cover, so it rendered as a
-        -- hollow box.
-        local lens = Instance.new("Frame")
-        lens.Size = UDim2.new(0, 10, 0, 10)
-        lens.Position = UDim2.new(0, 14, 0, 10)
-        lens.BackgroundTransparency = 1
-        lens.Parent = searchFrame
-        corner(lens, 5)
-        local lensRing = stroke(lens, C_TEXT_DIM)
-        lensRing.Thickness = 1.5
-
-        local lensHandle = Instance.new("Frame")
-        lensHandle.Size = UDim2.new(0, 6, 0, 2)
-        lensHandle.AnchorPoint = Vector2.new(0, 0.5)
-        lensHandle.Position = UDim2.new(0, 22, 0, 19)
-        lensHandle.Rotation = 45
-        lensHandle.BackgroundColor3 = C_TEXT_DIM
-        lensHandle.BorderSizePixel = 0
-        lensHandle.Parent = searchFrame
-        corner(lensHandle, 1)
-
-        local searchBox = Instance.new("TextBox")
-        -- Was (0, 34) / (1, -40), which overlapped the icon by 2px.
-        searchBox.Size = UDim2.new(1, -44, 1, 0)
-        searchBox.Position = UDim2.new(0, 38, 0, 0)
-        searchBox.BackgroundTransparency = 1
-        searchBox.Text = ""
-        searchBox.PlaceholderText = "Search settings…"
-        searchBox.PlaceholderColor3 = C_TEXT_DIM
-        searchBox.TextColor3 = C_TEXT
-        searchBox.TextSize = 12
-        searchBox.Font = Enum.Font.Gotham
-        searchBox.TextXAlignment = Enum.TextXAlignment.Left
-        searchBox.ClearTextOnFocus = false
-        searchBox.Parent = searchFrame
-
-        local rail = Instance.new("Frame")
-        rail.Size = UDim2.new(0, 116, 1, -132)
-        rail.Position = UDim2.new(0, 12, 0, 82)
-        rail.BackgroundColor3 = C_RAIL
-        rail.BorderSizePixel = 0
-        rail.Parent = main
-        corner(rail, 8); stroke(rail, C_STROKE)
-
-        local railLayout = Instance.new("UIListLayout")
-        railLayout.Padding = UDim.new(0, 4)
-        railLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        railLayout.Parent = rail
-        local railPad = Instance.new("UIPadding")
-        railPad.PaddingTop = UDim.new(0, 6); railPad.PaddingLeft = UDim.new(0, 6)
-        railPad.PaddingRight = UDim.new(0, 6); railPad.PaddingBottom = UDim.new(0, 6)
-        railPad.Parent = rail
-
-        local content = Instance.new("Frame")
-        content.Size = UDim2.new(1, -152, 1, -132)
-        content.Position = UDim2.new(0, 140, 0, 82)
-        content.BackgroundTransparency = 1
-        content.Parent = main
-
-        local subRail = Instance.new("ScrollingFrame")
-        -- Horizontal scroller: with four sub-tabs the rail no longer fits at
-        -- narrow window widths, so it scrolls instead of clipping.
-        subRail.Size = UDim2.new(1, -12, 0, 32)
-        subRail.BackgroundColor3 = C_RAIL
-        subRail.BorderSizePixel = 0
-        subRail.ScrollingDirection = Enum.ScrollingDirection.X
-        subRail.ScrollBarThickness = 3
-        subRail.ScrollBarImageColor3 = C_STROKE
-        subRail.ScrollBarImageTransparency = 0.2
-        subRail.CanvasSize = UDim2.new(0, 0, 0, 0)
-        subRail.AutomaticCanvasSize = Enum.AutomaticSize.X
-        subRail.Parent = content
-        corner(subRail, 8); stroke(subRail, C_STROKE)
-
-        local subLayout = Instance.new("UIListLayout")
-        subLayout.FillDirection = Enum.FillDirection.Horizontal
-        subLayout.Padding = UDim.new(0, 4)
-        subLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-        subLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        subLayout.Parent = subRail
-        local subPad = Instance.new("UIPadding")
-        subPad.PaddingLeft = UDim.new(0, 4)
-        subPad.PaddingRight = UDim.new(0, 8)
-        subPad.Parent = subRail
-
-        local scroll = Instance.new("ScrollingFrame")
-        scroll.Size = UDim2.new(1, 0, 1, -40)
-        scroll.Position = UDim2.new(0, 0, 0, 40)
-        scroll.BackgroundTransparency = 1
-        scroll.BorderSizePixel = 0
-        scroll.ScrollBarThickness = 6
-        scroll.ScrollBarImageColor3 = C_STROKE
-        scroll.ScrollBarImageTransparency = 0.1
-        scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-        scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-        scroll.Parent = content
-
-        -- Keep the bar in its own gutter. VerticalScrollBarInset alone still
-        -- let the bar draw over the rounded right corners of the rows, so pad
-        -- the rows in by 12px and let the bar live in that reserved strip.
-        local scrollPad = Instance.new("UIPadding")
-        scrollPad.PaddingRight = UDim.new(0, 12)
-        scrollPad.Parent = scroll
-
-        -- Dropdown overlays close when the panel scrolls so they cannot
-        -- drift away from their row.
-        track(scroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-            for _, e in ipairs(dropdownEntries) do
-                if e.close then e.close() end
-            end
-        end))
-
-        local searchResults = Instance.new("Frame")
-        searchResults.Size = UDim2.new(1, 0, 0, 0)
-        searchResults.BackgroundTransparency = 1
-        searchResults.AutomaticSize = Enum.AutomaticSize.Y
-        searchResults.Visible = false
-        searchResults.Parent = scroll
-        local srLayout = Instance.new("UIListLayout")
-        srLayout.Padding = UDim.new(0, 6)
-        srLayout.SortOrder = Enum.SortOrder.LayoutOrder
-        srLayout.Parent = searchResults
-
-        -- Shown when a search matches nothing, instead of a blank panel.
-        local noResults = Instance.new("TextLabel")
-        noResults.Size = UDim2.new(1, 0, 0, 44)
-        noResults.BackgroundColor3 = C_PANEL
-        noResults.BorderSizePixel = 0
-        noResults.Text = "No settings match your search."
-        noResults.TextColor3 = C_TEXT_DIM
-        noResults.TextSize = 12
-        noResults.Font = Enum.Font.Gotham
-        noResults.Visible = false
-        noResults.LayoutOrder = -1
-        noResults.Parent = searchResults
-        corner(noResults, 6); stroke(noResults, C_STROKE)
-
-        -- Footer: fills what was dead space, and tells the user how to bring the
-        -- window back after closing it.
-        local footer = Instance.new("Frame")
-        footer.Size = UDim2.new(1, -24, 0, 30)
-        footer.Position = UDim2.new(0, 12, 1, -42)
-        footer.BackgroundColor3 = C_RAIL
-        footer.BorderSizePixel = 0
-        footer.Parent = main
-        corner(footer, 8); stroke(footer, C_STROKE)
-
-        local footerHint = Instance.new("TextLabel")
-        footerHint.Size = UDim2.new(1, -162, 1, 0)
-        footerHint.Position = UDim2.new(0, 12, 0, 0)
-        footerHint.BackgroundTransparency = 1
-        footerHint.Text = "RightShift — show / hide this menu"
-        footerHint.TextColor3 = C_TEXT_DIM
-        footerHint.TextSize = 11
-        footerHint.Font = Enum.Font.Gotham
-        footerHint.TextXAlignment = Enum.TextXAlignment.Left
-        footerHint.Parent = footer
-
-        local footerStatus = Instance.new("TextLabel")
-        footerStatus.Size = UDim2.new(0, 130, 1, 0)
-        footerStatus.Position = UDim2.new(1, -142, 0, 0)
-        footerStatus.BackgroundTransparency = 1
-        footerStatus.Text = "Aimbot"
-        footerStatus.TextColor3 = C_ACCENT_HI
-        footerStatus.TextSize = 11
-        footerStatus.Font = Enum.Font.GothamBold
-        footerStatus.TextXAlignment = Enum.TextXAlignment.Right
-        footerStatus.Parent = footer
-
-        local tabButtons, subTabButtons, subFrames, firstSubOf, tabBars, tabLabels =
-            {}, {}, {}, {}, {}, {}
-        for _, entry in ipairs(GUI_STRUCTURE) do
-            local cat, subs = entry.Category, entry.Subs
-            firstSubOf[cat] = subs[1]
-            subFrames[cat] = {}
-            subTabButtons[cat] = {}
-
-            local catBtn = Instance.new("TextButton")
-            catBtn.Size = UDim2.new(1, 0, 0, 32)
-            catBtn.BackgroundColor3 = C_PANEL
-            catBtn.BorderSizePixel = 0
-            catBtn.Text = ""
-            catBtn.AutoButtonColor = false
-            catBtn.Parent = rail
-            corner(catBtn, 6)
-
-            -- Left accent bar marks the selected category. AnchorPoint keeps its
-            -- 3px width pinned to the vertical centre of the 32px button.
-            local catBar = Instance.new("Frame")
-            catBar.Size = UDim2.new(0, 3, 0, 18)
-            catBar.AnchorPoint = Vector2.new(0, 0.5)
-            catBar.Position = UDim2.new(0, 10, 0.5, 0)
-            catBar.BackgroundColor3 = C_ACCENT
-            catBar.BorderSizePixel = 0
-            catBar.Visible = false
-            catBar.Parent = catBtn
-            corner(catBar, 2)
-            tabBars[cat] = catBar
-
-            -- The name is a child label, not the button's own Text. UIPadding
-            -- offsets children but not an object's text, which is what used to
-            -- drag the accent bar sideways across the first letter.
-            local catLbl = Instance.new("TextLabel")
-            catLbl.Size = UDim2.new(1, -34, 1, 0)
-            catLbl.Position = UDim2.new(0, 22, 0, 0)
-            catLbl.BackgroundTransparency = 1
-            catLbl.Text = cat
-            catLbl.TextColor3 = C_TEXT_DIM
-            catLbl.TextSize = 12
-            catLbl.Font = Enum.Font.GothamMedium
-            catLbl.TextXAlignment = Enum.TextXAlignment.Left
-            catLbl.TextTruncate = Enum.TextTruncate.AtEnd
-            catLbl.Parent = catBtn
-            tabLabels[cat] = catLbl
-
-            tabButtons[cat] = catBtn
-
-            for i, sub in ipairs(subs) do
-                local f = Instance.new("Frame")
-                f.Size = UDim2.new(1, 0, 0, 0)
-                f.BackgroundTransparency = 1
-                f.AutomaticSize = Enum.AutomaticSize.Y
-                f.Visible = false
-                f.Parent = scroll
-                local fl = Instance.new("UIListLayout")
-                fl.Padding = UDim.new(0, 6)
-                fl.SortOrder = Enum.SortOrder.LayoutOrder
-                fl.Parent = f
-                subFrames[cat][sub] = f
-
-                local subBtn = Instance.new("TextButton")
-                subBtn.Size = UDim2.new(0, 84, 0, 24)
-                subBtn.BackgroundColor3 = C_PANEL
-                subBtn.BorderSizePixel = 0
-                subBtn.Text = sub
-                subBtn.TextColor3 = C_TEXT_DIM
-                subBtn.TextSize = 11
-                subBtn.Font = Enum.Font.GothamMedium
-                subBtn.LayoutOrder = i
-                subBtn.Visible = false
-                subBtn.Parent = subRail
-                corner(subBtn, 6); stroke(subBtn, C_STROKE)
-                subTabButtons[cat][sub] = subBtn
-            end
-        end
-
-        local function showSub(cat, sub)
-            if not subFrames[cat] then return end
-            for _, e in ipairs(dropdownEntries) do
-                if e.close then e.close() end
-            end
-            for s, f in pairs(subFrames[cat]) do f.Visible = (s == sub) end
-            for s, btn in pairs(subTabButtons[cat]) do
-                local active = (s == sub)
-                btn.BackgroundColor3 = active and C_ACCENT or C_PANEL
-                btn.TextColor3     = active and Color3.fromRGB(255, 255, 255) or C_TEXT_DIM
-            end
-        end
-
-        local function showCategory(cat)
-            for c, btn in pairs(tabButtons) do
-                local active = (c == cat)
-                btn.BackgroundColor3 = active and C_PANEL_HI or C_PANEL
-                -- Colour lives on the child label now that the button's own
-                -- Text is empty.
-                local lbl = tabLabels[c]
-                if lbl then
-                    lbl.TextColor3 = active and Color3.fromRGB(255, 255, 255) or C_TEXT_DIM
-                end
-                local bar = tabBars[c]
-                if bar then bar.Visible = active end
-            end
-
-            if footerStatus then footerStatus.Text = cat end
-
-            local multi = (catSubCounts[cat] or 0) > 1
-            subRail.Visible = multi
-            if multi then
-                scroll.Position = UDim2.new(0, 0, 0, 40)
-                scroll.Size     = UDim2.new(1, 0, 1, -40)
-            else
-                scroll.Position = UDim2.new(0, 0, 0, 0)
-                scroll.Size     = UDim2.new(1, 0, 1, 0)
-            end
-
-            for c, subs in pairs(subTabButtons) do
-                for _, btn in pairs(subs) do
-                    local show = (c == cat and (catSubCounts[c] or 0) > 1)
-                    btn.Visible = show
-                    -- UIListLayout still reserves space for invisible items, so
-                    -- collapse hidden tabs or the auto canvas keeps their width.
-                    btn.Size = show and UDim2.new(0, 84, 0, 24) or UDim2.new(0, 0, 0, 0)
-                end
-            end
-            for _, subs in pairs(subFrames) do
-                for _, f in pairs(subs) do f.Visible = false end
-            end
-            showSub(cat, firstSubOf[cat])
-            state.currentCategory = cat
-        end
-
-        for cat, btn in pairs(tabButtons) do
-            btn.MouseEnter:Connect(function()
-                if state.currentCategory ~= cat then tween(btn, 0.1, { BackgroundColor3 = C_PANEL_HI }) end
-            end)
-            btn.MouseLeave:Connect(function()
-                if state.currentCategory ~= cat then tween(btn, 0.1, { BackgroundColor3 = C_PANEL }) end
-            end)
-            btn.MouseButton1Click:Connect(function() showCategory(cat) end)
-        end
-        for cat, subs in pairs(subTabButtons) do
-            for sub, btn in pairs(subs) do
-                -- Sub-tabs previously had no hover feedback at all.
-                local holder = function() return subFrames[cat] and subFrames[cat][sub] end
-                btn.MouseEnter:Connect(function()
-                    local f = holder()
-                    if f and not f.Visible then tween(btn, 0.1, { BackgroundColor3 = C_PANEL_HI }) end
-                end)
-                btn.MouseLeave:Connect(function()
-                    local f = holder()
-                    if f and not f.Visible then tween(btn, 0.1, { BackgroundColor3 = C_PANEL }) end
-                end)
-                btn.MouseButton1Click:Connect(function() showSub(cat, sub) end)
-            end
-        end
-
-        local function setSearchActive(active)
-            searchResults.Visible = active
-            for _, subs in pairs(subFrames) do
-                for _, f in pairs(subs) do f.Visible = false end
-            end
-            if active then
-                subRail.Visible = false
-                scroll.Position = UDim2.new(0, 0, 0, 40)
-                scroll.Size     = UDim2.new(1, 0, 1, -40)
-            else
-                for _, ctrl in ipairs(guiControls) do
-                    if ctrl.row and ctrl.homeParent then
-                        ctrl.row.Parent  = ctrl.homeParent
-                        ctrl.row.Visible = true
-                    end
-                end
-                showCategory(state.currentCategory or "Aimbot")
-            end
-        end
-
-        local function applySearch(query)
-            -- Moving rows between parents would strand an open dropdown.
-            for _, e in ipairs(dropdownEntries) do
-                if e.close then e.close() end
-            end
-            query = query:lower():gsub("^%s+", ""):gsub("%s+$", "")
-            if query == "" then
-                setSearchActive(false)
-                return
-            end
-            setSearchActive(true)
-            local matches = 0
-            for _, ctrl in ipairs(guiControls) do
-                if ctrl.row and ctrl.searchText then
-                    local match = ctrl.searchText:lower():find(query, 1, true) ~= nil
-                    if match then
-                        ctrl.row.Parent = searchResults
-                        matches = matches + 1
-                    end
-                    ctrl.row.Visible = match
-                end
-            end
-            -- Explicit empty state instead of a blank panel, plus a live count.
-            noResults.Visible = (matches == 0)
-            if footerStatus then
-                footerStatus.Text = ("%d result%s"):format(matches, matches == 1 and "" or "s")
-            end
-        end
-
-        searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-            applySearch(searchBox.Text)
-        end)
+        -- Thin wrapper per uilib widget so the (hundreds of) rows below stay
+        -- readable: each row is parented into its category/sub page and
+        -- registered for the window's search bar.
+        local makeNote = UILib and UILib.makeNote
 
         local function addSection(cat, sub, text)
-            local parent = subFrames[cat][sub]
+            local parent = win.subtab(cat, sub)
             local e = makeSectionHeader(parent, text)
             e.homeParent = parent
             table.insert(guiControls, e)
         end
         local function addToggle(cat, sub, text, getter, setter, keybindId)
-            local parent = subFrames[cat][sub]
+            local parent = win.subtab(cat, sub)
             local hkEntry = keybindId and hotkeyById[keybindId] or nil
             local e = makeToggle(parent, text, getter, setter, hkEntry)
             e.homeParent = parent
@@ -5807,32 +5367,28 @@ do
             return e
         end
         local function addValue(cat, sub, text, getter, setter, step, min, max, fmt)
-            local parent = subFrames[cat][sub]
+            local parent = win.subtab(cat, sub)
             local e = makeSlider(parent, text, getter, setter, step, min, max, fmt)
             e.homeParent = parent
             table.insert(guiControls, e)
         end
         local function addColor(cat, sub, label, cfg, prefix, onChange)
-            local parent = subFrames[cat][sub]
+            local parent = win.subtab(cat, sub)
             local e = makeColorPicker(parent, label, cfg, prefix, onChange)
             e.homeParent = parent
             table.insert(guiControls, e)
             return e
         end
         local function addDropdown(cat, sub, label, getItems, getSelected, onSelect, overlayParent)
-            local parent = subFrames[cat][sub]
+            local parent = win.subtab(cat, sub)
             local e = makeDropdown(parent, label, getItems, getSelected, onSelect, overlayParent)
             e.homeParent = parent
             table.insert(guiControls, e)
             table.insert(dropdownEntries, e)
             return e
         end
-        -- Rounded note strip, provided by uilib.luau (returns its TextLabel
-        -- so callers can drive .Text directly).
-        local makeNote = UILib and UILib.makeNote
-
         local function addInfo(cat, sub, initText)
-            return makeNote(subFrames[cat][sub], initText)
+            return makeNote(win.subtab(cat, sub), initText)
         end
 
         addSection("Aimbot", "Main", "Targeting")
@@ -6255,7 +5811,7 @@ do
             addColor("Players", "Main", "Friend colour", P, "Highlight")
 
             addSection("Players", "Main", "Whitelist")
-            makeNote(subFrames["Players"]["Main"], "Friends are skipped by the aimbot and shown green.")
+            makeNote(win.subtab("Players", "Main"), "Friends are skipped by the aimbot and shown green.")
 
             local container = Instance.new("Frame")
             container.Size = UDim2.new(1, 0, 0, 0)
@@ -6264,7 +5820,7 @@ do
             -- Always last in this frame: UILib rows use their own layout
             -- counter, so a script-side number could sort before them.
             container.LayoutOrder = 1000000
-            container.Parent = subFrames["Players"]["Main"]
+            container.Parent = win.subtab("Players", "Main")
             local contLayout = Instance.new("UIListLayout")
             contLayout.Padding = UDim.new(0, 6)
             contLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -6343,10 +5899,10 @@ do
                 Config.Misc.KeybindsEnabled = v
                 notify(v and "Keybinds enabled" or "Keybinds disabled — RightShift still opens the menu")
             end)
-        makeNote(subFrames["Config"]["Main"], "Click Rebind, then press a key. Esc cancels.")
+        makeNote(win.subtab("Config", "Main"), "Click Rebind, then press a key. Esc cancels.")
 
         for _, entry in ipairs(Hotkeys) do
-            local e = makeKeybindRow(subFrames["Config"]["Main"], entry, {
+            local e = makeKeybindRow(win.subtab("Config", "Main"), entry, {
                 -- The menu key can never be disabled.
                 locked = entry.Id == "ToggleGUI",
                 lockNote = "RightShift is the menu key and stays bound",
@@ -6355,7 +5911,7 @@ do
         end
 
         state.currentCategory = "Aimbot"
-        showCategory("Aimbot")
+        win.setTab(1)
 
         state.gui = gui
         return gui
