@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v44"
+local SCRIPT_VERSION = "de-v45"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -59,7 +59,6 @@ local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
-    Farm     = { Enabled = false, Steer = 0 },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
@@ -187,7 +186,6 @@ Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.Vehicle.NoTires = Config.Vehicle.NoTires == true
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
-Config.Farm.Steer = math.clamp(tonumber(Config.Farm.Steer) or 0, -1, 1)
 Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
 Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
 Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0, 60)
@@ -862,7 +860,7 @@ local function applyTires()
 end
 
 -- ============================================================
--- CASH HELPERS  (used by the payout watcher + the auto-farm)
+-- CASH HELPERS  (used by the payout watcher + the payout toasts)
 -- ============================================================
 local function getCash()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
@@ -1084,73 +1082,6 @@ end
 -- removed: the server validates those drops, so remote-fired collects
 -- never awarded anything)
 -- ============================================================
-
--- ============================================================
--- FEATURES: AUTO FARM  (driving income - scales with speed)
--- ============================================================
--- The chassis physics ask InputController.Get() for throttle/steer every
--- frame. Replacing that module field with a wrapper lets the farm hold full
--- throttle (plus an optional steer bias for circling). The true original is
--- kept in the getgenv hook registry, so re-executing can't stack wrappers.
-local InputController
-local farmState = { cashStart = 0, stuckSince = nil, recoverUntil = 0 }
-
-local function farmInputOverride()
-    if not Config.Farm.Enabled then return nil end
-    if os.clock() < farmState.recoverUntil then
-        return -1, -Config.Farm.Steer
-    end
-    return 1, Config.Farm.Steer
-end
-
-local function initFarmHook()
-    if not InputController then
-        local node = waitPath(ReplicatedStorage, { "Modules", "Client", "Vehicles", "InputController" })
-        if node then
-            local ok, res = pcall(require, node)
-            if ok and type(res) == "table" then InputController = res end
-        end
-    end
-    if not InputController then return false end
-    if not vehicleHooks.origInputGet then
-        vehicleHooks.origInputGet = InputController.Get
-    end
-    local orig = vehicleHooks.origInputGet
-    InputController.Get = function()
-        local throttle, steer = orig()
-        local by, bs = farmInputOverride()
-        if by then return by, bs end
-        return throttle, steer
-    end
-    return true
-end
-
--- Stuck detection: no movement for a few seconds while farming -> reverse
--- for 2s (with reversed steer) so the car backs off whatever it hit.
-local function farmTick(chassis)
-    if not Config.Farm.Enabled then
-        farmState.stuckSince = nil
-        return
-    end
-    local speed = chassis and chassis.Speed or 0
-    if chassis and speed < 5 then
-        farmState.stuckSince = farmState.stuckSince or os.clock()
-        if (os.clock() - farmState.stuckSince) > 3.5 and os.clock() > farmState.recoverUntil then
-            farmState.recoverUntil = os.clock() + 2
-            farmState.stuckSince = nil
-        end
-    else
-        farmState.stuckSince = nil
-    end
-end
-
-initFarmHook()
-task.spawn(function()
-    for _ = 1, 30 do
-        if initFarmHook() then break end
-        task.wait(1)
-    end
-end)
 
 -- ============================================================
 -- FEATURES: RACE ASSIST  (take every checkpoint, then the finish line)
@@ -2091,26 +2022,6 @@ local function buildMenu()
 
     -- ---------------- Money ----------------
     local p5 = pages[4]
-    section(p5, "Auto farm  (driving income)")
-    toggle(p5, "Auto farm (auto drive)",
-        function() return Config.Farm.Enabled end,
-        function(v)
-            Config.Farm.Enabled = v
-            if v then
-                initFarmHook()
-                farmState.cashStart = getCash() or 0
-                farmState.recoverUntil = 0
-                notify(getLocalVehicleModel() and "Auto farm on - driving" or "Auto farm on - get in a car")
-            else
-                local delta = (getCash() or 0) - farmState.cashStart
-                notify(delta > 0 and ("Auto farm off - earned %s"):format(formatCash(delta)) or "Auto farm off")
-            end
-        end)
-    slider(p5, "Farm steer bias",
-        function() return Config.Farm.Steer end,
-        function(v) Config.Farm.Steer = v end, 0.05, -1, 1)
-    note(p5, "Income scales with speed; steer 0 = straight, ~0.3 = circles. Auto-reverses when stuck.")
-
     section(p5, "Race auto-farm  (money loop)")
     toggle(p5, "Auto-run the race assist",
         function() return Config.Race.AutoFarm end,
@@ -2232,7 +2143,6 @@ track(RunService.RenderStepped:Connect(function()
                 chassis.ExternalMaxSpeedMPH = nil
             end
         end
-        farmTick(chassis)
         applyGrip(chassis)
         applyBrake(chassis)
         applySteer(chassis)
