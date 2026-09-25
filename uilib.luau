@@ -419,22 +419,13 @@ local function isPointerDown(input)
     return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
 end
 
--- Pointer (InputObject) positions come in "true top of screen" space - the
--- same space GetMouseLocation and WorldToViewportPoint use (verified
--- in-game: shifting them by the inset moved drawings ~36px down). An
--- IgnoreGuiInset ScreenGui lays out in that same space, so no shift is
--- needed; a default ScreenGui lays out below the top bar, so the point
--- moves down by the inset to compare with its AbsolutePosition. (This was
--- the opposite way around, which left Y-sensitive drags like the colour
--- picker's square ~36px off the cursor.)
-local function toGuiSpace(gui, pos)
-    local p = Vector2.new(pos.X, pos.Y)
-    local sg = gui:FindFirstAncestorOfClass("ScreenGui")
-    if sg and not sg.IgnoreGuiInset then
-        p = p + (GuiService:GetGuiInset())
-    end
-    return p
-end
+-- Pointer space vs GUI space: raw pointer positions and AbsolutePosition can
+-- disagree by the top-bar inset, and which side of the inset the input sits
+-- on has changed between client builds (the isOver note below says the same).
+-- Guessing a sign here kept breaking the colour picker, so Y-sensitive drags
+-- instead LEARN the offset from the engine's own MouseMoved coordinates
+-- (always widget space) - see feedPointerSample. Until a sample arrives the
+-- offset is zero, which is what current builds need.
 
 local function isOver(gui, pos)
     if not gui or not gui.Parent then return false end
@@ -460,16 +451,36 @@ local function isOver(gui, pos)
     return false
 end
 
-local drag = nil          -- { gui, move, finish } while a pointer drag runs
+local drag = nil          -- { gui, move, finish, offset } while a pointer drag runs
 local inputHandle = nil   -- the live attachInput() handle, if any
 local warnedNoInput = false
+local lastPointer = nil       -- latest raw pointer position (Vector2)
+local pendingSample = nil     -- engine-reported GUI-space point (MouseMoved)
+local pendingWith = nil       -- the raw pointer position at that sample
 
 local function dragMove(pos)
     local gui = drag.gui
     local size = gui.AbsoluteSize
     if size.X <= 0 or size.Y <= 0 then return end
-    local rel = (toGuiSpace(gui, pos) - gui.AbsolutePosition) / size
+    local rel = ((pos - drag.offset) - gui.AbsolutePosition) / size
     drag.move(math.clamp(rel.X, 0, 1), math.clamp(rel.Y, 0, 1))
+end
+
+-- Called by widgets the pointer is over, with the point in the widget's own
+-- (GUI) space. MouseMoved hands out coordinates relative to the widget, so
+-- pairing them with the raw pointer position measures the exact offset
+-- between the two spaces for this client build - and re-learns it if a
+-- build ever flips it again (a stale pair still measures the same constant).
+local function feedPointerSample(guiPoint)
+    if drag then
+        if lastPointer then
+            drag.offset = lastPointer - guiPoint
+            dragMove(lastPointer)
+        end
+    else
+        pendingSample = guiPoint
+        pendingWith = lastPointer
+    end
 end
 
 local function endDrag()
@@ -487,8 +498,13 @@ local function beginDrag(input, gui, move, finish)
         warn("[UILib] UILib.attachInput() hasn't been called - drags won't follow the pointer")
     end
     endDrag()
-    drag = { gui = gui, move = move, finish = finish }
-    dragMove(input.Position)
+    -- A hover sample calibrates the very first click too.
+    local offset = Vector2.zero
+    if pendingSample and pendingWith then
+        offset = pendingWith - pendingSample
+    end
+    drag = { gui = gui, move = move, finish = finish, offset = offset }
+    dragMove(Vector2.new(input.Position.X, input.Position.Y))
 end
 
 -- Connects the UserInputService listeners the widgets rely on (drags,
@@ -502,8 +518,9 @@ function UILib.attachInput()
     local conns = {
         UserInputService.InputChanged:Connect(function(input)
             local t = input.UserInputType
-            if drag and (t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch) then
-                dragMove(input.Position)
+            if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
+                lastPointer = Vector2.new(input.Position.X, input.Position.Y)
+                if drag then dragMove(lastPointer) end
             end
         end),
         UserInputService.InputEnded:Connect(function(input)
@@ -972,6 +989,17 @@ local function makeColorPicker(parent, label, cfg, prefix, onChange)
 
     local h, s, v = 0, 0, 1
     local expanded, picking = false, false
+
+    -- Feed the drag the engine's own coordinates whenever the pointer is over
+    -- a plot area. This is what keeps the selection under the cursor even on
+    -- client builds where raw pointer positions and GUI space disagree.
+    local function sample(spot)
+        return function(mx, my)
+            feedPointerSample(spot.AbsolutePosition + Vector2.new(mx, my))
+        end
+    end
+    svHit.MouseMoved:Connect(sample(svHit))
+    hueHit.MouseMoved:Connect(sample(hueHit))
 
     local function currentColor()
         return Color3.fromRGB(cfg[fields[1]] or 255, cfg[fields[2]] or 255, cfg[fields[3]] or 255)
