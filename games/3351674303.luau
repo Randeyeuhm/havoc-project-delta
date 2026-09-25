@@ -37,7 +37,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v26"
+local SCRIPT_VERSION = "de-v27"
 
 local Connections = {}
 local function track(conn)
@@ -1584,6 +1584,64 @@ local function runRaceRoutine()
     end)
 end
 
+-- PAYOUT TABLE PRINTER: the live payout config (RacePayouts, ~22KB) is
+-- fetched at runtime and cached client-side - read it there and print every
+-- track's exact numbers: per-place cash + the per-racer bonus, for the
+-- normal AND matchmaking tables, plus the current track's live minimum time.
+local function printPayoutTable()
+    if UILib and UILib.restoreIdentity then pcall(UILib.restoreIdentity) end
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Races", "RacePayoutsRemoteConfig" })
+            if not node then error("RacePayoutsRemoteConfig not found") end
+            local conf = require(node)
+            local cache = conf.GetConfigAsync()
+            local payouts = (cache and cache.Payouts) or {}
+            local globals = (cache and cache.GlobalPayouts) or {}
+            local function fmtRecord(r)
+                if not r then return "none" end
+                local parts = {}
+                for i = 1, 8 do
+                    local v = r[tostring(i)]
+                    if v ~= nil then table.insert(parts, ("%d=$%s"):format(i, tostring(v))) end
+                end
+                local m = r.Multiplier
+                if type(m) == "number" then
+                    table.insert(parts, ("per-racer bonus=%s%%"):format(tostring(math.round(m * 1000) / 10)))
+                else
+                    table.insert(parts, "per-racer bonus=?")
+                end
+                return table.concat(parts, " ")
+            end
+            print("===== [driving-empire] LIVE RACE PAYOUTS (normal || matchmaking) =====")
+            local names = {}
+            for nm in pairs(payouts) do table.insert(names, nm) end
+            if #names == 0 then
+                for nm in pairs(globals) do table.insert(names, nm) end
+            end
+            table.sort(names)
+            for _, nm in ipairs(names) do
+                print(("[%s] normal: %s  ||  matchmaking: %s"):format(nm, fmtRecord(payouts[nm]), fmtRecord(globals[nm])))
+            end
+            local trackModel = findRaceTrackModel()
+            local trackName = trackModel and select(3, raceTrackInfo(trackModel)) or nil
+            if trackName and RaceUtil then
+                local okInfo, info = pcall(RaceUtil.getTrackInfo, trackName)
+                if okInfo and info then
+                    print(("[current] %s MinTime=%ss TimeLimit=%ss MaxLaps=%s"):format(
+                        trackName, tostring(info.MinTimeSeconds), tostring(info.TimeLimitSeconds), tostring(info.MaxLaps)))
+                end
+            end
+            print("===== end payout table =====")
+        end)
+        if ok then
+            notify("Payout table printed to the console")
+        else
+            notify("Payout print failed: " .. tostring(err))
+        end
+    end)
+end
+
 -- ============================================================
 -- INPUT
 -- ============================================================
@@ -1867,6 +1925,11 @@ local function buildMenu()
     local p7 = pages[7]
     section(p7, "Race assist")
     button(p7, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
+    section(p7, "Payout info")
+    button(p7, "Print payout table (console)", function() printPayoutTable() end)
+    note(p7, "Prints the live payout numbers to the executor console: every " ..
+        "track's 1st-8th place cash + per-racer bonus, for the normal AND " ..
+        "matchmaking tables, pulled straight from the game's own config.")
     section(p7, "Timing")
     slider(p7, "Hop delay (s)",
         function() return Config.Race.HopDelay end,
