@@ -35,7 +35,8 @@ Built against the game's decompiled source — vehicle physics run client-side:
 
 - **Vehicle** — speed multiplier and acceleration multiplier (scale the driven car's engine + torque in the client physics), infinite nitro, ignore speed caps
 - **Teleports** — Race Hub, main dealership, aviation + boat garages, drag strip, bank, police station, drawbridge
-- **HUD** — live speedometer (MPH, gear, RPM) straight from the car's chassis controller
+- **HUD** — live speedometer (MPH, gear, RPM) straight from the car's chassis controller, plus your cash
+- **Money** — cash readout on the HUD, auto-collect for NASCAR World cash drops
 - **Visuals** — player ESP with the full customizer, fullbright
 - **Misc** — anti-AFK, reset character, rejoin server
 

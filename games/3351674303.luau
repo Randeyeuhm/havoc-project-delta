@@ -34,10 +34,11 @@ local Lighting         = game:GetService("Lighting")
 local HttpService      = game:GetService("HttpService")
 local VirtualUser      = game:GetService("VirtualUser")
 local TeleportService  = game:GetService("TeleportService")
+local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v1"
+local SCRIPT_VERSION = "de-v2"
 
 local Connections = {}
 local function track(conn)
@@ -53,6 +54,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, InfNitro = false, NoSpeedCap = false },
     HUD      = { Enabled = true, SpeedSize = 18, InfoSize = 13, XOffset = 14, YOffset = 40 },
+    Money    = { ShowHud = true, AutoDrops = false },
     -- ESP gets filled out by ESPUI.fill (the full espui schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -395,7 +397,7 @@ end)
 -- ============================================================
 -- FEATURES: SPEEDOMETER HUD
 -- ============================================================
-local hud = { ready = false, broken = false, speed = nil, info = nil }
+local hud = { ready = false, broken = false, speed = nil, info = nil, cash = nil }
 
 local function ensureHud()
     if hud.ready or hud.broken then return hud.ready end
@@ -414,44 +416,71 @@ local function ensureHud()
         end
         hud.speed = mkText(Config.HUD.SpeedSize, Color3.fromRGB(120, 220, 255))
         hud.info = mkText(Config.HUD.InfoSize, Color3.fromRGB(210, 210, 220))
+        hud.cash = mkText(Config.HUD.InfoSize + 1, Color3.fromRGB(120, 230, 140))
         hud.ready = true
     end)
     if not ok then hud.broken = true end
     return hud.ready
 end
 
+local function getCash()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    local cash = ls and ls:FindFirstChild("Cash")
+    return cash and cash.Value or nil
+end
+
+local function formatCash(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    local rev = s:reverse():gsub("(%d%d%d)", "%1,")
+    rev = rev:reverse()
+    if rev:sub(1, 1) == "," then rev = rev:sub(2) end
+    return "$" .. rev
+end
+
 local function updateHud(chassis)
     if not ensureHud() then return end
-    if not Config.HUD.Enabled or not chassis then
-        hud.speed.Visible = false
-        hud.info.Visible = false
-        return
-    end
     local cam = workspace.CurrentCamera
     if not cam then return end
     local vp = cam.ViewportSize
 
-    local speedText = ("%d MPH"):format(math.floor((chassis.SpeedMPH or 0) + 0.5))
-    local infoText = ("Gear %d  |  %d RPM"):format(chassis.Gear or 0, math.floor((chassis.RPM or 0) + 0.5))
+    local lineY = Config.HUD.YOffset
+    local showSpeed = Config.HUD.Enabled and chassis ~= nil
+    if showSpeed then
+        local speedText = ("%d MPH"):format(math.floor((chassis.SpeedMPH or 0) + 0.5))
+        local infoText = ("Gear %d  |  %d RPM"):format(chassis.Gear or 0, math.floor((chassis.RPM or 0) + 0.5))
 
-    hud.speed.Text = speedText
-    hud.speed.Size = Config.HUD.SpeedSize
-    hud.info.Text = infoText
-    hud.info.Size = Config.HUD.InfoSize
+        hud.speed.Text = speedText
+        hud.speed.Size = Config.HUD.SpeedSize
+        hud.info.Text = infoText
+        hud.info.Size = Config.HUD.InfoSize
 
-    local w1 = 0
-    pcall(function() w1 = hud.speed.TextBounds.X end)
-    if w1 <= 0 then w1 = #speedText * Config.HUD.SpeedSize * 0.62 end
-    hud.speed.Position = Vector2.new(vp.X - Config.HUD.XOffset - w1, Config.HUD.YOffset)
+        local w1 = 0
+        pcall(function() w1 = hud.speed.TextBounds.X end)
+        if w1 <= 0 then w1 = #speedText * Config.HUD.SpeedSize * 0.62 end
+        hud.speed.Position = Vector2.new(vp.X - Config.HUD.XOffset - w1, lineY)
 
-    local w2 = 0
-    pcall(function() w2 = hud.info.TextBounds.X end)
-    if w2 <= 0 then w2 = #infoText * Config.HUD.InfoSize * 0.62 end
-    hud.info.Position = Vector2.new(vp.X - Config.HUD.XOffset - w2,
-        Config.HUD.YOffset + Config.HUD.SpeedSize + 4)
+        local w2 = 0
+        pcall(function() w2 = hud.info.TextBounds.X end)
+        if w2 <= 0 then w2 = #infoText * Config.HUD.InfoSize * 0.62 end
+        hud.info.Position = Vector2.new(vp.X - Config.HUD.XOffset - w2,
+            lineY + Config.HUD.SpeedSize + 4)
+        lineY = lineY + Config.HUD.SpeedSize + 4 + Config.HUD.InfoSize + 6
+    end
+    hud.speed.Visible = showSpeed
+    hud.info.Visible = showSpeed
 
-    hud.speed.Visible = true
-    hud.info.Visible = true
+    local cashValue = getCash()
+    local showCash = Config.Money.ShowHud and cashValue ~= nil
+    if showCash then
+        local cashText = formatCash(cashValue)
+        hud.cash.Text = cashText
+        hud.cash.Size = Config.HUD.InfoSize + 1
+        local w3 = 0
+        pcall(function() w3 = hud.cash.TextBounds.X end)
+        if w3 <= 0 then w3 = #cashText * (Config.HUD.InfoSize + 1) * 0.62 end
+        hud.cash.Position = Vector2.new(vp.X - Config.HUD.XOffset - w3, lineY)
+    end
+    hud.cash.Visible = showCash
 end
 
 -- ============================================================
@@ -657,6 +686,56 @@ local function teleportTo(partName, label)
 end
 
 -- ============================================================
+-- FEATURES: MONEY  (cash display + NASCAR World cash drops)
+-- ============================================================
+-- Cash is read straight off leaderstats. Cash drops are CollectionService
+-- models tagged "CashDrop" whose name is the drop index; the game's own
+-- client fires CollectCashDrop when you touch one, so we fire the same
+-- remote for drops we haven't tried this session. The server still decides
+-- whether to award them (it may want you nearby - then drive close).
+local RemotesModule
+local function getRemotes()
+    if RemotesModule then return RemotesModule end
+    local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Remotes" })
+    if node then
+        local ok, res = pcall(require, node)
+        if ok and type(res) == "table" then RemotesModule = res end
+    end
+    return RemotesModule
+end
+
+local firedDrops = {}
+
+local function collectCashDrops(force)
+    if not force and not Config.Money.AutoDrops then return 0 end
+    local remotes = getRemotes()
+    if not remotes then return 0 end
+    local fired = 0
+    for _, model in ipairs(CollectionService:GetTagged("CashDrop")) do
+        local num = tonumber(model.Name)
+        if num and not firedDrops[num] then
+            firedDrops[num] = true
+            fired = fired + 1
+            pcall(function() remotes.fireServer("CollectCashDrop", num) end)
+        end
+    end
+    return fired
+end
+
+track(CollectionService:GetInstanceAddedSignal("CashDrop"):Connect(function()
+    if Config.Money.AutoDrops then
+        task.defer(function() collectCashDrops(false) end)
+    end
+end))
+
+task.spawn(function()
+    while true do
+        task.wait(3)
+        pcall(collectCashDrops, false)
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -682,13 +761,13 @@ local function buildMenu()
         subtitle = "PlaceId " .. tostring(game.PlaceId),
         size = UDim2.new(0, 560, 0, 380),
         position = UDim2.new(0, 30, 0, 40),
-        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Misc" },
+        tabs = { "Vehicle", "Teleports", "HUD", "Visuals", "Money", "Misc" },
         onClose = function()
             screenGui.Enabled = false
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
 
     local builtCount = 0
     local function guard(what, fn)
@@ -805,13 +884,35 @@ local function buildMenu()
         function() return Config.Misc.Fullbright end,
         function(v) Config.Misc.Fullbright = v; setFullbright(v) end)
 
-    -- ---------------- Misc ----------------
+    -- ---------------- Money ----------------
     local p5 = pages[5]
-    section(p5, "Utility")
-    toggle(p5, "Anti-AFK",
+    section(p5, "Cash")
+    toggle(p5, "Show cash on HUD",
+        function() return Config.Money.ShowHud end,
+        function(v) Config.Money.ShowHud = v end)
+    note(p5, "Reads leaderstats.Cash and updates live.")
+    section(p5, "Cash drops (NASCAR World)")
+    toggle(p5, "Auto collect cash drops",
+        function() return Config.Money.AutoDrops end,
+        function(v)
+            Config.Money.AutoDrops = v
+            if v then collectCashDrops(true) end
+        end)
+    button(p5, "Collect now", function()
+        local n = collectCashDrops(true)
+        notify(n > 0 and ("Requested %d cash drop(s)"):format(n) or "No new cash drops found")
+    end)
+    note(p5, "Drops only spawn during the NASCAR World event (tagged 'CashDrop'). " ..
+        "We fire the same remote the game fires on touch - if the server wants " ..
+        "you nearby it may ignore distant calls.")
+
+    -- ---------------- Misc ----------------
+    local p6 = pages[6]
+    section(p6, "Utility")
+    toggle(p6, "Anti-AFK",
         function() return Config.Misc.AntiAFK end,
         function(v) Config.Misc.AntiAFK = v end)
-    button(p5, "Reset Character", function()
+    button(p6, "Reset Character", function()
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if hum then
@@ -821,16 +922,16 @@ local function buildMenu()
             notify("No character to reset")
         end
     end, { confirm = true, confirmText = "Click again to reset" })
-    button(p5, "Rejoin Server", function()
+    button(p6, "Rejoin Server", function()
         notify("Rejoining...")
         pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
     end, { confirm = true, confirmText = "Click again to rejoin" })
-    section(p5, "Menu")
-    bindrow(p5, hotkeyById.ToggleMenu, {
+    section(p6, "Menu")
+    bindrow(p6, hotkeyById.ToggleMenu, {
         locked = true,
         lockNote = "RightShift is the menu key and stays bound",
     })
-    note(p5, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
+    note(p6, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
 
     win.setTab(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
