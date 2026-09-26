@@ -41,6 +41,7 @@ local ESP_FILE       = "esp.luau"
 local UNIVERSES = {
     [2862098693] = 7336302630,  -- Havoc Project Delta (all of its places)
     [1202096104] = 3351674303,  -- Driving Empire (all of its places)
+    [1494262959] = 8343259840,  -- Criminality (all of its places)
 }
 
 local RAW_BASE = ("https://raw.githubusercontent.com/%s/%s/%s/"):format(USER, REPO, BRANCH)
