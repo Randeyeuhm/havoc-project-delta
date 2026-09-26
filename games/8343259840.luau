@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v16"
+local SCRIPT_VERSION = "crim-v17"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -827,6 +827,75 @@ wrapSpringInstance = function(obj)
     end
     return true
 end
+
+-- ============================================================
+-- LIVE RECOIL KICK INTERCEPTOR (the RCL event swap)
+-- ============================================================
+-- Decoded from the dump: the gun module builds the recoil kick from the
+-- config value it copied at load and fires it as
+--     Events2.RCL:Fire(Vector3.new(rand(-R, R) / 4, 0, rand(R / 2, R)))
+-- Events2 is the folder ReplicatedStorage.Events2 and the fire site looks
+-- up the "RCL" child BY NAME on every shot. So: rename the original event,
+-- drop in our own "RCL", scale the vector by the slider and forward it to
+-- the original - the game's camera listener (wherever it lives) receives
+-- the scaled kick. Live percentage, any gun, no drop/pick, no hooks, no
+-- remote traffic (BindableEvent is client-local).
+local rclHook = { original = nil, mine = nil, active = false }
+
+local function rclFactor()
+    return (tonumber(Config.Weapons.RecoilPct) or 100) / 100
+end
+
+local function resetRCLHook()
+    rclHook.original = nil
+    rclHook.mine = nil
+    rclHook.active = false
+    local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
+    if not e2 then return end
+    local backup = e2:FindFirstChild("RCLBackup")
+    if backup then
+        -- a previous run left a swap behind: drop our old event, restore name
+        local stale = e2:FindFirstChild("RCL")
+        if stale and stale ~= backup then
+            pcall(function() stale:Destroy() end)
+        end
+        backup.Name = "RCL"
+    end
+end
+
+local function installRCLHook()
+    if rclHook.active then return true end
+    local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
+    local orig = e2 and e2:FindFirstChild("RCL")
+    if not orig or not orig:IsA("BindableEvent") or not e2 then
+        return false
+    end
+    pcall(function()
+        orig.Name = "RCLBackup"
+        local mine = Instance.new("BindableEvent")
+        mine.Name = "RCL"
+        mine.Parent = e2
+        mine.Event:Connect(function(v, ...)
+            local out = v
+            if typeof(v) == "Vector3" then
+                local f = rclFactor()
+                if f ~= 1 then out = v * f end
+            end
+            local o = rclHook.original
+            if o and o.Parent then
+                o:Fire(out, ...)
+            end
+        end)
+        rclHook.original = orig
+        rclHook.mine = mine
+        rclHook.active = true
+        print("[criminality] rcl hook: installed (live recoil kick scaling)")
+    end)
+    return rclHook.active
+end
+
+pcall(resetRCLHook)
+pcall(installRCLHook)
 
 -- ============================================================
 -- SNAPSHOT PATCHING (slider changes without re-picking the gun)
@@ -1513,6 +1582,7 @@ local function findRecoilCopy(announce)
         return 0
     end
     recoilCopyScanning = true
+    recoilCopy.lastScan = tick()
     pcall(function()
         local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
         local cfg = equippedToolConfig()
@@ -1606,7 +1676,7 @@ local function findRecoilCopy(announce)
                 end)
             end
         end
-        recoilCopy.lastScan = os.clock()
+        recoilCopy.lastScan = tick()
         if announce or found > 0 then
             print(("[criminality] recoil copy scan: fns=%d found=%d (pct %d, orig %s)"):format(
                 fns, found, math.floor(pctNow + 0.5), orig and string.format("%.4f", orig) or "?"))
@@ -1648,11 +1718,7 @@ local function rescaleAndPatch()
     pcall(applyCandidates)
     local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
     pcall(function() applyRecoilCopy(pctNow) end)
-    -- find the loaded gun's Recoil copy cell (one bounded scan, throttled;
-    -- always try the first time, then only while the slider is off 100%)
-    if (#recoilCopy.cells == 0 or pctNow ~= 100) and os.clock() - recoilCopy.lastScan > 20 then
-        task.delay(0.8, function() pcall(findRecoilCopy, "equip") end)
-    end
+    pcall(installRCLHook)   -- retry the RCL swap if it failed at load
     -- full recoil hunt once per gun when the slider is off 100% (brief
     -- one-time hitch, then every slider move is instant from the registry)
     if pctNow ~= 100 then
@@ -2117,16 +2183,13 @@ local function buildMenu()
                 local guns = applyGunRecoil()
                 local anchored = applyAnchoredPatches()
                 local cands = applyCandidates()
-                local copyN = applyRecoilCopy(v)
-                print(("[criminality] recoil %d%% -> copy %d, configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
-                    math.floor(v + 0.5), copyN, guns, applied, anchored, cands,
+                applyRecoilCopy(v)
+                print(("[criminality] recoil %d%% -> live %s, configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
+                    math.floor(v + 0.5), rclHook.active and "on" or "off", guns, applied, anchored, cands,
                     blocked > 0 and (" (" .. blocked .. " locked)") or ""))
                 if math.floor(v + 0.5) ~= 100
                     and #recoilCandidates.numbers.list == 0 and #recoilCandidates.fields.list == 0 then
                     task.delay(0.7, function() pcall(runHunt, "slider") end)
-                end
-                if copyN == 0 and os.clock() - recoilCopy.lastScan > 20 then
-                    task.delay(0.5, function() pcall(findRecoilCopy, "slider") end)
                 end
             end)
             if Config.Weapons.AutoApply then
@@ -2523,13 +2586,21 @@ local function buildMenu()
             if n > 0 then
                 notify(("Recoil copy: %d live cell(s) - the slider now changes recoil instantly"):format(n))
             else
-                notify("Recoil copy: none found - hold the gun (picked at 100%) and try again")
+                notify("Recoil copy: none found (this executor hides game closures) - the RCL hook is the live path")
             end
         end)
     end)
-    note(p3, "'Find recoil copy' once (gun held, picked at 100%) = the slider then changes recoil INSTANTLY while " ..
-        "you shoot (it patches the copy the gun made at load). 'Apply %' cycles the gun like a manual drop/pick " ..
-        "and 'Auto apply' does that ~1s after you let go of the slider, as backup.")
+    button(p3, "Reinstall live hook (RCL)", function()
+        task.spawn(function()
+            resetRCLHook()
+            local ok = installRCLHook()
+            notify(ok and "Live recoil hook reinstalled - slider is instant"
+                or "Live recoil: RCL event not found (are you in a game session?)")
+        end)
+    end)
+    note(p3, "Live recoil installs at load (watch for 'rcl hook: installed') - the slider then scales the kick " ..
+        "instantly while you shoot, on any gun, no drop/pick. 'Apply %' cycles the gun manually and 'Auto apply' " ..
+        "does that ~1s after the slider settles, as backup. 'Find recoil copy' is a diagnostic scan.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
