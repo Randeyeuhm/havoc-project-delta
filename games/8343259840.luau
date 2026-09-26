@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v3"
+local SCRIPT_VERSION = "crim-v4"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -614,6 +614,117 @@ local function applyRecoil()
     return applied, blocked
 end
 
+-- ============================================================
+-- PER-GUN RECOIL (the real lever - probe-confirmed)
+-- ============================================================
+-- Probe output from the live game: every gun's own Config module carries
+-- the actual recoil numbers - G-17 showed Recoil=21, RecoilSpeed=8.5,
+-- RecoilDamper=0.9999, RecoilRedution=0, AngleX/Y/Z ranges and
+-- CameraRecoilingEnabled=true - while the GLOBAL CamShakeConfig.Recoil is
+-- 0 (the shared hit-shake is disabled in this build). So the percentage is
+-- applied to each gun's Config.Recoil (the per-shot multiplier; the angle
+-- ranges feed through it the same way the dumped damage-shake does:
+-- kick = rad(Recoil * RAND(angleMin, angleMax) * ...)).
+-- Writes are unprotected (CamShake write test came back OK) and the value
+-- is re-applied on every equip + slider change, so cached-at-equip
+-- consumers pick it up on the next equip too.
+local recoilGun = { tables = {} }
+
+local function looksLikeGunConfig(t)
+    return type(t) == "table"
+        and type(t.Recoil) == "number" and type(t.RecoilSpeed) == "number"
+        and type(t.RecoilDamper) == "number" and type(t.CrossExpansion) == "number"
+        and type(t.FireRate) == "number" and type(t.Damage) == "number"
+end
+
+local function trackGunCfg(cfg)
+    if looksLikeGunConfig(cfg) and not recoilGun.tables[cfg] then
+        recoilGun.tables[cfg] = { Recoil = cfg.Recoil }
+    end
+end
+
+local function equippedToolConfig()
+    local ok, cfg = pcall(function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local mod = tool and tool:FindFirstChild("Config")
+        if not mod then return nil end
+        return require(mod)
+    end)
+    if ok and type(cfg) == "table" then return cfg end
+    return nil
+end
+
+local function applyGunRecoil()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    local cfg = equippedToolConfig()
+    if cfg then trackGunCfg(cfg) end
+    local applied = 0
+    for t, rec in pairs(recoilGun.tables) do
+        local want = rec.Recoil * (pct / 100)
+        local ok = pcall(function() t.Recoil = want end)
+        if ok and t.Recoil == want then applied += 1 end
+    end
+    return applied
+end
+
+-- One-time fallback scan (button-triggered, NEVER automatic): if the
+-- executor's require() hands out a separate copy, this finds the config
+-- tables the weapon scripts actually hold via their upvalues.
+local function deepScanGuns()
+    if type(getgc) ~= "function" then return 0 end
+    local found = 0
+    local function consider(t)
+        if looksLikeGunConfig(t) and not recoilGun.tables[t] then
+            recoilGun.tables[t] = { Recoil = t.Recoil }
+            found += 1
+        end
+    end
+    pcall(function()
+        for _, obj in pairs(getgc(true)) do
+            if type(obj) == "table" then
+                consider(obj)
+            elseif type(obj) == "function" then
+                pcall(function()
+                    local i = 1
+                    while true do
+                        local name, val = debug.getupvalue(obj, i)
+                        if not name then break end
+                        consider(val)
+                        i += 1
+                    end
+                end)
+            end
+        end
+    end)
+    return found
+end
+
+-- Scale the current gun + every gun equipped later (tools move from the
+-- backpack into the character when equipped).
+local function watchToolsForRecoil(char)
+    if not char then return end
+    task.delay(0.25, function() pcall(applyGunRecoil) end)
+    char.ChildAdded:Connect(function(child)
+        if not child:IsA("Tool") then return end
+        task.delay(0.25, function() pcall(applyGunRecoil) end)
+        pcall(function()
+            local values = child:FindFirstChild("Values")
+            local eq = values and values:FindFirstChild("Equipped")
+            if eq then
+                eq.Changed:Connect(function()
+                    if eq.Value then
+                        task.delay(0.3, function() pcall(applyGunRecoil) end)
+                    end
+                end)
+            end
+        end)
+    end)
+end
+
+if LocalPlayer.Character then watchToolsForRecoil(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(watchToolsForRecoil)
+
 -- Probe: run it with a gun equipped and copy the console output back.
 -- It never fires remotes - it only reads what the tool carries.
 local function recoilProbe()
@@ -928,8 +1039,9 @@ local function buildMenu()
             Config.Weapons.RecoilPct = v
             task.spawn(function()
                 local applied, blocked = applyRecoil()
-                print(("[criminality] recoil %d%% -> scaled %d config copy(ies)%s"):format(
-                    math.floor(v + 0.5), applied, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
+                local guns = applyGunRecoil()
+                print(("[criminality] recoil %d%% -> gun configs %d, CamShake %d%s"):format(
+                    math.floor(v + 0.5), guns, applied, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
             end)
         end, 5, 0, 200)
     button(p3, "Probe recoil (console)", function()
@@ -943,9 +1055,20 @@ local function buildMenu()
             recoilProbe()
         end)
     end)
-    note(p3, "100% = the game's own recoil. The slider scales the camera-shake config (CamShakeConfig) live - " ..
-        "0% = no shake from hits/flashbangs, 200% = double. If SHOOTING recoil is unchanged, equip a gun and hit " ..
-        "Probe recoil, then send the console output - the gun's own recoil numbers get scaled next.")
+    button(p3, "Deep apply (one-time scan)", function()
+        task.spawn(function()
+            local found = deepScanGuns()
+            local guns = applyGunRecoil()
+            local shake = applyRecoil()
+            notify(("Deep scan: +%d gun config(s), %d scaled, CamShake %d - shoot to test"):format(found, guns, shake))
+            print(("[criminality] deep scan: +%d gun configs found, %d scaled total, CamShake %d (pct %d%%)"):format(
+                found, guns, shake, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+        end)
+    end)
+    note(p3, "100% = the game's own recoil. It scales each gun's own config number (Recoil=21 on the G-17 - the " ..
+        "per-gun multiplier the weapon client uses) plus the global CamShake config. Re-applies on every equip and " ..
+        "slider change. Values read at equip time need a re-equip to pick up a new %; if shooting still feels the " ..
+        "same, hit Deep apply once (one-time scan, may hitch a moment).")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
@@ -1004,10 +1127,11 @@ end)
 if Config.Misc.Fullbright then pcall(setFullbright, true) end
 task.spawn(function()
     local applied = applyRecoil()
+    local guns = applyGunRecoil()
     local pct = tonumber(Config.Weapons.RecoilPct) or 100
     if pct ~= 100 then
-        print(("[criminality] recoil %d%% active - %d config copy(ies) scaled"):format(
-            math.floor(pct + 0.5), applied))
+        print(("[criminality] recoil %d%% active - gun configs %d, CamShake %d"):format(
+            math.floor(pct + 0.5), guns, applied))
     end
 end)
 
