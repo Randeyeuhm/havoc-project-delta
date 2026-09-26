@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v70"
+local SCRIPT_VERSION = "de-v71"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2620,6 +2620,9 @@ local function atmBootstrapRun()
     end)
 end
 
+-- (the bank heist section below fills this in; the outlaw tick checks .busy)
+local bankFarm = nil
+
 -- ============================================================
 -- OUTLAW (CRIMINAL JOB) AUTO-FARM (Money tab)
 -- ============================================================
@@ -2639,10 +2642,10 @@ end
 local OUTLAW_ATMS_PER_RUN = 5   -- wanted stars needed for the drop-off
 local OUTLAW_BUST_WAIT = 3.5    -- server floor is (bust time - 2.5s); 3.5 clears both pass states
 local OUTLAW_REACH = 9          -- how close to land before interacting
-local OUTLAW_CASHIN_MARGIN = 30 -- cash in when this little wanted time is left
+local OUTLAW_CASHIN_MARGIN = 20 -- cash in the bounty when the escape timer is this close to expiring
 local OUTLAW_HOLD_MAX = 600     -- hold at most this long since wanted began
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0 }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0, fiveStarNotified = nil, evadeAt = 0, evadeToastAt = 0 }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2743,14 +2746,9 @@ local function outlawTick()
         end
         return
     end
-    if Config.Bank.Enabled == true then
-        outlawFarm.state = nil
-        if now - outlawFarm.clashAt > 120 then
-            outlawFarm.clashAt = now
-            notify("Outlaw farm paused - turn the bank farm off first")
-        end
-        return
-    end
+    -- while the bank heist run is acting (entering, robbing, cashing in for
+    -- the bank) it owns the character; the two farms run together otherwise
+    if bankFarm and bankFarm.busy then return end
     if now < outlawFarm.cooldownUntil then return end
 
     local char = LocalPlayer.Character
@@ -2811,22 +2809,41 @@ local function outlawTick()
 
     local pos = char:GetPivot().Position
 
-    -- 2. at 5 stars: cash the whole bounty in at a drop-off point
+    -- Anti-arrest: the moment a security officer's arrest circle appears on
+    -- us, hop away (to the next ATM when one is known) and carry on.
+    local arrestPct = tonumber(char:GetAttribute("ArrestCirclePercentage"))
+    if arrestPct and arrestPct > 0.01 then
+        outlawFarm.state, outlawFarm.target = nil, nil
+        if now - outlawFarm.evadeAt > 1.2 then
+            outlawFarm.evadeAt = now
+            local t2, tp2 = outlawPickATM(pos)
+            local dest = tp2 or (pos + Vector3.new(math.random(-700, 700), 40, math.random(-700, 700)))
+            pcall(function() char:PivotTo(CFrame.new(dest + Vector3.new(0, 4, 0))) end)
+            if now - outlawFarm.evadeToastAt > 30 then
+                outlawFarm.evadeToastAt = now
+                notify("Outlaw farm: arrest attempt - jumped away")
+            end
+        end
+        return
+    end
+
+    -- 2. at 5 stars: KEEP ROBBING - the run only heads to the drop-off to
+    -- secure the bounty when the escape timer is nearly out, or after a
+    -- long unbanked stretch. (The bank farm does its own cash-in first
+    -- when the heist opens - it pauses us while it works.)
     if crimes >= OUTLAW_ATMS_PER_RUN then
-        -- Cops can reach a sitting outlaw, and the bounty clocks ~$100/s
-        -- while wanted: run the escape timer down in the open and cash in
-        -- near its end rather than instantly teleporting the run away.
         local expire = tonumber(char:GetAttribute("CriminalExpireEpoch"))
         local remaining = expire and (expire - workspace:GetServerTimeNow()) or nil
         if not outlawFarm.wantedSince then outlawFarm.wantedSince = now end
-        if remaining and remaining > OUTLAW_CASHIN_MARGIN and (now - outlawFarm.wantedSince) < OUTLAW_HOLD_MAX then
-            if not outlawFarm.holdNotified then
-                outlawFarm.holdNotified = true
-                notify(("Outlaw farm: holding out - %.0fs of wanted left (cash-in near the end)"):format(remaining))
+        local keepFarming = remaining and remaining > OUTLAW_CASHIN_MARGIN and (now - outlawFarm.wantedSince) < OUTLAW_HOLD_MAX
+        if keepFarming then
+            if not outlawFarm.fiveStarNotified then
+                outlawFarm.fiveStarNotified = true
+                notify("Outlaw farm: 5 stars - still robbing (cash-in near the timer)")
             end
-            return
-        end
-        outlawFarm.holdNotified = nil
+        else
+            outlawFarm.fiveStarNotified = nil
+            outlawFarm.holdNotified = nil
         local point, pp = outlawPickDropOff(pos)
         if not point then
             -- none streamed in: travel to a remembered drop-off spot and
@@ -2877,6 +2894,7 @@ local function outlawTick()
             end
         end
         return
+        end
     end
 
     -- 3. an in-flight bust? wait out the hold and complete it
@@ -2973,7 +2991,7 @@ end)
 -- auto-accepted.
 
 local BANK_HEIST_ID = "BankHeist"
-local bankFarm = { state = nil, stateAt = 0, tpAt = 0, clashAt = 0, notReadyAt = 0, wantedAt = 0, seekWarnAt = 0, promptWarnAt = 0, seatWarnAt = 0, cooldownUntil = 0, codeSentAt = 0, codeNotified = false, lootAt = 0, lootIdle = 0, lootGrabbed = 0, modelScanAt = 0, modelCached = nil, hooked = false }
+bankFarm = { state = nil, stateAt = 0, tpAt = 0, notReadyAt = 0, wantedAt = 0, seekWarnAt = 0, promptWarnAt = 0, seatWarnAt = 0, cooldownUntil = 0, codeSentAt = 0, codeNotified = false, lootAt = 0, lootIdle = 0, lootGrabbed = 0, modelScanAt = 0, modelCached = nil, hooked = false, busy = false, cashAt = 0, cashNotifyAt = 0, probeAt = 0, evadeAt = 0, evadeToastAt = 0 }
 
 local function bankHeistModel(now)
     local m = bankFarm.modelCached
@@ -3095,15 +3113,8 @@ local function bankTick()
     end
     local now = os.clock()
     if raceBusy then return end
-    if Config.Outlaw.Enabled == true then
-        bankFarm.state = nil
-        if now - bankFarm.clashAt > 120 then
-            bankFarm.clashAt = now
-            notify("Bank farm paused - turn the outlaw farm off first")
-        end
-        return
-    end
     if now < bankFarm.cooldownUntil then return end
+    bankFarm.busy = false
 
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3130,6 +3141,7 @@ local function bankTick()
     local model = bankHeistModel(now)
 
     if bankFarm.state == "exiting" then
+        bankFarm.busy = true
         if not inHeist then
             notify(("Bank farm: out - grabbed %d loot. Escape the security!"):format(bankFarm.lootGrabbed or 0))
             bankFarm.state = nil
@@ -3142,6 +3154,7 @@ local function bankTick()
     end
 
     if bankFarm.state == "entering" then
+        bankFarm.busy = true
         if inHeist then
             bankFarm.state = "inside"
             bankFarm.stateAt = now
@@ -3155,6 +3168,22 @@ local function bankTick()
     end
 
     if not inHeist then
+        -- Anti-arrest hop while outside, same as the outlaw farm.
+        local arrestPct = tonumber(char:GetAttribute("ArrestCirclePercentage"))
+        if arrestPct and arrestPct > 0.01 then
+            if now - bankFarm.evadeAt > 1.2 then
+                bankFarm.evadeAt = now
+                local pos2 = char:GetPivot().Position
+                local t2, tp2 = outlawPickATM(pos2)
+                local dest = tp2 or (pos2 + Vector3.new(math.random(-700, 700), 40, math.random(-700, 700)))
+                pcall(function() char:PivotTo(CFrame.new(dest + Vector3.new(0, 4, 0))) end)
+                if now - bankFarm.evadeToastAt > 30 then
+                    bankFarm.evadeToastAt = now
+                    notify("Bank farm: arrest attempt - jumped away")
+                end
+            end
+            return
+        end
         if not model then
             local anchor = bankAnchorPos()
             if anchor and (char:GetPivot().Position - anchor).Magnitude > 40 then
@@ -3163,9 +3192,17 @@ local function bankTick()
                     pcall(function() char:PivotTo(CFrame.new(anchor + Vector3.new(0, 5, 0))) end)
                     atmSweepAsync(anchor)
                 end
-            elseif now - bankFarm.seekWarnAt > 90 then
-                bankFarm.seekWarnAt = now
-                notify("Bank farm: bank not streamed yet - sweeping for it")
+            else
+                -- no known bank position: probe the map so its area streams in
+                local probe = atmPickProbe(char:GetPivot().Position, now)
+                if probe and now - bankFarm.probeAt > 1.5 then
+                    bankFarm.probeAt = now
+                    atmSweepAsync(probe)
+                end
+                if now - bankFarm.seekWarnAt > 90 then
+                    bankFarm.seekWarnAt = now
+                    notify("Bank farm: looking for the bank (drive near it once or use the Bank teleport to index it)")
+                end
             end
             return
         end
@@ -3178,13 +3215,46 @@ local function bankTick()
         end
         local expire = tonumber(char:GetAttribute("CriminalExpireEpoch"))
         if expire and expire > workspace:GetServerTimeNow() then
+            -- wanted players can't enter: cash the bounty in first, then go
+            -- ("if bank open, cash in stars and tp to bank")
+            local crimes = tonumber(char:GetAttribute("CrimesCommitted")) or 0
+            if crimes >= 5 then
+                bankFarm.busy = true
+                local cpos = char:GetPivot().Position
+                local point, pp = outlawPickDropOff(cpos)
+                local dest = pp or outlawIndexDropOff(cpos)
+                if dest then
+                    if (cpos - dest).Magnitude > OUTLAW_REACH then
+                        if now - bankFarm.tpAt > 1 then
+                            bankFarm.tpAt = now
+                            pcall(function() char:PivotTo(CFrame.new(dest + Vector3.new(0, 4, 0))) end)
+                            atmSweepAsync(dest)
+                        end
+                    elseif point and now - bankFarm.cashAt > 2.5 then
+                        bankFarm.cashAt = now
+                        local okc, ok = pcall(function() return Remotes.invokeServer("AttemptCriminalJobComplete", point) end)
+                        if okc and ok then
+                            notify("Bank farm: bank is open - cashed the bounty in, heading over")
+                            bankFarm.cashAt = now + 6
+                            outlawFarm.cashGraceUntil = os.clock() + 15
+                            outlawFarm.wantedSince = nil
+                            outlawFarm.fiveStarNotified = nil
+                        end
+                    end
+                elseif now - bankFarm.cashNotifyAt > 90 then
+                    bankFarm.cashNotifyAt = now
+                    notify("Bank farm: bank open but no drop-off located yet - sweeping")
+                end
+                return
+            end
             if now - bankFarm.wantedAt > 60 then
                 bankFarm.wantedAt = now
-                notify("Bank farm: can't enter while wanted - waiting out the timer")
+                notify("Bank farm: bank open, but we're wanted under 5 stars - keep robbing to reach 5 first")
             end
             return
         end
         if char:GetAttribute("ArrestDebounce") ~= nil then return end
+        bankFarm.busy = true
 
         local prompt = bankEntrancePrompt()
         if not prompt then
@@ -3231,6 +3301,7 @@ local function bankTick()
 
     -- inside the heist --------------------------------------------------
     bankFarm.state = "inside"
+    bankFarm.busy = true
     local codeAt = bankFarm.codeSentAt or 0
     if now - codeAt > 12 then
         local code = model and model:GetAttribute("Code")
@@ -3672,11 +3743,8 @@ local function buildMenu()
             bankFarm.codeNotified = false
             bankFarm.lootGrabbed = 0
             bankFarm.modelCached = nil
-            if v and Config.Outlaw.Enabled == true then
-                notify("Bank farm on - turn the outlaw farm off first")
-            else
-                notify(v and "Bank farm on - checking the heist timer" or "Bank farm off")
-            end
+            bankFarm.busy = false
+            notify(v and "Bank farm on - runs alongside the outlaw farm (cashes in + teleports when the bank opens)" or "Bank farm off")
         end)
 
     -- ---------------- Misc ----------------
