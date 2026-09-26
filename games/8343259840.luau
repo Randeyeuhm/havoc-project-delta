@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v7"
+local SCRIPT_VERSION = "crim-v8"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -848,6 +848,135 @@ local function applySnapshotPatches()
     return n
 end
 
+-- ============================================================
+-- ANCHORED PATCHING (finds the copies the name search misses)
+-- ============================================================
+-- Functions that touch the recoil fields name them in their string
+-- constants ("Recoil" / "RecoilRedution" appear as indexing constants).
+-- Any table those functions hold with a numeric Recoil field (state
+-- caches, weapon-service copies) is tracked like a config and scaled;
+-- number upvalues that match the gun's original Recoil are patched
+-- directly. The Deep apply button also runs this over the whole weapon
+-- service bundle (PlayerScripts E2CJMS/XIIX).
+local recoilNumbers = { list = {}, seen = {} }
+local ANCHOR_FIELDS = { Recoil = true, RecoilRedution = true }
+
+local function fnTouchesRecoil(fn)
+    local ok, consts = pcall(debug.getconstants, fn)
+    if not ok or type(consts) ~= "table" then return false end
+    for _, c in ipairs(consts) do
+        if type(c) == "string" and ANCHOR_FIELDS[c] then return true end
+    end
+    return false
+end
+
+local function scanAnchoredClosure(fn, seen, budget, baseOrig, out)
+    if type(fn) ~= "function" or seen[fn] or budget.count > budget.max then return end
+    seen[fn] = true
+    budget.count += 1
+    if fnTouchesRecoil(fn) then
+        out.anchors += 1
+        pcall(function()
+            local pct = tonumber(Config.Weapons.RecoilPct) or 100
+            local i = 1
+            while true do
+                local name, val = debug.getupvalue(fn, i)
+                if not name then break end
+                if type(val) == "table" then
+                    if type(val.Recoil) == "number" and not recoilGun.tables[val] then
+                        local orig = val.Recoil
+                        if baseOrig then
+                            local scaled = baseOrig * (pct / 100)
+                            if math.abs(orig - scaled) < 0.51 then orig = baseOrig end
+                        end
+                        recoilGun.tables[val] = { Recoil = orig }
+                        out.tables += 1
+                    end
+                elseif typeof(val) == "number" and baseOrig then
+                    local scaled = baseOrig * (pct / 100)
+                    if math.abs(val - baseOrig) < 0.51 or math.abs(val - scaled) < 0.51 then
+                        local key = tostring(fn) .. "#" .. tostring(i)
+                        if not recoilNumbers.seen[key] then
+                            recoilNumbers.seen[key] = true
+                            table.insert(recoilNumbers.list, { fn = fn, idx = i, base = baseOrig, name = tostring(name) })
+                            out.numbers += 1
+                        end
+                    end
+                end
+                i += 1
+            end
+        end)
+    end
+    pcall(function()
+        for _, proto in ipairs(debug.getprotos(fn)) do
+            scanAnchoredClosure(proto, seen, budget, baseOrig, out)
+        end
+    end)
+end
+
+local function anchoredBaseOrig(tool)
+    local base = nil
+    pcall(function()
+        local mod = tool and tool:FindFirstChild("Config")
+        if not mod then return end
+        local cfg = require(mod)
+        if type(cfg) == "table" and recoilGun.tables[cfg] then base = recoilGun.tables[cfg].Recoil end
+    end)
+    return base
+end
+
+local function scanAnchoredAll()
+    local out = { anchors = 0, tables = 0, numbers = 0 }
+    if type(getscriptclosure) ~= "function" then return out end
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return out end
+    local baseOrig = anchoredBaseOrig(tool)
+    local seen, budget = {}, { count = 0, max = 600 }
+    pcall(function()
+        for _, name in ipairs({ "Client", "PassClient" }) do
+            local scr = tool:FindFirstChild(name)
+            if scr and scr:IsA("LocalScript") then
+                local ok, closure = pcall(getscriptclosure, scr)
+                if ok and type(closure) == "function" then
+                    scanAnchoredClosure(closure, seen, budget, baseOrig, out)
+                end
+            end
+        end
+    end)
+    return out
+end
+
+local function scanAnchoredBundle()
+    local out = { anchors = 0, tables = 0, numbers = 0 }
+    if type(getscriptclosure) ~= "function" then return out end
+    pcall(function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        local baseOrig = anchoredBaseOrig(tool)
+        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+        local bundle = ps and ps:FindFirstChild("E2CJMS")
+        local x = bundle and bundle:FindFirstChild("XIIX")
+        if not x then return end
+        local ok, closure = pcall(getscriptclosure, x)
+        if ok and type(closure) == "function" then
+            local seen, budget = {}, { count = 0, max = 3000 }
+            scanAnchoredClosure(closure, seen, budget, baseOrig, out)
+        end
+    end)
+    return out
+end
+
+local function applyAnchoredPatches()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    local n = 0
+    for _, p in ipairs(recoilNumbers.list) do
+        local want = p.base * (pct / 100)
+        if pcall(debug.setupvalue, p.fn, p.idx, want) then n += 1 end
+    end
+    return n
+end
+
 -- Closure scan of the equipped gun's own script: the Client LocalScript
 -- holds ITS config table (and any snapshotted numbers) as upvalues. This
 -- finds them via getscriptclosure - the table found here is the exact one
@@ -962,6 +1091,8 @@ local function rescaleAndPatch()
     pcall(applyGunRecoil)
     pcall(function() closureScanEquipped() end)
     pcall(applySnapshotPatches)
+    pcall(function() scanAnchoredAll() end)
+    pcall(applyAnchoredPatches)
 end
 
 local function watchToolsForRecoil(char)
@@ -1357,8 +1488,13 @@ local function buildMenu()
                 local guns = applyGunRecoil()
                 pcall(function() closureScanEquipped() end)
                 local snaps = applySnapshotPatches()
-                print(("[criminality] recoil %d%% -> gun configs %d, CamShake %d, live snapshots %d%s"):format(
-                    math.floor(v + 0.5), guns, applied, snaps, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
+                local anchored = nil
+                pcall(function() anchored = scanAnchoredAll() end)
+                local nums = applyAnchoredPatches()
+                print(("[criminality] recoil %d%% -> configs %d, CamShake %d, snapshots %d, anchored +%d/%d%s"):format(
+                    math.floor(v + 0.5), guns, applied, snaps,
+                    anchored and anchored.tables or 0, nums,
+                    blocked > 0 and (" (" .. blocked .. " locked)") or ""))
             end)
         end, 5, 0, 200)
     button(p3, "Probe recoil (console)", function()
@@ -1378,57 +1514,33 @@ local function buildMenu()
             local guns = applyGunRecoil()
             local shake = applyRecoil()
             local snaps = applySnapshotPatches()
-            notify(("Deep scan: +%d gun config(s), +%d spring(s), %d snapshot(s) live - shoot to test"):format(cfgs, springs, snaps))
-            print(("[criminality] deep scan: +%d configs, +%d springs wrapped, %d guns tracked, CamShake %d, snapshots %d (pct %d%%)"):format(
-                cfgs, springs, guns, shake, snaps, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+            local anchored = nil
+            pcall(function() anchored = scanAnchoredAll() end)
+            local anchoredBundle = nil
+            pcall(function() anchoredBundle = scanAnchoredBundle() end)
+            local nums = applyAnchoredPatches()
+            notify(("Deep scan: +%d config(s), %d anchored, %d number(s) live - shoot to test"):format(
+                cfgs, (anchored and anchored.tables or 0) + (anchoredBundle and anchoredBundle.tables or 0), nums))
+            print(("[criminality] deep scan: +%d configs, +%d springs, %d guns, CamShake %d, snapshots %d, anchored tool %s / service %s, live numbers %d (pct %d%%)"):format(
+                cfgs, springs, guns, shake, snaps,
+                anchored and ("%d/%d"):format(anchored.tables, anchored.numbers) or "?",
+                anchoredBundle and ("%d/%d"):format(anchoredBundle.tables, anchoredBundle.numbers) or "?",
+                nums, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
             if closure then
-                local nums = {}
-                for k, v in pairs(closure.numbers) do table.insert(nums, ("%sx%d"):format(k, v)) end
-                table.sort(nums)
+                local nums2 = {}
+                for k, v in pairs(closure.numbers) do table.insert(nums2, ("%sx%d"):format(k, v)) end
+                table.sort(nums2)
                 local shown = {}
-                for i = 1, math.min(#nums, 10) do table.insert(shown, nums[i]) end
+                for i = 1, math.min(#nums2, 10) do table.insert(shown, nums2[i]) end
                 print(("[criminality] closure scan: %s, scripts %d, +%d config tables, +%d snapshots, numbers: %s"):format(
                     closure.available and "ok" or "getscriptclosure missing",
                     closure.scripts, closure.newTables, closure.snapshots, table.concat(shown, ", ")))
             end
         end)
     end)
-    button(p3, "Force gun reload", function()
-        task.spawn(function()
-            local char = LocalPlayer.Character
-            local tool = char and char:FindFirstChildOfClass("Tool")
-            if not tool then
-                notify("Force reload: equip the gun first")
-                return
-            end
-            local did = false
-            for _, name in ipairs({ "Client", "PassClient" }) do
-                local scr = tool:FindFirstChild(name)
-                if scr and scr:IsA("LocalScript") then
-                    pcall(function() scr.Disabled = true end)
-                    task.wait(0.1)
-                    local was = scr.Disabled
-                    pcall(function() scr.Disabled = false end)
-                    if was then did = true end
-                    task.delay(0.6, function()
-                        if scr and scr.Parent and scr.Disabled then
-                            pcall(function() scr.Disabled = false end)
-                        end
-                    end)
-                end
-            end
-            if did then
-                task.delay(0.5, rescaleAndPatch)
-                notify("Gun reloaded - it re-read the config at the current %")
-            else
-                notify("Force reload unsupported here - drop and pick the gun up instead")
-            end
-        end)
-    end)
-    note(p3, "100% = the game's own recoil. A gun's config is scaled when it ARRIVES in your backpack, and the " ..
-        "values it copied at load (its closure upvalues) are patched LIVE on every slider move - so unlike before, " ..
-        "you can change the percentage while holding the gun. If a gun still refuses: hit Force gun reload (re-runs " ..
-        "its script), or drop & pick it up.")
+    note(p3, "100% = the game's own recoil. The config is scaled when a gun arrives, and every copy the weapon " ..
+        "scripts cached from it is patched LIVE on each slider move (found by name AND by the field names their code " ..
+        "touches - Deep apply scans the whole weapon service for anything left). Last resort: drop & pick the gun.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
