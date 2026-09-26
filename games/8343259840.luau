@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v25"
+local SCRIPT_VERSION = "crim-v26"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -698,6 +698,9 @@ end
 --   4) the gun re-reads the patched copy and every later shot kicks with
 --      the new % - no drop/pick cycle needed.
 local liveFcf = { cands = {}, states = {}, lastScan = 0, toolRef = nil, stateKeys = nil }
+-- first-sight base values per candidate table (weak keys: dead tables drop out)
+-- so repeated scans/scaling never double-apply or lose the originals.
+liveFcf.orig = setmetatable({}, { __mode = "k" })
 
 -- Metatable-proof field access. Game "strict" objects (Crosshair PhysicModule
 -- style) THROW from __index on unknown keys, and the gun config's protected
@@ -791,12 +794,42 @@ local function liveFcfScan(announce)
                             liveFcf.hasUBL = true
                         end
                         if #liveFcf.cands < 64 then
-                            local rd = safeField(obj, "RecoilRedution")
-                            liveFcf.cands[#liveFcf.cands + 1] = {
-                                t = obj,
-                                orig = safeField(obj, "Recoil"),
-                                origRed = (type(rd) == "number") and rd or nil,
-                            }
+                            local base = liveFcf.orig[obj]
+                            if not base then
+                                -- sniff originals: if the scan runs while a %
+                                -- is already applied, scale back by the slider
+                                local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
+                                local sniff = (pctNow >= 5) and (100 / pctNow) or 1
+                                local rd0 = safeField(obj, "RecoilRedution")
+                                base = {
+                                    Recoil = (safeField(obj, "Recoil") or 0) * sniff,
+                                    Redution = (type(rd0) == "number") and rd0 or nil,
+                                }
+                                -- the per-shot spray kick reads these live
+                                local sl = safeField(obj, "SprayLerp")
+                                if type(sl) == "table" then
+                                    local x, y, z, h = safeField(sl, "AngleX"), safeField(sl, "AngleY"), safeField(sl, "AngleZ"), safeField(sl, "HPFM")
+                                    if type(x) == "number" or type(y) == "number" or type(z) == "number" or type(h) == "number" then
+                                        base.sprayT = sl
+                                        base.sX = (type(x) == "number") and (x * sniff) or nil
+                                        base.sY = (type(y) == "number") and (y * sniff) or nil
+                                        base.sZ = (type(z) == "number") and (z * sniff) or nil
+                                        base.sH = (type(h) == "number") and (h * sniff) or nil
+                                    end
+                                end
+                                local aim = safeField(obj, "AimSettings")
+                                if type(aim) == "table" then
+                                    local rx, ry, rz = safeField(aim, "RecoilReduction_X"), safeField(aim, "RecoilReduction_Y"), safeField(aim, "RecoilReduction_Z")
+                                    if type(rx) == "number" or type(ry) == "number" or type(rz) == "number" then
+                                        base.redT = aim
+                                        base.rX = (type(rx) == "number") and (rx * sniff) or nil
+                                        base.rY = (type(ry) == "number") and (ry * sniff) or nil
+                                        base.rZ = (type(rz) == "number") and (rz * sniff) or nil
+                                    end
+                                end
+                                liveFcf.orig[obj] = base
+                            end
+                            liveFcf.cands[#liveFcf.cands + 1] = { t = obj, base = base }
                         end
                     end
                 end)
@@ -811,7 +844,7 @@ local function liveFcfScan(announce)
             if i > 8 then break end
             pcall(function()
                 print(("  [%d] %s Recoil=%s RecoilRedution=%s Speed=%s|Damper=%s"):format(
-                    i, tostring(c.t), tostring(safeField(c.t, "Recoil")), tostring(c.origRed),
+                    i, tostring(c.t), tostring(safeField(c.t, "Recoil")), tostring(c.base and c.base.Redution or "?"),
                     tostring(safeField(c.t, "RecoilSpeed")), tostring(safeField(c.t, "RecoilDamper"))))
             end)
         end
@@ -841,11 +874,24 @@ local function liveFcfApply(pct, announce)
     end
     local n = 0
     for _, c in ipairs(liveFcf.cands) do
-        if safeSetField(c.t, "Recoil", c.orig * (pct / 100)) then
+        local b = c.base
+        local f = pct / 100
+        if safeSetField(c.t, "Recoil", (b and b.Recoil or 0) * f) then
             n += 1
         end
-        if c.origRed ~= nil then
-            safeSetField(c.t, "RecoilRedution", math.clamp(1 - pct / 100, 0, 1))
+        if b and b.Redution ~= nil then
+            safeSetField(c.t, "RecoilRedution", math.clamp(1 - f, 0, 1))
+        end
+        if b and b.sprayT then
+            if b.sX then safeSetField(b.sprayT, "AngleX", b.sX * f) end
+            if b.sY then safeSetField(b.sprayT, "AngleY", b.sY * f) end
+            if b.sZ then safeSetField(b.sprayT, "AngleZ", b.sZ * f) end
+            if b.sH then safeSetField(b.sprayT, "HPFM", b.sH * f) end
+        end
+        if b and b.redT then
+            if b.rX then safeSetField(b.redT, "RecoilReduction_X", b.rX * f) end
+            if b.rY then safeSetField(b.redT, "RecoilReduction_Y", b.rY * f) end
+            if b.rZ then safeSetField(b.redT, "RecoilReduction_Z", b.rZ * f) end
         end
     end
     local statesPatched = 0
@@ -3156,6 +3202,7 @@ local function buildMenu()
                 local rec = cfg and recoilGun.tables[cfg]
                 if rec and tonumber(rec.Recoil) then R = tonumber(rec.Recoil) end
             end)
+            if not (R and R > 5) then R = 21 end
             local vec = Vector3.new(math.random() * (R / 2) - (R / 4), 0, math.random() * (R / 2) + (R / 2))
             notify("Kick v2: firing the exact shot formula - watch the camera NOW")
             pcall(function() cur:Fire(vec) end)
