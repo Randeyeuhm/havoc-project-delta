@@ -623,18 +623,33 @@ local function getActiveChassis()
     return ok and chassis or nil
 end
 
--- The car you are in. The active chassis controller owns the same vehicle
--- object the sim uses and is present even where the driver-seat registry
--- lookup comes up empty (jobs, races), so it is checked first; the registry
--- stays as a fallback.
+-- The car you are in, resolved from three sources. The character's own
+-- seat (Humanoid.SeatPart) is the most direct truth and survives the
+-- controller / registry handles going stale (which silently broke the
+-- delivery farm after long sessions); then the active chassis controller
+-- (present even where the registry comes up empty - jobs, races); then
+-- the driver-seat registry. Stale handles are rejected via .Parent.
+local function seatVehicleModel()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if not seat or not seat:IsA("VehicleSeat") then return nil end
+    local seatModel = seat:FindFirstAncestorOfClass("Model")
+    if seatModel and seatModel.Parent then return seatModel end
+    return nil
+end
+
 local function getLocalVehicleModel()
+    local seated = seatVehicleModel()
+    if seated then return seated end
     local chassis = getActiveChassis()
     if chassis and chassis.VehicleObject and chassis.VehicleObject.Object then
-        return chassis.VehicleObject.Object
+        local m = chassis.VehicleObject.Object
+        if m.Parent then return m end
     end
     if not ClientVehicles then return nil end
     local ok, veh = pcall(function() return ClientVehicles.GetVehicleFromDriver(LocalPlayer) end)
-    if ok and veh and veh.Object then return veh.Object end
+    if ok and veh and veh.Object and veh.Object.Parent then return veh.Object end
     return nil
 end
 
@@ -665,11 +680,11 @@ end
 
 -- Move the driven car. Mirrors the game's own onVehicleTeleport: zero the
 -- velocity of every part, authorize the jump, then move via the weight part.
-local function teleportCarTo(target)
+local function teleportCarTo(target, modelOverride)
     local veh = getDrivenVehicle()
-    if not veh or not veh.Object then return false end
-    local model = veh.Object
-    local weight = veh.Components and veh.Components.Weight
+    local model = modelOverride or (veh and veh.Object) or getLocalVehicleModel()
+    if not model or not model.Parent then return false end
+    local weight = veh and veh.Components and veh.Components.Weight
     local ok = pcall(function()
         for _, d in ipairs(model:GetDescendants()) do
             if d:IsA("BasePart") then
@@ -1939,7 +1954,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0 }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -2001,13 +2016,54 @@ local function deliveryTick()
     local st = deliveryFarm.state
     local now = os.clock()
 
+    -- Shift watchdog. The shift can die server-side without a
+    -- DeliveryCompleted (timeout, impound, sub-place hop) and the stale
+    -- client state then points at dead locations forever - the "it just
+    -- breaks after a while" case. JobId gone for 3s, or no server state
+    -- at all for 2 minutes, drops the state so a fresh shift starts.
+    if st then
+        if LocalPlayer:GetAttribute("JobId") ~= "Delivery" then
+            deliveryFarm.jobMisses = (deliveryFarm.jobMisses or 0) + 1
+            if deliveryFarm.jobMisses >= 3 then
+                deliveryFarm.jobMisses = 0
+                deliveryFarm.state = nil
+                deliveryFarm.pickupDone = false
+                deliveryFarm.lastItems = -1
+                deliveryFarm.wantRestart = true
+                st = nil
+                print("[driving-empire] delivery farm: shift ended without a completion event - starting a new shift")
+            end
+        else
+            deliveryFarm.jobMisses = 0
+            local silent = now - (deliveryFarm.stateAt or 0)
+            if silent > 120 then
+                deliveryFarm.state = nil
+                deliveryFarm.pickupDone = false
+                deliveryFarm.lastItems = -1
+                deliveryFarm.lastStart = 0  -- request a shift right away
+                deliveryFarm.wantRestart = true
+                st = nil
+                notify("Delivery auto-farm: re-syncing the shift")
+                print("[driving-empire] delivery farm: no server updates for 2 min - re-syncing the shift")
+            end
+        end
+    end
+
     if not st then
         -- no delivery assigned: make sure the shift is running (the server
         -- marks the player with a JobId attribute)
         local jobId = LocalPlayer:GetAttribute("JobId")
-        if jobId ~= "Delivery" then
+        -- Long silence with no assignment at all: kick the server again
+        -- (the attribute can linger after the shift actually died).
+        if jobId == "Delivery" and not deliveryFarm.wantRestart
+            and (now - (deliveryFarm.lastStart or 0)) > 150 then
+            deliveryFarm.wantRestart = true
+            print("[driving-empire] delivery farm: no assignment for 2.5 min - re-requesting the shift")
+        end
+        if jobId ~= "Delivery" or deliveryFarm.wantRestart then
             if (now - deliveryFarm.lastStart) > 6 then
                 deliveryFarm.lastStart = now
+                deliveryFarm.wantRestart = false
                 if Remotes and type(Remotes.fireServer) == "function" then
                     local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
                     pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
@@ -2049,6 +2105,30 @@ local function deliveryTick()
     end
     deliveryFarm.noCarWarned = false
 
+    -- Teleport stick check: a teleport was issued but the car is STILL far
+    -- from the same target a few ticks later - the game snapped it back or
+    -- the handle was stale. Strikes retry harder; after 6 the user gets
+    -- told once (resetting the car unblocks the server's side).
+    if deliveryFarm.tpTarget and (now - (deliveryFarm.tpAt or 0)) > 4 then
+        if (veh:GetPivot().Position - deliveryFarm.tpTarget).Magnitude > 70 then
+            deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
+            deliveryFarm.tpStrikes = (deliveryFarm.tpStrikes or 0) + 1
+            if deliveryFarm.tpStrikes >= 3 and (now - (deliveryFarm.tpWarnedAt or 0)) > 60 then
+                deliveryFarm.tpWarnedAt = now
+                deliveryFarm.lastMove = 0  -- retry on this tick instead of waiting 6s
+                print(("[driving-empire] delivery farm: teleport hasn't stuck %dx - retrying hard"):format(deliveryFarm.tpStrikes))
+                if deliveryFarm.tpStrikes >= 6 and not deliveryFarm.tpUserWarned then
+                    deliveryFarm.tpUserWarned = true
+                    notify("Delivery farm: the game keeps snapping the car back - reset the car once if it stays stuck")
+                end
+            end
+        else
+            deliveryFarm.tpStrikes = 0
+            deliveryFarm.tpUserWarned = false
+            deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
+        end
+    end
+
     local carrying = items > 0
 
     -- Server is dropping the load off: hold position and keep the
@@ -2060,7 +2140,8 @@ local function deliveryTick()
             if (now - deliveryFarm.lastMove) > 6 then
                 deliveryFarm.lastMove = now
                 local cf = veh:GetPivot()
-                local okTp = teleportCarTo(CFrame.new(tgt + Vector3.new(0, 6, 0)) * (cf - cf.Position))
+                deliveryFarm.tpTarget, deliveryFarm.tpAt = tgt, now
+                local okTp = teleportCarTo(CFrame.new(tgt + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
                 print(("[driving-empire] delivery farm: teleport to dropoff ok=%s (%.0f studs away)"):format(
                     tostring(okTp), dHold))
             end
@@ -2105,7 +2186,8 @@ local function deliveryTick()
         if (now - deliveryFarm.lastMove) > 6 then
             deliveryFarm.lastMove = now
             local cf = veh:GetPivot()
-            local okTp = teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position))
+            deliveryFarm.tpTarget, deliveryFarm.tpAt = target, now
+            local okTp = teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
             print(("[driving-empire] delivery farm: teleport to %s ok=%s (%.0f studs away)"):format(
                 label, tostring(okTp), d))
         end
@@ -2133,6 +2215,10 @@ local function installDeliveryProbe()
         if vehicleHooks.deliveryStateConn then pcall(function() vehicleHooks.deliveryStateConn:Disconnect() end) end
         vehicleHooks.deliveryStateConn = evState.OnClientEvent:Connect(function(s)
             deliveryFarm.state = s
+            deliveryFarm.stateAt = os.clock()
+            deliveryFarm.tpStrikes = 0
+            deliveryFarm.tpUserWarned = false
+            deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             if s then
                 print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s"):format(
                     tostring(s.ItemsCarried), tostring(s.MaxCapacity),
@@ -2151,6 +2237,11 @@ local function installDeliveryProbe()
         if vehicleHooks.deliveryDoneConn then pcall(function() vehicleHooks.deliveryDoneConn:Disconnect() end) end
         vehicleHooks.deliveryDoneConn = evDone.OnClientEvent:Connect(function(info)
             deliveryFarm.state = nil
+            deliveryFarm.pickupDone = false
+            deliveryFarm.lastItems = -1
+            deliveryFarm.wantRestart = false
+            deliveryFarm.tpStrikes = 0
+            deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             local reward = info and tonumber(info.CashReward)
             local failure = info and info.FailureReason
             print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s"):format(
@@ -2204,8 +2295,9 @@ local function installDeliveryFreeze()
     local function hold()
         if Config.Delivery.Enabled ~= true then return end
         if raceBusy then return end  -- the race assist owns the car
-        local vObj = getDrivenVehicle()
-        local model = vObj and vObj.Object
+        -- Seat-first resolution (same as the farm's teleports): the freeze
+        -- follows the real car even if the chassis handle has gone stale.
+        local model = getLocalVehicleModel()
         if not model then return end
         if freezeCache.model ~= model then
             freezeCache.model = model
