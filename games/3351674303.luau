@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v65"
+local SCRIPT_VERSION = "de-v66"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2479,7 +2479,6 @@ local function buildMenu()
 
     section(p1, "Race assist")
     button(p1, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
-    note(p1, "Race tuning is locked (hop 0.5s, sweep 10, buffer 3s, car pad 1.10).")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
