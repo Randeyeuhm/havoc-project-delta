@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v72"
+local SCRIPT_VERSION = "de-v73"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -58,7 +58,7 @@ end
 local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
-    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
+    Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true },
     Race     = { AutoFarm = false, AutoRequeue = false },
     Delivery = { Enabled = false, Hard = true },
     Outlaw   = { Enabled = false },
@@ -187,7 +187,6 @@ Config.Vehicle.GripMult = math.clamp(tonumber(Config.Vehicle.GripMult) or 1, 1, 
 Config.Vehicle.BrakeMult = math.clamp(tonumber(Config.Vehicle.BrakeMult) or 1, 1, 50)
 Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1, 50)
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
-Config.Vehicle.NoTires = Config.Vehicle.NoTires == true
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
 Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
@@ -819,67 +818,6 @@ local function applyLockBypass(chassis)
             end
         end
         return orig(self, ...)
-    end
-end
-
--- REMOVE TIRES: hides the wheel visuals and drops the wheels' collision on
--- the player's current car (wheels come from the vehicle object's own
--- Cache.Wheels - each entry has Wheel = the physics wheel part, and the
--- visual rim/tire parts live in the wheel unit's "Parts" folder). Fully
--- reversible: every part's original look is remembered until switched off.
-local tireState = { veh = nil, parts = {} }
-
-local function restoreTires()
-    for _, p in ipairs(tireState.parts) do
-        if p and p.Parent and p.__hubTire then
-            p.Transparency = p.__hubTire.t
-            p.CanCollide = p.__hubTire.c
-            p.__hubTire = nil
-        end
-    end
-    tireState.parts = {}
-    tireState.veh = nil
-end
-
-local function applyTires()
-    if not Config.Vehicle.NoTires then
-        if tireState.veh or #tireState.parts > 0 then restoreTires() end
-        return
-    end
-    local veh = getDrivenVehicle()
-    if not veh then
-        if tireState.veh then restoreTires() end
-        return
-    end
-    if tireState.veh ~= veh then
-        restoreTires()
-        tireState.veh = veh
-    end
-    local cache = veh.Cache
-    local wheels = cache and cache.Wheels
-    if type(wheels) ~= "table" then return end
-    local function addPart(p)
-        if p == nil then return end
-        local isOk, isPart = pcall(function() return p:IsA("BasePart") end)
-        if not isOk or not isPart then return end
-        if p.__hubTire == nil then
-            p.__hubTire = { t = p.Transparency, c = p.CanCollide }
-            table.insert(tireState.parts, p)
-        end
-        if p.Transparency ~= 1 then p.Transparency = 1 end
-        if p.CanCollide then p.CanCollide = false end
-    end
-    for _, w in ipairs(wheels) do
-        local wheelPart = w.Wheel
-        addPart(wheelPart)
-        local unit = wheelPart and wheelPart.Parent
-        local vis = unit and unit:FindFirstChild("Parts")
-        if vis then
-            for _, p in ipairs(vis:GetDescendants()) do addPart(p) end
-        end
-        if type(w.Tires) == "table" then
-            for _, p in ipairs(w.Tires) do addPart(p) end
-        end
     end
 end
 
@@ -3559,9 +3497,6 @@ local function buildMenu()
     toggle(p1, "Instant shifting",
         function() return Config.Vehicle.InstantShift end,
         function(v) Config.Vehicle.InstantShift = v end)
-    toggle(p1, "Remove tires (glitch)",
-        function() return Config.Vehicle.NoTires end,
-        function(v) Config.Vehicle.NoTires = v end)
     section(p1, "Nitro & caps")
     toggle(p1, "Infinite nitro",
         function() return Config.Vehicle.InfNitro end,
@@ -3881,7 +3816,6 @@ track(RunService.RenderStepped:Connect(function()
         applyBrake(chassis)
         applySteer(chassis)
         applyLockBypass(chassis)
-        applyTires()
     end)
 
     pcall(renderESP, cam)
