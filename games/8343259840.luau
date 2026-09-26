@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v10"
+local SCRIPT_VERSION = "crim-v11"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1192,7 +1192,7 @@ local function huntCtx()
 end
 
 local function huntAllGC()
-    local out = { fns = 0, num_cand = 0, num_risk = 0, cfg_tbl = 0, tbl_recoil = 0, tbl_combo = 0, fld_cand = 0, springs = 0 }
+    local out = { fns = 0, num_cand = 0, name_cand = 0, num_risk = 0, cfg_tbl = 0, tbl_recoil = 0, tbl_combo = 0, fld_cand = 0, springs = 0 }
     if type(getgc) ~= "function" then return out end
     local ctx = huntCtx()
     if not ctx or not ctx.orig then return out end
@@ -1231,6 +1231,7 @@ local function huntAllGC()
                     end
                 end)
                 pcall(function()
+                    local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
                     local i = 1
                     while true do
                         local name, val = debug.getupvalue(obj, i)
@@ -1239,6 +1240,25 @@ local function huntAllGC()
                             if isMarker(val) then mark = true end
                             if isAmount(val) and not hitIdx then
                                 hitIdx, hitName = i, tostring(name)
+                            end
+                            -- derived-amount catch: ANY number upvalue whose NAME
+                            -- mentions recoil - covers scaled/converted forms
+                            -- (radians per shot etc.) that never equal 21 raw.
+                            local lname = string.lower(tostring(name))
+                            if string.find(lname, "recoil", 1, true)
+                                and not string.find(lname, "speed", 1, true)
+                                and not string.find(lname, "damper", 1, true)
+                                and not string.find(lname, "damage", 1, true)
+                                and not string.find(lname, "health", 1, true)
+                                and not string.find(lname, "armor", 1, true) then
+                                local base = val
+                                if pctNow ~= 100 then base = val * 100 / pctNow end
+                                local key = tostring(obj) .. "!" .. tostring(i)
+                                if not recoilCandidates.numbers.seen[key] then
+                                    recoilCandidates.numbers.seen[key] = true
+                                    table.insert(recoilCandidates.numbers.list, { fn = obj, idx = i, base = base, name = tostring(name) })
+                                    out.name_cand += 1
+                                end
                             end
                         elseif type(val) == "table" then
                             trackRecoilTable(val)
@@ -1277,24 +1297,31 @@ local function huntAllGC()
                 elseif type(obj.Recoil) == "number" then
                     trackRecoilTable(obj)
                 else
-                    local combo, amtKey = false, nil
+                    local combo = false
                     local n = 0
                     for k, v in pairs(obj) do
                         n += 1
                         if n > 60 then break end
-                        if typeof(v) == "number" then
-                            if isMarker(v) then combo = true end
-                            if isAmount(v) and amtKey == nil then amtKey = k end
-                        end
+                        if typeof(v) == "number" and isMarker(v) then combo = true end
                     end
                     if combo then
                         out.tbl_combo += 1
-                        if amtKey ~= nil then
-                            local key = tostring(obj) .. "." .. tostring(amtKey)
-                            if not recoilCandidates.fields.seen[key] then
-                                recoilCandidates.fields.seen[key] = true
-                                table.insert(recoilCandidates.fields.list, { tbl = obj, key = amtKey, base = ctx.orig, name = tostring(amtKey) })
-                                out.fld_cand += 1
+                        local scanned = 0
+                        for k, v in pairs(obj) do
+                            scanned += 1
+                            if scanned > 60 then break end
+                            if typeof(v) == "number" and isAmount(v) then
+                                local lk = string.lower(tostring(k))
+                                local blk = string.find(lk, "damage", 1, true) or string.find(lk, "health", 1, true)
+                                    or string.find(lk, "armor", 1, true) or string.find(lk, "range", 1, true)
+                                if not blk then
+                                    local key = tostring(obj) .. "." .. tostring(k)
+                                    if not recoilCandidates.fields.seen[key] then
+                                        recoilCandidates.fields.seen[key] = true
+                                        table.insert(recoilCandidates.fields.list, { tbl = obj, key = k, base = ctx.orig, name = tostring(k) })
+                                        out.fld_cand += 1
+                                    end
+                                end
                             end
                         end
                     end
@@ -1323,8 +1350,8 @@ local function runHunt(reason, force)
         huntState.at = os.clock()
         huntState.doneFor = tool
         if ok then
-            print(("[criminality] recoil hunt (%s): fns %d, +%d number, +%d table, combo %d, +%d field, springs %d (risk %d)"):format(
-                tostring(reason), out.fns, out.num_cand, out.tbl_recoil, out.tbl_combo, out.fld_cand, out.springs, out.num_risk))
+            print(("[criminality] recoil hunt (%s): fns %d, +%d number, +%d name, +%d table, combo %d, +%d field, springs %d (risk %d)"):format(
+                tostring(reason), out.fns, out.num_cand, out.name_cand, out.tbl_recoil, out.tbl_combo, out.fld_cand, out.springs, out.num_risk))
         else
             print(("[criminality] recoil hunt (%s) failed: %s"):format(tostring(reason), tostring(out)))
         end
