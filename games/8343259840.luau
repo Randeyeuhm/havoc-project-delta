@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v2"
+local SCRIPT_VERSION = "crim-v3"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -561,18 +561,19 @@ end
 -- ============================================================
 -- FEATURES: RECOIL  (percentage of the game's own recoil)
 -- ============================================================
--- Criminality applies weapon recoil as CAMERA SHAKE: every shot computes
---   CamShakeConfig.Recoil * shotPower * stateMult
--- and kicks a spring; the render loop then post-multiplies the spring's
--- angles onto the camera. Scaling CamShakeConfig.Recoil scales the whole
--- kick linearly - i.e. a real recoil percentage. The module lives at
--- ReplicatedStorage.Storage.FrameworkStuff.CamShakeConfig (the service is
--- renamed, so GetService is used).
---
--- require() may hand back a separate copy inside an executor, so the LIVE
--- table the weapon code reads is found by scanning GC for closures whose
--- upvalues hold a table with this exact shape - and every copy found is
--- scaled, so whichever one the game reads is covered.
+-- What the dump proves:
+--   * the game's shared camera-shake spring is kicked from exactly TWO
+--     places in the decompiled client - the damage-hit shake and the
+--     flashbang/concussion shake - and both multiply CamShakeConfig
+--     (Recoil / Accuracy), at RS.Storage.FrameworkStuff.CamShakeConfig.
+--   * the WEAPON recoil itself lives in the gun tools' own Client
+--     scripts (not present in the dump); they most likely drive the
+--     character's CamShakePart Motor6D (read by the camera loop) or
+--     apply a camera kick directly.
+-- So the slider scales every live CamShakeConfig copy (require-based -
+-- instant), and the probe button collects exactly what the equipped gun
+-- carries (module tables + value objects) so the gun's own recoil numbers
+-- can be scaled directly next.
 local recoilState = { tables = {} }
 
 local function looksLikeCamShake(t)
@@ -582,45 +583,23 @@ local function looksLikeCamShake(t)
         and type(t.AngleX_Max) == "number" and type(t.Accuracy) == "number"
 end
 
-local function findCamShakeTables()
-    local out = {}
-    local function consider(t)
-        if looksLikeCamShake(t) and not recoilState.tables[t] then
-            table.insert(out, t)
-        end
-    end
-    pcall(function()
+local function camShakeModule()
+    local ok, mod = pcall(function()
         local storage = ReplicatedStorage:FindFirstChild("Storage")
         local fw = storage and storage:FindFirstChild("FrameworkStuff")
-        local mod = fw and fw:FindFirstChild("CamShakeConfig")
-        if mod then consider(require(mod)) end
+        return fw and fw:FindFirstChild("CamShakeConfig")
     end)
-    if type(getgc) == "function" then
-        pcall(function()
-            for _, obj in pairs(getgc(true)) do
-                if type(obj) == "function" then
-                    pcall(function()
-                        local i = 1
-                        while true do
-                            local name, val = debug.getupvalue(obj, i)
-                            if not name then break end
-                            consider(val)
-                            i += 1
-                        end
-                    end)
-                elseif type(obj) == "table" then
-                    consider(obj)
-                end
-            end
-        end)
-    end
-    return out
+    return ok and mod or nil
 end
 
 local function applyRecoil()
     local pct = tonumber(Config.Weapons.RecoilPct) or 100
-    for _, t in ipairs(findCamShakeTables()) do
-        recoilState.tables[t] = { orig = t.Recoil }
+    local mod = camShakeModule()
+    if mod then
+        local ok, cfg = pcall(require, mod)
+        if ok and looksLikeCamShake(cfg) and not recoilState.tables[cfg] then
+            recoilState.tables[cfg] = { orig = cfg.Recoil }
+        end
     end
     local applied, blocked = 0, 0
     for t, rec in pairs(recoilState.tables) do
@@ -635,17 +614,74 @@ local function applyRecoil()
     return applied, blocked
 end
 
--- keep looking until the config is found (it may load with the first gun)
-task.spawn(function()
-    while true do
-        task.wait(8)
-        if (tonumber(Config.Weapons.RecoilPct) or 100) ~= 100 then
-            local tracked = 0
-            for _ in pairs(recoilState.tables) do tracked += 1 end
-            if tracked == 0 then pcall(applyRecoil) end
+-- Probe: run it with a gun equipped and copy the console output back.
+-- It never fires remotes - it only reads what the tool carries.
+local function recoilProbe()
+    print("==== [criminality] recoil probe ====")
+    local mod = camShakeModule()
+    print("CamShakeConfig:", mod and mod:GetFullName() or "NOT FOUND")
+    if mod then
+        local ok, cfg = pcall(require, mod)
+        if ok and type(cfg) == "table" then
+            local keys = {}
+            for k, v in pairs(cfg) do
+                table.insert(keys, ("%s=%s(%s)"):format(tostring(k), tostring(v), type(v)))
+            end
+            table.sort(keys)
+            print("  fields:", table.concat(keys, ", "))
+            local orig = cfg.Recoil
+            local okW = pcall(function() cfg.Recoil = (tonumber(orig) or 1) * 0.5 end)
+            local now = cfg.Recoil
+            pcall(function() cfg.Recoil = orig end)
+            print(("  write test: %s (orig=%s now=%s, restored)"):format(
+                okW and "OK" or "FAILED", tostring(orig), tostring(now)))
+        else
+            print("  require failed:", tostring(cfg))
         end
     end
-end)
+    local shake = _G.camShakePart
+    print("camShakePart:", tostring(shake), shake and shake:GetFullName() or "")
+    pcall(function()
+        if shake then
+            local m = shake:FindFirstChild("Motor6D")
+            print("  Motor6D:", tostring(m), m and ("Transform=" .. tostring(m.Transform)) or "")
+        end
+    end)
+    print("CamShakeCFrameOffset1:", tostring(_G.CamShakeCFrameOffset1))
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    print("equipped tool:", tool and tool.Name or "NONE (equip a gun)")
+    if tool then
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("LocalScript") then
+                print(("  script present: %s"):format(d.Name))
+            elseif d:IsA("ModuleScript") and (d.Name == "Config" or d.Name == "PassConfig") then
+                local ok2, res = pcall(require, d)
+                if ok2 and type(res) == "table" then
+                    local parts = {}
+                    for k, v in pairs(res) do
+                        local tv = type(v)
+                        if tv == "number" or tv == "string" or tv == "boolean" then
+                            table.insert(parts, ("%s=%s"):format(tostring(k), tostring(v)))
+                        elseif tv == "table" then
+                            table.insert(parts, tostring(k) .. "={...}")
+                        end
+                    end
+                    table.sort(parts)
+                    print(("  module %s: %s"):format(d.Name, #parts > 0 and table.concat(parts, ", ") or "(no flat fields)"))
+                else
+                    print(("  module %s: %s"):format(d.Name, ok2 and ("returned " .. type(res)) or ("failed: " .. tostring(res))))
+                end
+            end
+        end
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("ValueBase") then
+                print(("  value %s (%s) = %s"):format(d:GetFullName(), d.ClassName, tostring(d.Value)))
+            end
+        end
+    end
+    print("==== end recoil probe (send this output back) ====")
+end
 
 -- ============================================================
 -- INPUT
@@ -896,21 +932,20 @@ local function buildMenu()
                     math.floor(v + 0.5), applied, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
             end)
         end, 5, 0, 200)
-    button(p3, "Re-detect recoil config", function()
+    button(p3, "Probe recoil (console)", function()
         task.spawn(function()
             local applied, blocked = applyRecoil()
             local tracked = 0
             for _ in pairs(recoilState.tables) do tracked += 1 end
             local pct = math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)
-            notify(("Recoil: %d config copy(ies) tracked, %d scaled%s - set to %d%%"):format(
+            notify(("Recoil: %d CamShake copy(ies) tracked, %d scaled%s (set %d%%)"):format(
                 tracked, applied, blocked > 0 and (", " .. blocked .. " locked") or "", pct))
-            print(("[criminality] recoil scan: tracked %d, scaled %d, blocked %d, pct %d"):format(
-                tracked, applied, blocked, pct))
+            recoilProbe()
         end)
     end)
-    note(p3, "100% = the game's own recoil. The slider scales the camera-shake value every shot reads " ..
-        "(CamShakeConfig.Recoil), so it applies live per shot - 0% = no kick, 200% = double. " ..
-        "If a gun ever feels unchanged, hit Re-detect.")
+    note(p3, "100% = the game's own recoil. The slider scales the camera-shake config (CamShakeConfig) live - " ..
+        "0% = no shake from hits/flashbangs, 200% = double. If SHOOTING recoil is unchanged, equip a gun and hit " ..
+        "Probe recoil, then send the console output - the gun's own recoil numbers get scaled next.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
