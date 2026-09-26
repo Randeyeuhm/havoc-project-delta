@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v26"
+local SCRIPT_VERSION = "crim-v27"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -861,16 +861,15 @@ local function liveFcfScan(announce)
 end
 
 local function liveFcfApply(pct, announce)
-    -- rescan when stale (>5s), when the copy list is empty, or when the
-    -- equipped gun changed (every gun load makes a FRESH private copy)
+    -- rescan only when needed: empty list or a different gun got equipped
+    -- (NO time-based rescans - slider moves must stay hitch-free)
     local charTool = nil
     pcall(function()
         local char = LocalPlayer.Character
         charTool = char and char:FindFirstChildOfClass("Tool") or nil
     end)
-    if #liveFcf.cands == 0 or (os.clock() - liveFcf.lastScan) > 5 or charTool ~= liveFcf.toolRef then
+    if #liveFcf.cands == 0 or charTool ~= liveFcf.toolRef then
         liveFcfScan(false)
-        charTool = liveFcf.toolRef
     end
     local n = 0
     for _, c in ipairs(liveFcf.cands) do
@@ -2684,6 +2683,7 @@ local function buildMenu()
                 local anchored = applyAnchoredPatches()
                 local cands = applyCandidates()
                 applyRecoilCopy(v)
+                pcall(liveFcfApply, v, false)
                 print(("[criminality] recoil %d%% -> live %s, configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
                     math.floor(v + 0.5), rclHook.active and "on" or "off", guns, applied, anchored, cands,
                     blocked > 0 and (" (" .. blocked .. " locked)") or ""))
@@ -2704,6 +2704,7 @@ local function buildMenu()
                         end
                         if autoApply.busy then return end
                         autoApply.busy = true
+                        pcall(liveFcfApply, tonumber(Config.Weapons.RecoilPct) or 100, false)
                         pcall(recycleGunNow, true)
                         autoApply.busy = false
                     end)
@@ -3217,11 +3218,10 @@ local function buildMenu()
             notify("Live hook removed - the game's own recoil is back")
         end)
     end)
-    note(p3, "Live apply: patches the running gun's config copy in memory, then taps your bullet-type key (default Z) " ..
-        "so the gun re-reads it - instant, no drop/pick. The refresh runs on guns with an underbarrel launcher (the " ..
-        "key toggles the launcher twice and ends where it started - harmless); other guns get the in-memory patch and " ..
-        "re-read on their next equip, so use Auto apply for those. Swap + rewire stays as the backup path; 'Apply %' / " ..
-        "'Auto apply' always work; 'Undo live hook' restores normal.")
+    note(p3, "Final recoil facts: AIMED-IN recoil scales INSTANTLY on the slider (in-memory patch - no drop/pick). " ..
+        "HIPFIRE re-reads only when the gun loads, so 'Auto apply' silently cycles the gun ~1s after the slider settles " ..
+        "to bring hipfire to the same %. Keep Auto apply ON: one slider move = aimed instant + hipfire moments later. " ..
+        "RCL/underbarrel buttons are diagnostics only.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
