@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v19"
+local SCRIPT_VERSION = "crim-v20"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -848,7 +848,7 @@ end
 -- The kick pipeline (from the dump): every shot fires
 --     Events2.RCL:Fire(Vector3.new(rand(-R, R) / 4, 0, rand(R / 2, R)))
 -- and R is the only consumer of the config value the gun copied at load.
-local rclHook = { original = nil, mine = nil, active = false, mode = "none" }
+local rclHook = { original = nil, mine = nil, active = false, mode = "none", lastFail = nil }
 local rclShared = (type(getgenv) == "function" and getgenv()) or _G
 
 local function rclFactor()
@@ -880,13 +880,28 @@ end
 -- scaled vector. Refs live in a getgenv store so re-execs reuse them; each
 -- forwarder self-retires when the generation bumps (no double scaling).
 local function rclInstallConns(orig)
-    if type(getconnections) ~= "function" then return false end
-    local okConns, conns = pcall(getconnections, orig.Event)
-    if not okConns or type(conns) ~= "table" then return false end
+    if type(getconnections) ~= "function" then
+        rclHook.lastFail = "getconnections unavailable"
+        return false
+    end
+    local conns
+    local okC1, res1 = pcall(getconnections, orig.Event)
+    if okC1 and type(res1) == "table" and #res1 > 0 then
+        conns = res1
+    else
+        local okC2, res2 = pcall(getconnections, orig)
+        if okC2 and type(res2) == "table" and #res2 > 0 then
+            conns = res2
+        end
+    end
+    if not conns then
+        rclHook.lastFail = ("no visible connections (read=%s/%s)"):format(
+            okC1 and "ok" or "err", type(res1) == "table" and (#res1 .. " conns") or type(res1))
+        return false
+    end
     local st = rclShared.__HavocRcl
     if st and st.event ~= orig then st = nil end
     if not st then
-        if #conns == 0 then return false end
         local saved = {}
         for _, c in ipairs(conns) do
             local fn = c.Function or c.func or c.callback
@@ -894,7 +909,10 @@ local function rclInstallConns(orig)
                 saved[#saved + 1] = { fn = fn, conn = c }
             end
         end
-        if #saved == 0 then return false end
+        if #saved == 0 then
+            rclHook.lastFail = ("%d connections, none expose Function/func/callback"):format(#conns)
+            return false
+        end
         local disabled = 0
         for _, e in ipairs(saved) do
             local c = e.conn
@@ -920,6 +938,7 @@ local function rclInstallConns(orig)
                     end
                 end
             end
+            rclHook.lastFail = ("could not disable %d of %d connections"):format(#saved - disabled, #saved)
             return false
         end
         st = { event = orig, origs = saved }
@@ -949,6 +968,7 @@ local function rclInstallConns(orig)
     rclHook.original = orig
     rclHook.active = true
     rclHook.mode = "conns"
+    rclHook.lastFail = nil
     return true
 end
 
@@ -1013,19 +1033,23 @@ local function installRCLHook(allowSwap)
         return true
     end
     if allowSwap and rclInstallSwap(orig) then
-        print("[criminality] rcl hook: installed via event swap (instance ops, manual mode)")
+        print("[criminality] rcl hook: installed via event swap (instance ops)")
+        rclHook.lastFail = nil
         return true
     end
     rclHook.original = nil
     rclHook.mode = "none"
+    rclHook.lastFail = rclHook.lastFail or "RCL event not found (not in game yet?)"
     return false
 end
 
 pcall(function()
     rclCleanupSwap()
-    installRCLHook(false)
+    installRCLHook(true)
 end)
-print(("[criminality] rcl: getconnections=%s"):format(tostring(type(getconnections))))
+print(("[criminality] rcl: getconnections=%s | install=%s"):format(
+    tostring(type(getconnections)),
+    rclHook.mode ~= "none" and rclHook.mode or (rclHook.lastFail or "not attempted")))
 
 -- ============================================================
 -- SNAPSHOT PATCHING (slider changes without re-picking the gun)
@@ -1848,7 +1872,7 @@ local function rescaleAndPatch()
     pcall(applyCandidates)
     local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
     pcall(function() applyRecoilCopy(pctNow) end)
-    pcall(installRCLHook)   -- retry the RCL swap if it failed at load
+    pcall(installRCLHook, true)   -- retry: connections first, then swap fallback
     -- full recoil hunt once per gun when the slider is off 100% (brief
     -- one-time hitch, then every slider move is instant from the registry)
     if pctNow ~= 100 then
@@ -2725,7 +2749,7 @@ local function buildMenu()
             rclRelease()
             local ok = installRCLHook(false)
             notify(ok and ("Live recoil active (" .. rclHook.mode .. ") - slider scales the kick instantly")
-                or "Safe live mode unavailable here - use Apply % / Auto apply (they always work)")
+                or ("No live mode: " .. tostring(rclHook.lastFail or "unknown")))
         end)
     end)
     button(p3, "Try swap hook (manual)", function()
@@ -2746,10 +2770,26 @@ local function buildMenu()
             local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
             local cur = e2 and e2:FindFirstChild("RCL")
             local bak = e2 and e2:FindFirstChild("RCLBackup")
-            print(("[criminality] rcl probe: mode=%s active=%s | RCL=%s backup=%s | getconnections=%s"):format(
-                rclHook.mode, tostring(rclHook.active),
-                tostring(cur and cur.ClassName), tostring(bak and bak.ClassName),
+            print(("[criminality] rcl probe: mode=%s active=%s fail=%s | RCL=%s%s backup=%s | getconnections=%s"):format(
+                rclHook.mode, tostring(rclHook.active), tostring(rclHook.lastFail or "-"),
+                tostring(cur and cur.ClassName), (cur ~= nil and cur == rclHook.mine) and " (ours)" or "",
+                tostring(bak and bak.ClassName),
                 tostring(type(getconnections))))
+            if cur and type(getconnections) == "function" then
+                local okC, conns = pcall(getconnections, cur.Event)
+                print(("[criminality] rcl probe: read -> ok=%s %s"):format(
+                    tostring(okC), (okC and type(conns) == "table") and (#conns .. " connections") or tostring(conns)))
+                if okC and type(conns) == "table" then
+                    for i = 1, math.min(#conns, 3) do
+                        local c = conns[i]
+                        pcall(function()
+                            print(("[criminality] rcl probe:   conn %d -> Function=%s func=%s callback=%s Disable=%s Disconnect=%s Enabled=%s"):format(
+                                i, tostring(type(c.Function)), tostring(type(c.func)), tostring(type(c.callback)),
+                                tostring(type(c.Disable)), tostring(type(c.Disconnect)), tostring(c.Enabled)))
+                        end)
+                    end
+                end
+            end
             local firesA, firesB = 0, 0
             local c1 = cur and cur:IsA("BindableEvent") and cur.Event:Connect(function() firesA += 1 end)
             local c2 = bak and bak:IsA("BindableEvent") and bak.Event:Connect(function() firesB += 1 end)
