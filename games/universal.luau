@@ -122,6 +122,10 @@ local function moduleSource(name)
     return nil
 end
 
+-- Bump on every change so the console / window subtitle prove which
+-- build is running (same scheme as the other scripts: uvN / de-vNN).
+local SCRIPT_VERSION = "uv1"
+
 local UILIB_FILE = "uilib.luau"
 local UILib
 do
@@ -609,7 +613,7 @@ local function buildMenu()
         parent = screenGui,
         name = "Main",
         title = "HAVOC HUB  ·  UNIVERSAL",
-        subtitle = "PlaceId " .. tostring(game.PlaceId),
+        subtitle = "PlaceId " .. tostring(game.PlaceId) .. "  ·  " .. SCRIPT_VERSION,
         size = UDim2.new(0, winW, 0, winH),
         position = UDim2.new(0, 30, 0, 40),
         tabs = { "Aimbot", "ESP", "Movement", "Misc" },
@@ -856,7 +860,7 @@ local function buildMenu()
         "game-specific script yet."):format(game.PlaceId))
 
     win.setTab(1)
-    print(("[universal] menu built (%d controls)"):format(builtCount))
+    print(("[universal] %s menu built (%d controls)"):format(SCRIPT_VERSION, builtCount))
 end
 
 if UILib and screenGui then

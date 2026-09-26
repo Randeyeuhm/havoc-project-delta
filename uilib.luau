@@ -71,7 +71,7 @@ local UILib = {}
 
 -- Bumped when the library's behaviour changes; printed on load so the
 -- console always shows which build of the toolkit a script actually got.
-UILib.VERSION = "w7-delta-shell"
+UILib.VERSION = "w8-delta-shell"
 
 -- ============================================================
 -- UI THEME

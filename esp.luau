@@ -57,7 +57,7 @@ local Players     = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 local ESP = {}
-ESP.VERSION = "esp-v4-class-lib"
+ESP.VERSION = "esp-v5-class-lib"
 
 -- ============================================================
 -- SCHEMA

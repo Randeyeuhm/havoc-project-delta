@@ -4941,7 +4941,7 @@ do
         local win = UILib.makeWindow({
             parent = gui,
             name = "HavocMain",
-            title = "HAVOC  ·  v9.9.28",
+            title = "HAVOC  ·  v9.9.29",
             size = UDim2.new(0, winW, 0, winH),
             tabs = tabNames,
             subtabs = subtabMap,
