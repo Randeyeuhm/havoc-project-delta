@@ -1,9 +1,12 @@
 --[[
-    STRUCTURE DUMPER v6 — single file, no runtime hooks
+    STRUCTURE DUMPER v7 — single file, no runtime hooks
     One file with: game info, all decompiled scripts, full tree,
     every attribute, every ValueBase, remotes/bindables, assets,
     tags and game UI.
     Roblox client defaults are skipped (CoreGui, default UI, etc.).
+    v7: script roots resolve services BY INSTANCE - this game renames
+    Workspace (hidden char) and ReplicatedStorage ("RepIicatedStorage"),
+    which made the old name-keyed roots capture nothing.
     Potassium-friendly.
 ]]
 
@@ -37,15 +40,26 @@ local DEFAULT_CLIENT_UI = {
 local SKIP_DEFAULT_SCRIPTS = { Animate = true, Health = true }
 
 -- Everything we want script source from.
--- Includes PlayerScripts (runtime) and PlayerGui (UI logic).
-local DUMP_SCRIPT_ROOTS = {
-    ReplicatedStorage      = true,
-    ReplicatedFirst        = true,
-    StarterPlayer          = true,   -- StarterPlayerScripts + StarterCharacterScripts
-    StarterGui             = true,
-    StarterPack            = true,
-    Workspace              = true,   -- any scripts parented under workspace models
+-- v7 FIX: the game RENAMES services (the Workspace root literally prints as
+-- "Workspace̩ (Workspace)" with a hidden character, ReplicatedStorage is
+-- "RepIicatedStorage"), so the old name-keyed lookup silently dumped NOTHING
+-- for Workspace/RS - no gun tool scripts, no ReplicatedStorage modules ever
+-- made it into a dump. Resolve the roots BY INSTANCE instead.
+local DUMP_SCRIPT_SERVICES = {
+    game:GetService("Workspace"),
+    game:GetService("ReplicatedStorage"),
+    game:GetService("ReplicatedFirst"),
+    game:GetService("StarterPlayer"),
+    game:GetService("StarterGui"),
+    game:GetService("StarterPack"),
 }
+
+local function isDumpScriptService(svc)
+    for _, s in ipairs(DUMP_SCRIPT_SERVICES) do
+        if s == svc then return true end
+    end
+    return false
+end
 
 -- Runtime containers - dump these too, keyed by name
 local function runtimeScriptRoots()
@@ -54,6 +68,8 @@ local function runtimeScriptRoots()
     if pg then roots[pg] = "PlayerScripts" end
     local pgi = LP:FindFirstChild("PlayerGui")
     if pgi then roots[pgi] = "PlayerGui" end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then roots[bp] = "Backpack" end
     return roots
 end
 
@@ -186,7 +202,7 @@ local function flushDump()
 
     local parts = {
         string.rep("=", 66) .. "\n",
-        "HAVOC STRUCTURE DUMP v6 — single file\n",
+        "HAVOC STRUCTURE DUMP v7 — single file\n",
         ("Generated: %s\n"):format(os.date("%Y-%m-%d %H:%M:%S")),
         ("Payload:   %.1f KB across %d sections\n"):format(total / 1024, #sections),
         string.rep("=", 66) .. "\n\n",
@@ -433,7 +449,7 @@ end
 -- ============================================================
 -- MAIN
 -- ============================================================
-print("===== DUMPER v6 START =====")
+print("===== DUMPER v7 START =====")
 local startTime = tick()
 
 local services = game:GetChildren()
@@ -441,7 +457,7 @@ table.sort(services, function(a, b) return a.Name < b.Name end)
 
 for _, svc in ipairs(services) do
     if not SKIP_SERVICES[svc.Name] then
-        local dumpHere = DUMP_SCRIPT_ROOTS[svc.Name] == true
+        local dumpHere = isDumpScriptService(svc)
         local ok, err = pcall(function() walk(svc, 0, "", dumpHere) end)
         if not ok then
             print(("[err ] %s: %s"):format(svc.Name, tostring(err)))
@@ -507,7 +523,7 @@ end
 -- ============================================================
 do
     local lines = {}
-    table.insert(lines, "# Structure Summary (v6 — single file)")
+    table.insert(lines, "# Structure Summary (v7 — single file)")
     table.insert(lines, "")
     table.insert(lines, ("Generated:  %s"):format(os.date("%Y-%m-%d %H:%M:%S")))
     table.insert(lines, ("Elapsed:    %.1fs"):format(tick() - startTime))

@@ -85,7 +85,7 @@ local DEFAULTS = {
     -- not look mechanical. TeamCheck off by default (most lobbies are solo).
     Aimbot   = { Enabled = false, Mode = "Hold RMB", FOV = 100, Smoothness = 6,
                  TeamCheck = false, VisibleOnly = true, FOVCircle = true },
-    Weapons  = { RecoilPct = 100 },
+    Weapons  = { RecoilPct = 100, AutoApply = false },
     Misc     = { Fullbright = false, AntiAFK = true },
 }
 
@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v13"
+local SCRIPT_VERSION = "crim-v14"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1888,6 +1888,58 @@ local function buildMenu()
     -- ---------------- Weapons ----------------
     local p3 = pages[3]
     section(p3, "Recoil")
+    -- Drop + re-equip refresher: the gun script reads its config when the tool
+    -- loads, so cycling the gun is how a new % gets applied (manual drop/pick
+    -- is the proven flow). Manual button + optional auto mode that fires
+    -- ~1.25s after the slider settles.
+    local autoApply = { token = 0, busy = false }
+    local function recycleGunNow(quiet)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not char or not hum then
+            if not quiet then notify("Re-equip: no character") end
+            return false
+        end
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        local held = char:FindFirstChildOfClass("Tool")
+        local tool = held or (bp and bp:FindFirstChildOfClass("Tool"))
+        if not tool then
+            if not quiet then notify("Re-equip: no gun found - equip one first") end
+            return false
+        end
+        if not held then
+            pcall(scaleOneTool, tool)
+            local okE = pcall(function() hum:EquipTool(tool) end)
+            if not quiet then
+                notify(okE and ("Re-equip: " .. tool.Name .. " equipped with the stored %")
+                    or "Re-equip: EquipTool failed - use the hotbar key")
+            end
+            return okE
+        end
+        if not quiet then print("[criminality] re-equip: cycling " .. tool.Name .. " (same as a manual drop/pick)") end
+        pcall(scaleOneTool, tool)
+        local okU = pcall(function() hum:UnequipTools() end)
+        if not okU then
+            if not quiet then notify("Re-equip: UnequipTools failed - use your drop key") end
+            return false
+        end
+        task.wait(0.45)
+        local again = char:FindFirstChildOfClass("Tool") or (bp and bp:FindFirstChildOfClass("Tool"))
+        if not again then
+            if not quiet then notify("Re-equip: gun missing after unequip - grab it manually") end
+            return false
+        end
+        pcall(scaleOneTool, again)
+        local okE = pcall(function() hum:EquipTool(again) end)
+        if not okE then
+            if not quiet then notify("Re-equip: EquipTool failed - use the hotbar key") end
+            return false
+        end
+        task.wait(0.15)
+        pcall(scaleOneTool, again)
+        if not quiet then notify("Re-equip done - " .. again.Name .. " reloaded with the current %, like a manual cycle") end
+        return true
+    end
     slider(p3, "Recoil percentage",
         function() return Config.Weapons.RecoilPct end,
         function(v)
@@ -1905,7 +1957,26 @@ local function buildMenu()
                     task.delay(0.7, function() pcall(runHunt, "slider") end)
                 end
             end)
+            if Config.Weapons.AutoApply then
+                autoApply.token += 1
+                local tok = autoApply.token
+                task.delay(1.25, function()
+                    if tok ~= autoApply.token or not Config.Weapons.AutoApply then return end
+                    task.spawn(function()
+                        if autoApply.busy then
+                            task.wait(0.8)
+                            if tok ~= autoApply.token or not Config.Weapons.AutoApply then return end
+                        end
+                        if autoApply.busy then return end
+                        autoApply.busy = true
+                        pcall(recycleGunNow, true)
+                        autoApply.busy = false
+                    end)
+                end)
+            end
         end, 5, 0, 200)
+    toggle(p3, "Auto apply (re-cycle gun)", function() return Config.Weapons.AutoApply end,
+        function(v) Config.Weapons.AutoApply = v end)
     button(p3, "Probe recoil (console)", function()
         task.spawn(function()
             local applied, blocked = applyRecoil()
@@ -2270,43 +2341,12 @@ local function buildMenu()
     end)
     button(p3, "Apply % (drop + re-equip)", function()
         task.spawn(function()
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not char or not hum then notify("Re-equip: no character") return end
-            local bp = LocalPlayer:FindFirstChild("Backpack")
-            local held = char:FindFirstChildOfClass("Tool")
-            local tool = held or (bp and bp:FindFirstChildOfClass("Tool"))
-            if not tool then notify("Re-equip: no gun found - equip one first") return end
-            if not held then
-                pcall(scaleOneTool, tool)
-                local okE = pcall(function() hum:EquipTool(tool) end)
-                if okE then
-                    notify("Re-equip: " .. tool.Name .. " equipped with the stored %")
-                else
-                    notify("Re-equip: EquipTool failed - use the hotbar key")
-                end
-                return
-            end
-            print("[criminality] re-equip: cycling " .. tool.Name .. " (same as a manual drop/pick)")
-            pcall(scaleOneTool, tool)
-            local okU = pcall(function() hum:UnequipTools() end)
-            if not okU then notify("Re-equip: UnequipTools failed - use your drop key") return end
-            task.wait(0.45)
-            local again = char:FindFirstChildOfClass("Tool") or (bp and bp:FindFirstChildOfClass("Tool"))
-            if not again then notify("Re-equip: gun missing after unequip - grab it manually") return end
-            pcall(scaleOneTool, again)
-            local okE = pcall(function() hum:EquipTool(again) end)
-            if not okE then notify("Re-equip: EquipTool failed - use the hotbar key") return end
-            task.wait(0.15)
-            pcall(scaleOneTool, again)
-            notify("Re-equip done - " .. again.Name .. " reloaded with the current %, like a manual cycle")
+            recycleGunNow(false)
         end)
     end)
-    note(p3, "Trace v2: set the slider to 100%, hold a gun that recoils, hit the trace, and FIRE whenever it says " ..
-        "(hiccups are the snapshots - keep firing). It prints in-burst and net value moves, sustained increases (the " ..
-        "recoil climb), gun Value changes, spring traffic, live spring shapes and a 6s spring-mute test. Send the " ..
-        "whole console block. 'Apply % (drop + re-equip)' does the manual drop/pick trick for you when the slider " ..
-        "cannot update live.")
+    note(p3, "Set the %, then 'Apply % (drop + re-equip)' cycles the gun exactly like a manual drop/pick (that is " ..
+        "how the game picks up a new %). 'Auto apply' does it automatically ~1s after you let go of the slider. " ..
+        "Trace v2 is for the recoil hunt: set 100%, hold a gun, hit it and FIRE when told - send the console block.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
