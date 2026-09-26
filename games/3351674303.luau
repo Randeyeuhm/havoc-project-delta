@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v59"
+local SCRIPT_VERSION = "de-v60"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,7 +60,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
-    Delivery = { Enabled = false, Hard = true, Pace = 15 },
+    Delivery = { Enabled = false, Hard = true, Pace = 5 },
     -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -196,7 +196,7 @@ Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
 Config.Delivery.Enabled = Config.Delivery.Enabled == true
 Config.Delivery.Hard = Config.Delivery.Hard ~= false
-Config.Delivery.Pace = math.clamp(tonumber(Config.Delivery.Pace) or 15, 0, 90)
+Config.Delivery.Pace = math.clamp(tonumber(Config.Delivery.Pace) or 5, 0, 90)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -2123,13 +2123,8 @@ local function deliveryTick()
                 if Remotes and type(Remotes.fireServer) == "function" then
                     local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
                     pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
-                    print(("[driving-empire] delivery farm: requested a Delivery shift (%s) - jobId now %s"):format(
-                        mode, tostring(LocalPlayer:GetAttribute("JobId"))))
                 end
             end
-        elseif (now - (deliveryFarm.lastDiag or 0)) > 30 then
-            deliveryFarm.lastDiag = now
-            print("[driving-empire] delivery farm: shift is active (jobId=Delivery) - waiting for a delivery assignment")
         end
         return
     end
@@ -2140,9 +2135,6 @@ local function deliveryTick()
     local items = tonumber(st.ItemsCarried) or 0
     local maxCap = tonumber(st.MaxCapacity) or 4
     if items ~= deliveryFarm.lastItems then
-        if deliveryFarm.lastItems >= 0 then
-            print(("[driving-empire] delivery farm: items %d/%d (+%.1fs)"):format(items, maxCap, now - (deliveryFarm.itemsAt or now)))
-        end
         deliveryFarm.lastItems = items
         deliveryFarm.itemsAt = now
         if items == 0 then
@@ -2155,7 +2147,6 @@ local function deliveryTick()
         if not deliveryFarm.noCarWarned then
             deliveryFarm.noCarWarned = true
             notify("Delivery auto-farm: get in a car")
-            print("[driving-empire] delivery farm: no car detected (chassis + driver-seat both empty)")
         end
         return
     end
@@ -2218,9 +2209,7 @@ local function deliveryTick()
                 deliveryFarm.lastMove = now
                 local cf = veh:GetPivot()
                 deliveryFarm.tpTarget, deliveryFarm.tpAt = tgt, now
-                local okTp = teleportCarTo(CFrame.new(tgt + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
-                print(("[driving-empire] delivery farm: teleport to dropoff ok=%s (%.0f studs away)"):format(
-                    tostring(okTp), dHold))
+                teleportCarTo(CFrame.new(tgt + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
             end
             return
         end
@@ -2243,18 +2232,12 @@ local function deliveryTick()
         if atPickup and not deliveryFarm.pickupDone then
             deliveryFarm.pickupDone = true
             notify(("Delivery: %d items picked up"):format(items))
-            print(("[driving-empire] delivery farm: pickup done (items=%d/%d%s) - heading to the dropoff"):format(
-                items, maxCap, (stalled and not full and not exhausted) and ", pile stalled" or ""))
         end
     end
 
     local target = carrying and st.DestinationPosition or st.PickupPosition
     local label = carrying and "dropoff" or "pickup"
     if not target then
-        if carrying and (now - (deliveryFarm.lastDiag or 0)) > 15 then
-            deliveryFarm.lastDiag = now
-            print(("[driving-empire] delivery farm: carrying %d items but no destination yet - waiting"):format(items))
-        end
         return
     end
 
@@ -2264,9 +2247,7 @@ local function deliveryTick()
             deliveryFarm.lastMove = now
             local cf = veh:GetPivot()
             deliveryFarm.tpTarget, deliveryFarm.tpAt = target, now
-            local okTp = teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
-            print(("[driving-empire] delivery farm: teleport to %s ok=%s (%.0f studs away)"):format(
-                label, tostring(okTp), d))
+            teleportCarTo(CFrame.new(target + Vector3.new(0, 6, 0)) * (cf - cf.Position), veh)
         end
         return
     end
@@ -2279,20 +2260,13 @@ local function deliveryTick()
         local tkey = label .. ":" .. math.floor(target.X) .. ":" .. math.floor(target.Z)
         if deliveryFarm.arrivedKey ~= tkey then
             deliveryFarm.arrivedKey, deliveryFarm.arrivedAt = tkey, now
-            print(("[driving-empire] delivery farm: pacing - dwelling %.0fs at the %s"):format(pace, label))
         end
         if (now - deliveryFarm.arrivedAt) < pace then return end
     end
 
     local part = deliveryLocationPart(target)
     if part then
-        if tryDeliveryInteract(part, target, now) then
-            if deliveryFarm.interactLabel ~= label or (now - deliveryFarm.lastInteractPrint) > 30 then
-                deliveryFarm.interactLabel = label
-                deliveryFarm.lastInteractPrint = now
-                print(("[driving-empire] delivery farm: %s interaction fired (%.0f studs)"):format(label, d))
-            end
-        end
+        tryDeliveryInteract(part, target, now)
     elseif not deliveryFarm.warned then
         deliveryFarm.warned = true
         print("[driving-empire] delivery farm: no DeliveryLocation part near " .. tostring(target))
@@ -2314,22 +2288,7 @@ local function installDeliveryProbe()
             deliveryFarm.tpStrikes = 0
             deliveryFarm.tpUserWarned = false
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
-            if s then
-                local route = "-"
-                if typeof(s.PickupPosition) == "Vector3" and typeof(s.DestinationPosition) == "Vector3" then
-                    route = ("%.0f"):format((s.DestinationPosition - s.PickupPosition).Magnitude)
-                end
-                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s type=%s cash=%s route=%s towing=%s towable=%s planned=%s"):format(
-                    tostring(s.ItemsCarried), tostring(s.MaxCapacity),
-                    tostring(s.PickupPosition), tostring(s.DestinationPosition),
-                    tostring(s.IsCollecting), tostring(s.IsDropping),
-                    tostring(s.DeliveryTypeId), tostring(s.CashReward), route,
-                    tostring(s.IsTowing), tostring(s.TowableId), tostring(s.IsPlanned)))
-            else
-                print("[driving-empire] delivery state: cleared")
-            end
         end)
-        print("[driving-empire] delivery probe: DeliveryStateChanged connected")
     else
         print("[driving-empire] delivery probe: DeliveryStateChanged NOT FOUND")
     end
@@ -2337,16 +2296,6 @@ local function installDeliveryProbe()
     if evDone and evDone.OnClientEvent then
         if vehicleHooks.deliveryDoneConn then pcall(function() vehicleHooks.deliveryDoneConn:Disconnect() end) end
         vehicleHooks.deliveryDoneConn = evDone.OnClientEvent:Connect(function(info)
-            -- Snapshot the finished run's context BEFORE the state clears.
-            local last = deliveryFarm.state
-            local route, eType, eCash = "-", nil, nil
-            if type(last) == "table" then
-                eType = last.DeliveryTypeId
-                eCash = last.CashReward
-                if typeof(last.PickupPosition) == "Vector3" and typeof(last.DestinationPosition) == "Vector3" then
-                    route = ("%.0f"):format((last.DestinationPosition - last.PickupPosition).Magnitude)
-                end
-            end
             deliveryFarm.state = nil
             deliveryFarm.pickupDone = false
             deliveryFarm.lastItems = -1
@@ -2355,19 +2304,10 @@ local function installDeliveryProbe()
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             deliveryFarm.lastStart = 0  -- a new shift can start right away
             deliveryFarm.arrivedKey = nil  -- re-arm pacing for the next run
-            local took = math.max(os.clock() - (deliveryFarm.runStartAt or os.clock()), 0.1)
-            local rnum = tonumber(route)
             local reward = info and tonumber(info.CashReward)
             local failure = info and info.FailureReason
-            print(("[driving-empire] DeliveryCompleted: paid=%s expected=%s route=%s speed=%s type=%s failure=%s streak=%s"):format(
-                tostring(info and info.CashReward), tostring(eCash), route,
-                rnum and ("%.0f"):format(rnum / took) or "-",
-                tostring(eType), tostring(failure), tostring(info and info.PreviousStreak)))
-            -- Zero-pay runs are all long-haul on the live build (19/19 in
-            -- the console log: route >= ~1900 studs -> reward 0, shorter
-            -- routes paid). Two in a row means the assignment stream is
-            -- stuck there - re-hire the shift to reroll it (that is what a
-            -- manual re-hire did for the user).
+            -- Safety net: pacing usually prevents zero-pay runs; if two
+            -- still land in a row, re-hire the shift.
             if not failure and reward == 0 then
                 deliveryFarm.zeroPays = (deliveryFarm.zeroPays or 0) + 1
                 if deliveryFarm.zeroPays >= 2 then
@@ -2375,7 +2315,6 @@ local function installDeliveryProbe()
                     deliveryFarm.wantRestart = true
                     deliveryFarm.lastStart = 0
                     notify("Delivery farm: payouts at 0 - re-hiring to reset the payout ladder")
-                    print("[driving-empire] delivery farm: two zero-payout runs - re-hiring the shift to reset the payout ladder")
                 end
             elseif reward and reward > 0 then
                 deliveryFarm.zeroPays = 0
@@ -2388,34 +2327,12 @@ local function installDeliveryProbe()
                 end
             end
         end)
-        print("[driving-empire] delivery probe: DeliveryCompleted connected")
     else
         print("[driving-empire] delivery probe: DeliveryCompleted NOT FOUND")
     end
 end
 
 installDeliveryProbe()
-
--- One-off: print the live server pace so the job's speed is measurable
--- (PerItemCollectSeconds is a live RemoteConfig value, not in the dump).
-task.spawn(function()
-    local ok, res = pcall(function()
-        local utilInst = waitPath(ReplicatedStorage, { "Modules", "Shared", "Jobs", "Delivery", "DeliveryUtil" })
-        if not utilInst then return nil end
-        local util = require(utilInst)
-        return {
-            perItem = util.GetPerItemCollectSeconds and util.GetPerItemCollectSeconds(false),
-            maxPkgs = util.GetMaxPackages and util.GetMaxPackages(false),
-            radius = util.GetPickupRadius and util.GetPickupRadius(),
-        }
-    end)
-    if ok and res then
-        print(("[driving-empire] delivery server pace: 1 item per %ss, up to %s per trip, pickup radius %s"):format(
-            tostring(res.perItem), tostring(res.maxPkgs), tostring(res.radius)))
-    else
-        print("[driving-empire] delivery server pace: could not read DeliveryUtil")
-    end
-end)
 
 -- FREEZE: while the delivery farm is on, pin the car in place - the whole
 -- job runs on teleports, and a rolling or pushed car can slide out of the
@@ -2451,7 +2368,6 @@ local function installDeliveryFreeze()
     end
     vehicleHooks.deliveryFreezeConn = RunService.Stepped:Connect(hold)
     vehicleHooks.deliveryFreezeConn2 = RunService.Heartbeat:Connect(hold)
-    print("[driving-empire] delivery freeze: car is held in place while the farm is on")
 end
 
 installDeliveryFreeze()
