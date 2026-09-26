@@ -1954,7 +1954,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -1989,6 +1989,25 @@ local function deliveryLocationPart(pos)
     return best, bestD
 end
 
+-- Nearest delivery job pad (the tagged parts the game's own shift prompts
+-- sit on). Fallback start point when a plain remote shift request stops
+-- working - pads whose path contains "Delivery" are preferred.
+local function findDeliveryPad(fromPos)
+    local best, bestD = nil, math.huge
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("JobPad")) do
+            local part = trackEntryPart(inst)
+            if part and part.Parent then
+                local d = (part.Position - fromPos).Magnitude
+                if not (inst:GetFullName():find("Delivery")) then d = d + 1e6 end
+                if d < bestD then best, bestD = part, d end
+            end
+        end
+    end)
+    return best
+end
+
 -- The game fires ONE interact when you drive into the circle and the server
 -- then releases items over time. We fire the moment we arrive, follow up
 -- with a short burst (in case the server counts the fire itself), then keep
@@ -2005,6 +2024,7 @@ local function tryDeliveryInteract(part, target, now)
     if (now - deliveryFarm.lastInteract) < gap then return false end
     if not (Remotes and type(Remotes.fireServer) == "function") then return false end
     pcall(Remotes.fireServer, "DeliveryLocationInteracted", part)
+    deliveryFarm.lastLocated = part
     deliveryFarm.lastInteract = now
     deliveryFarm.burstLeft = math.max(0, (deliveryFarm.burstLeft or 0) - 1)
     return true
@@ -2030,6 +2050,7 @@ local function deliveryTick()
                 deliveryFarm.pickupDone = false
                 deliveryFarm.lastItems = -1
                 deliveryFarm.wantRestart = true
+                deliveryFarm.startSince = 0
                 st = nil
                 print("[driving-empire] delivery farm: shift ended without a completion event - starting a new shift")
             end
@@ -2042,6 +2063,7 @@ local function deliveryTick()
                 deliveryFarm.lastItems = -1
                 deliveryFarm.lastStart = 0  -- request a shift right away
                 deliveryFarm.wantRestart = true
+                deliveryFarm.startSince = 0
                 st = nil
                 notify("Delivery auto-farm: re-syncing the shift")
                 print("[driving-empire] delivery farm: no server updates for 2 min - re-syncing the shift")
@@ -2061,9 +2083,24 @@ local function deliveryTick()
             print("[driving-empire] delivery farm: no assignment for 2.5 min - re-requesting the shift")
         end
         if jobId ~= "Delivery" or deliveryFarm.wantRestart then
+            if deliveryFarm.startSince == 0 then deliveryFarm.startSince = now end
             if (now - deliveryFarm.lastStart) > 6 then
                 deliveryFarm.lastStart = now
                 deliveryFarm.wantRestart = false
+                -- The game itself only starts shifts at a job pad. Plain
+                -- remote requests normally work; if nothing has happened for
+                -- 20s, stand on a delivery pad first in case the server now
+                -- validates proximity for "jobPad" starts.
+                local veh = getLocalVehicleModel()
+                if veh and (now - deliveryFarm.startSince) > 20 then
+                    local pad = findDeliveryPad(veh:GetPivot().Position)
+                    if pad and (veh:GetPivot().Position - pad.Position).Magnitude > 40 then
+                        local cf = veh:GetPivot()
+                        teleportCarTo(CFrame.new(pad.Position + Vector3.new(0, 8, 0)) * (cf - cf.Position), veh)
+                        print("[driving-empire] delivery farm: standing on a delivery pad before starting the shift")
+                        return
+                    end
+                end
                 if Remotes and type(Remotes.fireServer) == "function" then
                     local mode = (Config.Delivery.Hard ~= false) and "HighRisk" or "Safe"
                     pcall(Remotes.fireServer, "RequestStartJobSession", "Delivery", "jobPad", mode)
@@ -2126,6 +2163,22 @@ local function deliveryTick()
             deliveryFarm.tpStrikes = 0
             deliveryFarm.tpUserWarned = false
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
+        end
+    end
+
+    -- Tell the server when we have left a location we interacted with (the
+    -- game's own client fires DeliveryLocationLeft on radius exit) - keeps
+    -- its enter/leave bookkeeping in sync when we teleport between spots.
+    if deliveryFarm.lastLocated then
+        local ad = deliveryFarm.lastLocated
+        local pp = ad.Parent and trackEntryPart(ad)
+        if not pp then
+            deliveryFarm.lastLocated = nil
+        elseif (veh:GetPivot().Position - pp.Position).Magnitude > 100 then
+            if Remotes and type(Remotes.fireServer) == "function" then
+                pcall(Remotes.fireServer, "DeliveryLocationLeft", ad)
+            end
+            deliveryFarm.lastLocated = nil
         end
     end
 
@@ -2216,6 +2269,7 @@ local function installDeliveryProbe()
         vehicleHooks.deliveryStateConn = evState.OnClientEvent:Connect(function(s)
             deliveryFarm.state = s
             deliveryFarm.stateAt = os.clock()
+            deliveryFarm.startSince = 0
             deliveryFarm.tpStrikes = 0
             deliveryFarm.tpUserWarned = false
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
@@ -2242,10 +2296,12 @@ local function installDeliveryProbe()
             deliveryFarm.wantRestart = false
             deliveryFarm.tpStrikes = 0
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
+            deliveryFarm.lastStart = 0  -- a new shift can start right away
             local reward = info and tonumber(info.CashReward)
             local failure = info and info.FailureReason
-            print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s"):format(
-                tostring(info and info.CashReward), tostring(failure)))
+            print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s streak=%s"):format(
+                tostring(info and info.CashReward), tostring(failure),
+                tostring(info and info.PreviousStreak)))
             if Config.Delivery.Enabled == true then
                 if failure then
                     notify(("Delivery auto-farm: failed - %s"):format(tostring(failure)))
