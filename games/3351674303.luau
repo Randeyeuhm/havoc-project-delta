@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v67"
+local SCRIPT_VERSION = "de-v68"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2343,6 +2343,252 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- ATM / BANK STREAMING INDEX (feeds the outlaw farm)
+-- ============================================================
+-- ATMs only exist client-side while streamed in, so from one spot the
+-- farm can only see the handful of spawners around it (the map has
+-- 100+ CriminalATMSpawner slots). This keeps a persistent index of
+-- every spawner / drop-off / ATM / bank position ever seen, captures
+-- new ones as the client streams, and force-streams spots with
+-- workspace:RequestStreamAroundAsync() - so finding an ATM no longer
+-- depends on where the player stands.
+
+local ATM_INDEX_FILE = "driving_empire_atm_index.json"
+local ATM_SITE_COOLDOWN = 150   -- empty site recheck delay
+local ATM_SITE_WAIT = 4         -- a site gets this long for its stream to deliver an ATM
+
+local atmIndex = { spawners = {}, dropoffs = {}, hot = {}, probedAt = {}, bank = nil, savedAt = 0, dirty = false, bankTryAt = 0 }
+local atmBootstrapBusy = false
+
+local function atmPos(t)
+    if not t then return nil end
+    local x = tonumber(t[1] or t.x)
+    local y = tonumber(t[2] or t.y)
+    local z = tonumber(t[3] or t.z)
+    if not (x and y and z) then return nil end
+    return Vector3.new(x, y, z)
+end
+
+local function atmKey(p)
+    return ("%d:%d"):format(math.floor(p.X / 8), math.floor(p.Z / 8))
+end
+
+local function atmSave(force)
+    if type(writefile) ~= "function" then return end
+    local now = os.clock()
+    if not force and (now - atmIndex.savedAt) < 8 then
+        atmIndex.dirty = true
+        return
+    end
+    atmIndex.savedAt = now
+    atmIndex.dirty = false
+    pcall(function()
+        writefile(ATM_INDEX_FILE, HttpService:JSONEncode({ spawners = atmIndex.spawners, dropoffs = atmIndex.dropoffs, bank = atmIndex.bank }))
+    end)
+end
+
+local function atmLoad()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+    local ok, decoded = pcall(function()
+        if not isfile(ATM_INDEX_FILE) then return nil end
+        return HttpService:JSONDecode(readfile(ATM_INDEX_FILE))
+    end)
+    if ok and type(decoded) == "table" then
+        for _, field in ipairs({ "spawners", "dropoffs" }) do
+            if type(decoded[field]) == "table" then
+                for k, v in pairs(decoded[field]) do
+                    if type(v) == "table" then atmIndex[field][k] = { tonumber(v[1]), tonumber(v[2]), tonumber(v[3]) } end
+                end
+            end
+        end
+        if type(decoded.bank) == "table" then atmIndex.bank = { tonumber(decoded.bank[1]), tonumber(decoded.bank[2]), tonumber(decoded.bank[3]) } end
+    end
+end
+
+local function atmRecord(kind, pos, hot)
+    local p = pos
+    if not p then return end
+    local key = atmKey(p)
+    local store = (kind == "dropoff") and atmIndex.dropoffs or atmIndex.spawners
+    if not store[key] then
+        store[key] = { p.X, p.Y, p.Z }
+        atmSave()
+    end
+    if hot then
+        atmIndex.hot[key] = { x = p.X, y = p.Y, z = p.Z, at = os.clock() }
+        local n = 0
+        for _ in pairs(atmIndex.hot) do n = n + 1 end
+        if n > 60 then
+            local oldestKey, oldest = nil, math.huge
+            for k, v in pairs(atmIndex.hot) do
+                if (v.at or 0) < oldest then oldestKey, oldest = k, v.at or 0 end
+            end
+            if oldestKey and oldestKey ~= key then atmIndex.hot[oldestKey] = nil end
+        end
+    end
+end
+
+local function atmInstancePos(inst)
+    local ok, p = pcall(function()
+        if inst:IsA("BasePart") then return inst.Position end
+        if inst:IsA("Model") then return inst:GetPivot().Position end
+        local parent = inst.Parent
+        if parent and parent:IsA("BasePart") then return parent.Position end
+        if parent and parent:IsA("Model") then return parent:GetPivot().Position end
+        return nil
+    end)
+    if ok then return p end
+    return nil
+end
+
+local function atmSweep(pos)
+    if not pos or workspace.StreamingEnabled ~= true then return end
+    pcall(function() workspace:RequestStreamAroundAsync(pos, 2.5) end)
+    atmIndex.probedAt[atmKey(pos)] = os.clock()
+end
+
+local function atmSweepAsync(pos)
+    if not pos or workspace.StreamingEnabled ~= true then return end
+    task.spawn(function()
+        pcall(function() workspace:RequestStreamAroundAsync(pos, 3) end)
+        atmIndex.probedAt[atmKey(pos)] = os.clock()
+    end)
+end
+
+-- capture everything that streams in, now and later
+do
+    local cs = game:GetService("CollectionService")
+    atmLoad()
+    cs:GetInstanceAddedSignal("CriminalATMSpawner"):Connect(function(inst)
+        atmRecord("atm", atmInstancePos(inst), false)
+    end)
+    cs:GetInstanceAddedSignal("CriminalATMClient"):Connect(function(inst)
+        atmRecord("atm", atmInstancePos(inst), true)
+    end)
+    cs:GetInstanceAddedSignal("CriminalDropOffPoint"):Connect(function(inst)
+        atmRecord("dropoff", atmInstancePos(inst), false)
+    end)
+    cs:GetInstanceAddedSignal("BankHeistEntranceProximityPrompt"):Connect(function(inst)
+        local p = atmInstancePos(inst)
+        if p then
+            atmIndex.bank = { p.X, p.Y, p.Z }
+            atmSave()
+        end
+    end)
+    for _, inst in ipairs(cs:GetTagged("CriminalATMSpawner")) do atmRecord("atm", atmInstancePos(inst), false) end
+    for _, inst in ipairs(cs:GetTagged("CriminalATMClient")) do atmRecord("atm", atmInstancePos(inst), true) end
+    for _, inst in ipairs(cs:GetTagged("CriminalDropOffPoint")) do atmRecord("dropoff", atmInstancePos(inst), false) end
+end
+
+-- background streamer: while the outlaw farm is on, probe the map one
+-- spot at a time (bank -> hot sites -> known spawners -> local grid)
+local function atmPickProbe(charPos, now)
+    if atmIndex.bank then
+        local bp = atmPos(atmIndex.bank)
+        if bp and (now - (atmIndex.probedAt[atmKey(bp)] or 0)) > 150 then return bp end
+    end
+    local best, bestD = nil, math.huge
+    for _, v in pairs(atmIndex.hot) do
+        if (now - (v.at or 0)) < 1800 then
+            local p = atmPos(v)
+            if p and (now - (atmIndex.probedAt[atmKey(p)] or 0)) > 100 then
+                local d = (charPos - p).Magnitude
+                if d < bestD then best, bestD = p, d end
+            end
+        end
+    end
+    if best then return best end
+    best, bestD = nil, math.huge
+    for _, v in pairs(atmIndex.spawners) do
+        local p = atmPos(v)
+        if p and (now - (atmIndex.probedAt[atmKey(p)] or 0)) > 240 then
+            local d = (charPos - p).Magnitude
+            if d < bestD then best, bestD = p, d end
+        end
+    end
+    if best then return best end
+    for dx = -5, 5 do
+        for dz = -5, 5 do
+            if dx ~= 0 or dz ~= 0 then
+                local p = Vector3.new(charPos.X + dx * 450, charPos.Y, charPos.Z + dz * 450)
+                if (now - (atmIndex.probedAt[atmKey(p)] or 0)) > 600 then
+                    local d = math.abs(dx) + math.abs(dz)
+                    if d < bestD then best, bestD = p, d end
+                end
+            end
+        end
+    end
+    return best
+end
+
+task.spawn(function()
+    while true do
+        task.wait(4)
+        if Config.Outlaw.Enabled == true and not atmBootstrapBusy then
+            local char = LocalPlayer.Character
+            if char and char.PrimaryPart then
+                local now = os.clock()
+                local probe = atmPickProbe(char:GetPivot().Position, now)
+                if probe then atmSweep(probe) end
+                if not atmIndex.bank and (now - atmIndex.bankTryAt) > 60 then
+                    atmIndex.bankTryAt = now
+                    local bankPart = findPart("bank")
+                    if bankPart then
+                        atmIndex.bank = { bankPart.Position.X, bankPart.Position.Y, bankPart.Position.Z }
+                        atmSave()
+                    end
+                end
+                if atmIndex.dirty and (now - atmIndex.savedAt) > 8 then atmSave() end
+            end
+        end
+    end
+end)
+
+-- one-shot deep pass for the "Index ATMs" button: city landmarks +
+-- known sites + a local grid, all force-streamed
+local function atmBootstrapRun()
+    if atmBootstrapBusy then
+        notify("ATM index: already streaming - give it a moment")
+        return
+    end
+    atmBootstrapBusy = true
+    task.spawn(function()
+        local before = 0
+        for _ in pairs(atmIndex.spawners) do before = before + 1 end
+        local probes = {}
+        for _, tp in ipairs(TELEPORTS) do
+            local part = findPart(tp.part)
+            if part then table.insert(probes, part.Position) end
+        end
+        local bankPos = atmPos(atmIndex.bank)
+        if bankPos then table.insert(probes, bankPos) end
+        for _, v in pairs(atmIndex.spawners) do
+            local p = atmPos(v)
+            if p then table.insert(probes, p) end
+        end
+        local char = LocalPlayer.Character
+        if char and char.PrimaryPart then
+            local cp = char:GetPivot().Position
+            for dx = -3, 3 do
+                for dz = -3, 3 do
+                    table.insert(probes, Vector3.new(cp.X + dx * 450, cp.Y, cp.Z + dz * 450))
+                end
+            end
+        end
+        notify(("ATM index: streaming %d spots (background)"):format(#probes))
+        for _, p in ipairs(probes) do
+            atmSweep(p)
+            task.wait(0.4)
+        end
+        local after = 0
+        for _ in pairs(atmIndex.spawners) do after = after + 1 end
+        atmBootstrapBusy = false
+        atmSave(true)
+        notify(("ATM index: %d spawner sites known (%+d this pass)"):format(after, after - before))
+    end)
+end
+
+-- ============================================================
 -- OUTLAW (CRIMINAL JOB) AUTO-FARM (Money tab)
 -- ============================================================
 -- The criminal job loop, mirrored from the game's own client code:
@@ -2362,7 +2608,7 @@ local OUTLAW_ATMS_PER_RUN = 5   -- wanted stars needed for the drop-off
 local OUTLAW_BUST_WAIT = 3.5    -- server floor is (bust time - 2.5s); 3.5 clears both pass states
 local OUTLAW_REACH = 9          -- how close to land before interacting
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {} }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {} }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2410,6 +2656,38 @@ local function outlawPickDropOff(pos)
         end
     end)
     return best, bestPos
+end
+
+-- nearest remembered drop-off position (when none is streamed in yet)
+local function outlawIndexDropOff(pos)
+    local best, bestD = nil, math.huge
+    for _, v in pairs(atmIndex.dropoffs) do
+        local p = atmPos(v)
+        if p then
+            local d = (pos - p).Magnitude
+            if d < bestD then best, bestD = p, d end
+        end
+    end
+    return best
+end
+
+-- nearest indexed ATM site to travel to (hot sites win ties; empty
+-- sites are put on a cooldown)
+local function outlawPickSite(pos, now)
+    local bestKey, bestPos, bestScore = nil, nil, math.huge
+    local function consider(key, v, hot)
+        local p = atmPos(v)
+        if not p then return end
+        local cool = outlawFarm.siteCool[atmKey(p)]
+        if cool and now < cool then return end
+        local score = (pos - p).Magnitude - (hot and 600 or 0)
+        if score < bestScore then bestKey, bestPos, bestScore = key, p, score end
+    end
+    for k, v in pairs(atmIndex.hot) do
+        if (now - (v.at or 0)) < 1800 then consider(k, v, true) end
+    end
+    for k, v in pairs(atmIndex.spawners) do consider(k, v, false) end
+    return bestKey, bestPos
 end
 
 local function outlawTick()
@@ -2489,6 +2767,17 @@ local function outlawTick()
     if crimes >= OUTLAW_ATMS_PER_RUN then
         local point, pp = outlawPickDropOff(pos)
         if not point then
+            -- none streamed in: travel to a remembered drop-off spot and
+            -- force the stream (the tagged model appears on arrival)
+            local want = outlawIndexDropOff(pos)
+            if want and (pos - want).Magnitude > OUTLAW_REACH then
+                if now - outlawFarm.tpAt > 1 then
+                    outlawFarm.tpAt = now
+                    pcall(function() char:PivotTo(CFrame.new(want + Vector3.new(0, 4, 0))) end)
+                    atmSweepAsync(want)
+                end
+                return
+            end
             if now - outlawFarm.noAtmAt > 90 then
                 outlawFarm.noAtmAt = now
                 notify("Outlaw farm: no drop-off point found")
@@ -2546,9 +2835,34 @@ local function outlawTick()
     if char:GetAttribute("ATMBustDebounce") ~= nil then return end
     local target, tpos = outlawPickATM(pos)
     if not target then
-        if now - outlawFarm.noAtmAt > 90 then
-            outlawFarm.noAtmAt = now
-            notify("Outlaw farm: no ATMs nearby right now")
+        -- streaming: nothing live nearby - travel to an indexed site and
+        -- force-stream it instead of stalling (the sweeper keeps growing
+        -- the index, so the farm finds ATMs anywhere on the map)
+        local site, spos = outlawPickSite(pos, now)
+        if not site then
+            if now - outlawFarm.noAtmAt > 60 then
+                outlawFarm.noAtmAt = now
+                notify("Outlaw farm: still building the ATM map - scanning the area")
+            end
+            return
+        end
+        if (pos - spos).Magnitude > OUTLAW_REACH then
+            outlawFarm.state = nil
+            outlawFarm.target = nil
+            if now - outlawFarm.tpAt > 1 then
+                outlawFarm.tpAt = now
+                outlawFarm.siteKey = site
+                outlawFarm.sitePos = spos
+                outlawFarm.siteAt = now
+                pcall(function() char:PivotTo(CFrame.new(spos + Vector3.new(0, 3, 0))) end)
+                atmSweepAsync(spos)
+            end
+            return
+        end
+        -- on the site: give the forced stream a moment to deliver an ATM
+        if (now - (outlawFarm.siteAt or 0)) > ATM_SITE_WAIT then
+            outlawFarm.siteCool[atmKey(spos)] = now + ATM_SITE_COOLDOWN
+            outlawFarm.siteKey, outlawFarm.sitePos = nil, nil
         end
         return
     end
@@ -2912,6 +3226,9 @@ local function buildMenu()
         Config.Outlaw.Enabled = false
         outlawFarm.state = nil
         notify("Outlaw job quit")
+    end)
+    button(p5, "Index ATMs (stream the map)", function()
+        atmBootstrapRun()
     end)
 
     -- ---------------- Misc ----------------
