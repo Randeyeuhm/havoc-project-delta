@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v57"
+local SCRIPT_VERSION = "de-v58"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2234,6 +2234,19 @@ local function deliveryTick()
         local full = items >= maxCap
         local exhausted = rem ~= nil and rem <= 0
         local stalled = (now - deliveryFarm.itemsAt) > 12
+        -- Zero-pay long-haul runs (route >= ~1900 studs pay 0 on the live
+        -- build): when the server marks the run as no-pay and the route is
+        -- long, take one package and go - it only rerolls the next
+        -- assignment that much faster.
+        if tonumber(st.CashReward) == 0 and items >= 1
+            and typeof(st.DestinationPosition) == "Vector3"
+            and (st.DestinationPosition - st.PickupPosition).Magnitude >= 1900 then
+            if not deliveryFarm.speedRunLogged then
+                deliveryFarm.speedRunLogged = true
+                print("[driving-empire] delivery farm: zero-pay long run - delivering with 1 item to reroll faster")
+            end
+            full = true
+        end
         if atPickup and not (full or exhausted or stalled) then
             tryDeliveryInteract(deliveryLocationPart(st.PickupPosition), st.PickupPosition, now)
             return
@@ -2296,11 +2309,15 @@ local function installDeliveryProbe()
             deliveryFarm.tpUserWarned = false
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             if s then
-                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s type=%s cash=%s towing=%s towable=%s planned=%s"):format(
+                local route = "-"
+                if typeof(s.PickupPosition) == "Vector3" and typeof(s.DestinationPosition) == "Vector3" then
+                    route = ("%.0f"):format((s.DestinationPosition - s.PickupPosition).Magnitude)
+                end
+                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s type=%s cash=%s route=%s towing=%s towable=%s planned=%s"):format(
                     tostring(s.ItemsCarried), tostring(s.MaxCapacity),
                     tostring(s.PickupPosition), tostring(s.DestinationPosition),
                     tostring(s.IsCollecting), tostring(s.IsDropping),
-                    tostring(s.DeliveryTypeId), tostring(s.CashReward),
+                    tostring(s.DeliveryTypeId), tostring(s.CashReward), route,
                     tostring(s.IsTowing), tostring(s.TowableId), tostring(s.IsPlanned)))
             else
                 print("[driving-empire] delivery state: cleared")
@@ -2314,6 +2331,16 @@ local function installDeliveryProbe()
     if evDone and evDone.OnClientEvent then
         if vehicleHooks.deliveryDoneConn then pcall(function() vehicleHooks.deliveryDoneConn:Disconnect() end) end
         vehicleHooks.deliveryDoneConn = evDone.OnClientEvent:Connect(function(info)
+            -- Snapshot the finished run's context BEFORE the state clears.
+            local last = deliveryFarm.state
+            local route, eType, eCash = "-", nil, nil
+            if type(last) == "table" then
+                eType = last.DeliveryTypeId
+                eCash = last.CashReward
+                if typeof(last.PickupPosition) == "Vector3" and typeof(last.DestinationPosition) == "Vector3" then
+                    route = ("%.0f"):format((last.DestinationPosition - last.PickupPosition).Magnitude)
+                end
+            end
             deliveryFarm.state = nil
             deliveryFarm.pickupDone = false
             deliveryFarm.lastItems = -1
@@ -2321,15 +2348,17 @@ local function installDeliveryProbe()
             deliveryFarm.tpStrikes = 0
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             deliveryFarm.lastStart = 0  -- a new shift can start right away
+            deliveryFarm.speedRunLogged = false
             local reward = info and tonumber(info.CashReward)
             local failure = info and info.FailureReason
-            print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s streak=%s"):format(
-                tostring(info and info.CashReward), tostring(failure),
-                tostring(info and info.PreviousStreak)))
-            -- The payout ladder tops out after enough clean runs and the
-            -- server then pays 0 (seen live: 5200..16700, then 0, 0).
-            -- Re-hiring resets the ladder - exactly what a manual re-exec
-            -- did - so do it automatically after two zero-pay runs.
+            print(("[driving-empire] DeliveryCompleted: paid=%s expected=%s route=%s type=%s failure=%s streak=%s"):format(
+                tostring(info and info.CashReward), tostring(eCash), route,
+                tostring(eType), tostring(failure), tostring(info and info.PreviousStreak)))
+            -- Zero-pay runs are all long-haul on the live build (19/19 in
+            -- the console log: route >= ~1900 studs -> reward 0, shorter
+            -- routes paid). Two in a row means the assignment stream is
+            -- stuck there - re-hire the shift to reroll it (that is what a
+            -- manual re-hire did for the user).
             if not failure and reward == 0 then
                 deliveryFarm.zeroPays = (deliveryFarm.zeroPays or 0) + 1
                 if deliveryFarm.zeroPays >= 2 then
