@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v9"
+local SCRIPT_VERSION = "crim-v10"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1159,6 +1159,178 @@ local function applyCandidates()
     return n
 end
 
+-- ============================================================
+-- FULL-GC RECOIL HUNT
+-- ============================================================
+-- getscriptclosure hands this executor EMPTY dummy closures (proven:
+-- gc ok but zero upvalues anywhere), so the real functions must be found
+-- in the GC itself. One heavy pass over every GC function + table looks
+-- for the gun's recoil copy by its numbers: a function holding a number
+-- equal to the gun's original Recoil (or its scaled value) THAT ALSO
+-- references the recoil fields in its constants, or holds the kit's
+-- distinctive RecoilSpeed / RecoilDamper values (8.5 / 0.9999) - strong
+-- enough to avoid false hits. Tables with a numeric Recoil field are
+-- tracked like configs; tables carrying the speed/damper markers get
+-- their amount-like fields registered (custom naming). Runs on the Deep
+-- apply button and ONCE per gun (auto, when the slider is off 100%) -
+-- never on a timer; the registry keeps every slider move instant.
+local huntState = { at = 0, running = false, doneFor = nil }
+
+local function huntCtx()
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    local ctx = valueCtx(tool)
+    if not ctx.orig then
+        for _, rec in pairs(recoilGun.tables) do
+            if type(rec.Recoil) == "number" and rec.Speed then
+                ctx.orig, ctx.speed, ctx.damper = rec.Recoil, rec.Speed, rec.Damper
+                break
+            end
+        end
+    end
+    return ctx
+end
+
+local function huntAllGC()
+    local out = { fns = 0, num_cand = 0, num_risk = 0, cfg_tbl = 0, tbl_recoil = 0, tbl_combo = 0, fld_cand = 0, springs = 0 }
+    if type(getgc) ~= "function" then return out end
+    local ctx = huntCtx()
+    if not ctx or not ctx.orig then return out end
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    local scaled = ctx.orig * (pct / 100)
+    local function isMarker(v)
+        if ctx.speed and nearVal(v, ctx.speed) then return true end
+        if ctx.damper and nearVal(v, ctx.damper) then return true end
+        return false
+    end
+    local function isAmount(v)
+        return nearVal(v, ctx.orig) or nearVal(v, scaled)
+    end
+    local function trackRecoilTable(t)
+        if type(t.Recoil) ~= "number" or recoilGun.tables[t] then return end
+        local orig = t.Recoil
+        if nearVal(orig, scaled) then orig = ctx.orig end
+        recoilGun.tables[t] = { Recoil = orig }
+        out.tbl_recoil += 1
+    end
+    pcall(function()
+        for _, obj in pairs(getgc(true)) do
+            if type(obj) == "function" then
+                out.fns += 1
+                local hitIdx, hitName = nil, nil
+                local mark, recoilConst = false, false
+                pcall(function()
+                    local okc, consts = pcall(debug.getconstants, obj)
+                    if okc and type(consts) == "table" then
+                        for _, c in ipairs(consts) do
+                            if type(c) == "string" and (c == "Recoil" or c == "RecoilRedution") then
+                                recoilConst = true
+                                break
+                            end
+                        end
+                    end
+                end)
+                pcall(function()
+                    local i = 1
+                    while true do
+                        local name, val = debug.getupvalue(obj, i)
+                        if not name then break end
+                        if typeof(val) == "number" then
+                            if isMarker(val) then mark = true end
+                            if isAmount(val) and not hitIdx then
+                                hitIdx, hitName = i, tostring(name)
+                            end
+                        elseif type(val) == "table" then
+                            trackRecoilTable(val)
+                        end
+                        i += 1
+                    end
+                end)
+                if hitIdx then
+                    local lname = string.lower(hitName or "")
+                    local blocked = string.find(lname, "damage", 1, true) or string.find(lname, "health", 1, true)
+                        or string.find(lname, "armor", 1, true) or string.find(lname, "range", 1, true)
+                    if blocked then
+                        out.num_risk += 1
+                    elseif recoilConst or mark then
+                        local key = tostring(obj) .. "#" .. tostring(hitIdx)
+                        if not recoilCandidates.numbers.seen[key] then
+                            recoilCandidates.numbers.seen[key] = true
+                            table.insert(recoilCandidates.numbers.list, { fn = obj, idx = hitIdx, base = ctx.orig, name = hitName or "?" })
+                            out.num_cand += 1
+                        end
+                    else
+                        out.num_risk += 1
+                    end
+                end
+            elseif type(obj) == "table" then
+                if looksLikeGunConfig(obj) then
+                    if not recoilGun.tables[obj] then
+                        recoilGun.tables[obj] = {
+                            Recoil = obj.Recoil,
+                            Speed = tonumber(obj.RecoilSpeed),
+                            Damper = tonumber(obj.RecoilDamper),
+                            Redution = tonumber(obj.RecoilRedution),
+                        }
+                        out.cfg_tbl += 1
+                    end
+                elseif type(obj.Recoil) == "number" then
+                    trackRecoilTable(obj)
+                else
+                    local combo, amtKey = false, nil
+                    local n = 0
+                    for k, v in pairs(obj) do
+                        n += 1
+                        if n > 60 then break end
+                        if typeof(v) == "number" then
+                            if isMarker(v) then combo = true end
+                            if isAmount(v) and amtKey == nil then amtKey = k end
+                        end
+                    end
+                    if combo then
+                        out.tbl_combo += 1
+                        if amtKey ~= nil then
+                            local key = tostring(obj) .. "." .. tostring(amtKey)
+                            if not recoilCandidates.fields.seen[key] then
+                                recoilCandidates.fields.seen[key] = true
+                                table.insert(recoilCandidates.fields.list, { tbl = obj, key = amtKey, base = ctx.orig, name = tostring(amtKey) })
+                                out.fld_cand += 1
+                            end
+                        end
+                    end
+                end
+                if looksLikeSpring(obj) then
+                    if wrapSpringInstance(obj) then out.springs += 1 end
+                end
+            end
+        end
+    end)
+    return out
+end
+
+local function runHunt(reason, force)
+    if huntState.running then return end
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not force and tool and tool == huntState.doneFor and (os.clock() - huntState.at) < 30 then
+        return
+    end
+    huntState.running = true
+    task.spawn(function()
+        local ok, out = pcall(huntAllGC)
+        pcall(applyCandidates)
+        huntState.running = false
+        huntState.at = os.clock()
+        huntState.doneFor = tool
+        if ok then
+            print(("[criminality] recoil hunt (%s): fns %d, +%d number, +%d table, combo %d, +%d field, springs %d (risk %d)"):format(
+                tostring(reason), out.fns, out.num_cand, out.tbl_recoil, out.tbl_combo, out.fld_cand, out.springs, out.num_risk))
+        else
+            print(("[criminality] recoil hunt (%s) failed: %s"):format(tostring(reason), tostring(out)))
+        end
+    end)
+end
+
 -- Closure scan of the equipped gun's own script: the Client LocalScript
 -- holds ITS config table (and any snapshotted numbers) as upvalues. This
 -- finds them via getscriptclosure - the table found here is the exact one
@@ -1271,11 +1443,14 @@ end
 -- backpack into the character when equipped).
 local function rescaleAndPatch()
     pcall(applyGunRecoil)
-    pcall(function() closureScanEquipped() end)
     pcall(applySnapshotPatches)
     pcall(applyAnchoredPatches)
-    pcall(scanValuesTool)
     pcall(applyCandidates)
+    -- full recoil hunt once per gun when the slider is off 100% (brief
+    -- one-time hitch, then every slider move is instant from the registry)
+    if (tonumber(Config.Weapons.RecoilPct) or 100) ~= 100 then
+        task.delay(0.9, function() pcall(runHunt, "equip") end)
+    end
 end
 
 local function watchToolsForRecoil(char)
@@ -1669,18 +1844,15 @@ local function buildMenu()
             task.spawn(function()
                 local applied, blocked = applyRecoil()
                 local guns = applyGunRecoil()
-                pcall(function() closureScanEquipped() end)
-                local snaps = applySnapshotPatches()
-                local scan = nil
-                pcall(function() scan = scanValuesTool() end)
                 local anchored = applyAnchoredPatches()
                 local cands = applyCandidates()
-                print(("[criminality] recoil %d%% -> configs %d, CamShake %d, snapshots %d | tool %s: +%d num, +%d fld, combo %d, spd %d, dmp %d | anchored %d, candidates %d%s"):format(
-                    math.floor(v + 0.5), guns, applied, snaps,
-                    scan and scan.tool or "?", scan and scan.number_patches or 0, scan and scan.field_patches or 0,
-                    scan and scan.combo_tables or 0, scan and scan.speed_hits or 0, scan and scan.damper_hits or 0,
-                    anchored, cands,
+                print(("[criminality] recoil %d%% -> configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
+                    math.floor(v + 0.5), guns, applied, anchored, cands,
                     blocked > 0 and (" (" .. blocked .. " locked)") or ""))
+                if math.floor(v + 0.5) ~= 100
+                    and #recoilCandidates.numbers.list == 0 and #recoilCandidates.fields.list == 0 then
+                    task.delay(0.7, function() pcall(runHunt, "slider") end)
+                end
             end)
         end, 5, 0, 200)
     button(p3, "Probe recoil (console)", function()
@@ -1696,45 +1868,20 @@ local function buildMenu()
     end)
     button(p3, "Deep apply (one-time scan)", function()
         task.spawn(function()
-            local cfgs, springs, closure = deepScanAll()
+            local cfgs, springs = deepScanAll()
             local guns = applyGunRecoil()
             local shake = applyRecoil()
             local snaps = applySnapshotPatches()
-            local scanTool = nil
-            pcall(function() scanTool = scanValuesTool() end)
-            local scanBundle = nil
-            pcall(function() scanBundle = scanValuesBundle() end)
-            local anchored = applyAnchoredPatches()
-            local cands = applyCandidates()
-            notify(("Deep scan: tool %s: +%d num, +%d fld | service: +%d num, +%d fld - shoot to test"):format(
-                scanTool and scanTool.tool or "?",
-                scanTool and scanTool.number_patches or 0, scanTool and scanTool.field_patches or 0,
-                scanBundle and scanBundle.number_patches or 0, scanBundle and scanBundle.field_patches or 0))
-            print(("[criminality] deep scan: +%d configs, +%d springs, %d guns, snapshots %d | tool %s: +%d num, +%d fld, combo %d, spd %d, dmp %d, gc %s | service: +%d num, +%d fld, combo %d, spd %d, dmp %d | candidates %d, anchored %d (pct %d%%)"):format(
-                cfgs, springs, guns, snaps,
-                scanTool and scanTool.tool or "?", scanTool and scanTool.number_patches or 0,
-                scanTool and scanTool.field_patches or 0, scanTool and scanTool.combo_tables or 0,
-                scanTool and scanTool.speed_hits or 0, scanTool and scanTool.damper_hits or 0,
-                scanTool and scanTool.getconstants or "?",
-                scanBundle and scanBundle.number_patches or 0, scanBundle and scanBundle.field_patches or 0,
-                scanBundle and scanBundle.combo_tables or 0, scanBundle and scanBundle.speed_hits or 0,
-                scanBundle and scanBundle.damper_hits or 0,
-                cands, anchored, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
-            if closure then
-                local nums2 = {}
-                for k, v in pairs(closure.numbers) do table.insert(nums2, ("%sx%d"):format(k, v)) end
-                table.sort(nums2)
-                local shown = {}
-                for i = 1, math.min(#nums2, 10) do table.insert(shown, nums2[i]) end
-                print(("[criminality] closure scan: %s, scripts %d, +%d config tables, +%d snapshots, numbers: %s"):format(
-                    closure.available and "ok" or "getscriptclosure missing",
-                    closure.scripts, closure.newTables, closure.snapshots, table.concat(shown, ", ")))
-            end
+            runHunt("deep", true)
+            notify(("Deep scan: +%d config(s), +%d spring(s) - hunt running, watch the console"):format(cfgs, springs))
+            print(("[criminality] deep scan: +%d configs, +%d springs, %d guns, snapshots %d (pct %d%%)"):format(
+                cfgs, springs, guns, snaps, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
         end)
     end)
-    note(p3, "100% = the game's own recoil. The config is scaled when a gun arrives, and every copy the weapon " ..
-        "scripts cached from it is patched LIVE on each slider move (found by name AND by the field names their code " ..
-        "touches - Deep apply scans the whole weapon service for anything left). Last resort: drop & pick the gun.")
+    note(p3, "100% = the game's own recoil. The config is scaled when a gun arrives; the recoil hunt then finds the " ..
+        "copies the weapon cached (by their numbers, even without names) and patches them LIVE on every slider move - " ..
+        "it auto-runs once per gun when the slider is off 100, and Deep apply forces a fresh full scan. " ..
+        "Last resort: drop & pick the gun.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
