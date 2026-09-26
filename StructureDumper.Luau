@@ -1,5 +1,5 @@
 --[[
-    STRUCTURE DUMPER v7 — single file, no runtime hooks
+    STRUCTURE DUMPER v8 — single file, no runtime hooks
     One file with: game info, all decompiled scripts, full tree,
     every attribute, every ValueBase, remotes/bindables, assets,
     tags and game UI.
@@ -7,6 +7,11 @@
     v7: script roots resolve services BY INSTANCE - this game renames
     Workspace (hidden char) and ReplicatedStorage ("RepIicatedStorage"),
     which made the old name-keyed roots capture nothing.
+    v8: live progress prints (service + per-script + write chunks) and a
+    task.wait() after every script — v7 made the Workspace/RS script volume
+    real for the first time and the dump can take a while; it used to print
+    nothing until the end and look frozen. Also skips identical sources
+    (the same gun script replicated for every player) to keep it smaller.
     Potassium-friendly.
 ]]
 
@@ -183,13 +188,20 @@ local function writeLarge(path, content)
     if #content <= WRITE_CHUNK or not appendfile then
         return pcall(writefile, path, content)
     end
+    local total = math.ceil(#content / WRITE_CHUNK)
+    print(("[write] saving %d chunks (%.1f MB)..."):format(total, #content / 1048576))
     local ok, err = pcall(writefile, path, content:sub(1, WRITE_CHUNK))
     if not ok then return ok, err end
     local pos = WRITE_CHUNK + 1
+    local i = 1
     while pos <= #content do
+        i = i + 1
         local cok, cerr = pcall(appendfile, path, content:sub(pos, pos + WRITE_CHUNK - 1))
         if not cok then return cok, cerr end
         pos = pos + WRITE_CHUNK
+        if i % 5 == 0 or pos > #content then
+            print(("[write] chunk %d/%d"):format(i, total))
+        end
     end
     return true
 end
@@ -202,7 +214,7 @@ local function flushDump()
 
     local parts = {
         string.rep("=", 66) .. "\n",
-        "HAVOC STRUCTURE DUMP v7 — single file\n",
+        "HAVOC STRUCTURE DUMP v8 — single file\n",
         ("Generated: %s\n"):format(os.date("%Y-%m-%d %H:%M:%S")),
         ("Payload:   %.1f KB across %d sections\n"):format(total / 1024, #sections),
         string.rep("=", 66) .. "\n\n",
@@ -311,6 +323,7 @@ local scriptCount, scriptOK, scriptFail, scriptSkipped = 0, 0, 0, 0
 local scriptBytesTotal = 0
 local scriptIndex = {}
 local scriptChunks = {}
+local scriptSigs = {}   -- dedupe: identical sources (same script replicated per player)
 
 -- Animate/Health on a rig = Roblox default, not game code
 local function isDefaultCharScript(inst)
@@ -326,6 +339,7 @@ local function dumpScript(inst, path)
         return
     end
     scriptCount = scriptCount + 1
+    print(("[script %d] %s"):format(scriptCount, #path > 110 and (path:sub(1, 110) .. "...") or path))
 
     local source, method, errMsg
 
@@ -353,6 +367,7 @@ local function dumpScript(inst, path)
         scriptFail = scriptFail + 1
         table.insert(scriptIndex, string.format("[FAIL ] %s  %s",
             path, errMsg or "no method worked"))
+        task.wait()
         return
     end
 
@@ -361,6 +376,15 @@ local function dumpScript(inst, path)
         method = method .. " (truncated)"
     end
 
+    local sig = inst.ClassName .. "|" .. inst.Name .. "|" .. #source .. "|" .. source:sub(1, 96)
+    if scriptSigs[sig] then
+        scriptSkipped = scriptSkipped + 1
+        table.insert(scriptIndex, string.format("[DUP  ] %s  (%.1f KB, identical source already dumped)",
+            path, #source / 1024))
+        task.wait()
+        return
+    end
+    scriptSigs[sig] = true
     scriptOK = scriptOK + 1
     scriptBytesTotal = scriptBytesTotal + #source
     table.insert(scriptIndex, string.format("[OK   ] %s  (%s)  %s",
@@ -377,6 +401,7 @@ local function dumpScript(inst, path)
 
     local body = header .. source .. "\n\n"
     table.insert(scriptChunks, body)
+    task.wait()
 end
 
 -- ============================================================
@@ -449,19 +474,24 @@ end
 -- ============================================================
 -- MAIN
 -- ============================================================
-print("===== DUMPER v7 START =====")
+print("===== DUMPER v8 START =====")
 local startTime = tick()
 
 local services = game:GetChildren()
 table.sort(services, function(a, b) return a.Name < b.Name end)
 
-for _, svc in ipairs(services) do
+local svcTotal = #services
+for si, svc in ipairs(services) do
     if not SKIP_SERVICES[svc.Name] then
         local dumpHere = isDumpScriptService(svc)
+        print(("[walk %d/%d] %s%s"):format(si, svcTotal, svc.Name,
+            dumpHere and "  (script sources)" or ""))
         local ok, err = pcall(function() walk(svc, 0, "", dumpHere) end)
         if not ok then
             print(("[err ] %s: %s"):format(svc.Name, tostring(err)))
         end
+        print(("[walk %d/%d] %s done  (scripts ok=%d dup=%d fail=%d)"):format(
+            si, svcTotal, svc.Name, scriptOK, scriptSkipped, scriptFail))
         task.wait()
     end
 end
@@ -523,7 +553,7 @@ end
 -- ============================================================
 do
     local lines = {}
-    table.insert(lines, "# Structure Summary (v7 — single file)")
+    table.insert(lines, "# Structure Summary (v8 — single file)")
     table.insert(lines, "")
     table.insert(lines, ("Generated:  %s"):format(os.date("%Y-%m-%d %H:%M:%S")))
     table.insert(lines, ("Elapsed:    %.1fs"):format(tick() - startTime))

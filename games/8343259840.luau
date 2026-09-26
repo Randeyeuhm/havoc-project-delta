@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v14"
+local SCRIPT_VERSION = "crim-v15"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1923,8 +1923,19 @@ local function buildMenu()
             if not quiet then notify("Re-equip: UnequipTools failed - use your drop key") end
             return false
         end
-        task.wait(0.45)
-        local again = char:FindFirstChildOfClass("Tool") or (bp and bp:FindFirstChildOfClass("Tool"))
+        -- smooth swap: poll the backpack every frame and re-equip the instant
+        -- the gun lands back in it (usually 1-2 frames) - the old fixed 0.45s
+        -- wait drew the fists out for everyone to see
+        local toolName = tool.Name
+        local again = bp and bp:FindFirstChild(toolName)
+        local deadline = os.clock() + 1.2
+        while not again and os.clock() < deadline do
+            task.wait()
+            again = bp and bp:FindFirstChild(toolName)
+        end
+        if not again then
+            again = (bp and bp:FindFirstChildOfClass("Tool")) or char:FindFirstChildOfClass("Tool")
+        end
         if not again then
             if not quiet then notify("Re-equip: gun missing after unequip - grab it manually") end
             return false
