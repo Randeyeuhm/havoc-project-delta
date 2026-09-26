@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v61"
+local SCRIPT_VERSION = "de-v62"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2145,24 +2145,28 @@ local function deliveryTick()
         end
     end
 
-    -- Robbed dry: a steal can empty the load while the pickup pile is empty
-    -- too - nothing left to collect or deliver, and the server does not
-    -- always fail the run, so the farm used to sit at the pickup forever.
-    -- After a short grace, drop the dead delivery and start a fresh shift.
+    -- Robbed dry: a steal can empty the load. If the pickup pile still has
+    -- packages the farm goes back and re-collects (streak/level kept - no
+    -- restart is needed there). Only when the pile is ALSO empty is the run
+    -- un-completable: re-requesting a shift is what can reset the streak,
+    -- so that last resort waits for certainty (pile empty for 10s, or the
+    -- server not reporting the pile at all for 60s).
     if deliveryFarm.robbedAt and items == 0 and not st.IsDropping then
         local remNow = tonumber(st.PackagesRemainingAtPickup)
-        local deadAfter = (remNow ~= nil and remNow <= 0) and 8 or 25
-        if (now - deliveryFarm.robbedAt) > deadAfter and (now - deliveryFarm.itemsAt) > deadAfter then
-            deliveryFarm.robbedAt = nil
-            deliveryFarm.state = nil
-            deliveryFarm.pickupDone = false
-            deliveryFarm.lastItems = -1
-            deliveryFarm.wantRestart = true
-            deliveryFarm.startSince = 0
-            deliveryFarm.lastStart = 0
-            notify("Delivery farm: cargo was stolen - restarting the run")
-            print("[driving-empire] delivery farm: load stolen and nothing left to collect - restarting")
-            return
+        if remNow == nil or remNow <= 0 then
+            local deadAfter = (remNow ~= nil) and 10 or 60
+            if (now - deliveryFarm.robbedAt) > deadAfter and (now - deliveryFarm.itemsAt) > deadAfter then
+                deliveryFarm.robbedAt = nil
+                deliveryFarm.state = nil
+                deliveryFarm.pickupDone = false
+                deliveryFarm.lastItems = -1
+                deliveryFarm.wantRestart = true
+                deliveryFarm.startSince = 0
+                deliveryFarm.lastStart = 0
+                notify("Delivery farm: robbed with an empty pickup - starting the next run")
+                print("[driving-empire] delivery farm: load stolen and the pickup pile is empty - starting the next run")
+                return
+            end
         end
     end
 
