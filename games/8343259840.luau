@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v15"
+local SCRIPT_VERSION = "crim-v16"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1490,6 +1490,155 @@ local function deepScanAll()
     return cfgs, springs, closure
 end
 
+-- ============================================================
+-- RECOIL COPY PATCHER (decoded from the game dump - the real lever)
+-- ============================================================
+-- NewModules/Client/Services/Gun copies the weapon config into LOCALS the
+-- moment a gun loads (verified in the dump, Shoot() at line 2239 region):
+--     local Recoil = fcf.Recoil          -- a shared "ref" upvalue cell
+-- and EVERY shot fires Events2.RCL (BindableEvent) with
+--     Vector3.new(rand(-R, R) / 4, 0, rand(R / 2, R))    (R = that copy)
+-- The copy never changes on its own - which is exactly why every value
+-- diff and GC hunt came up empty. But it is a normal upvalue cell and this
+-- game keeps upvalue debug names ("Recoil" is readable at runtime), so we
+-- find the closure once and debug.setupvalue the cell on slider moves =
+-- LIVE recoil, no drop/pick needed.
+local recoilCopy = { cells = {}, lastScan = 0 }
+local recoilCopyScanning = false
+
+local function findRecoilCopy(announce)
+    if recoilCopyScanning then return 0 end
+    if type(getgc) ~= "function" then
+        if announce then notify("Recoil copy: getgc unavailable") end
+        return 0
+    end
+    recoilCopyScanning = true
+    pcall(function()
+        local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
+        local cfg = equippedToolConfig()
+        if cfg then pcall(trackGunCfg, cfg) end
+        local rec = cfg and recoilGun.tables[cfg] or nil
+        local orig = rec and rec.Recoil or nil
+        local fnsList, seenFn = {}, {}
+        local lists = {}
+        pcall(function() lists[#lists + 1] = getgc(true) end)
+        pcall(function() lists[#lists + 1] = getgc(false) end)
+        pcall(function() lists[#lists + 1] = getgc() end)
+        for _, list in ipairs(lists) do
+            for _, obj in pairs(list) do
+                if type(obj) == "function" and not seenFn[obj] then
+                    seenFn[obj] = true
+                    fnsList[#fnsList + 1] = obj
+                end
+            end
+        end
+        local fns, found = #fnsList, 0
+        local lines = {}
+        local function register(fn, idx, name, val, how, sib)
+            local key = tostring(fn) .. "|" .. tostring(idx)
+            for _, c in ipairs(recoilCopy.cells) do
+                if c.key == key then return end
+            end
+            while #recoilCopy.cells >= 60 do table.remove(recoilCopy.cells, 1) end
+            local base = orig or ((pctNow == 100) and val) or (val * 100 / math.max(pctNow, 1))
+            recoilCopy.cells[#recoilCopy.cells + 1] = {
+                key = key, fn = fn, idx = idx, name = tostring(name), how = how, base = base,
+            }
+            found += 1
+            lines[#lines + 1] = ("%d) %s idx=%d val=%.4f base=%.4f [%s] sib: %s"):format(
+                found, tostring(name), idx, val, base, how, sib or "-")
+        end
+        -- pass 1: upvalue NAME match (debug names are kept: "Recoil")
+        for _, fn in ipairs(fnsList) do
+            pcall(function()
+                local hitIdx, hitName, hitVal
+                local sib = {}
+                local i = 1
+                while true do
+                    local name, val = debug.getupvalue(fn, i)
+                    if name == nil then break end
+                    local lname = type(name) == "string" and name:lower() or ""
+                    if lname == "events2" or lname == "spread" or lname == "effects"
+                        or lname == "ammo" or lname == "crosshairmodule" or lname == "get3dposition" then
+                        sib[#sib + 1] = name
+                    end
+                    if type(val) == "number" and val > 0.01 and val < 100000
+                        and string.find(lname, "recoil", 1, true)
+                        and not string.find(lname, "speed", 1, true)
+                        and not string.find(lname, "damper", 1, true)
+                        and not string.find(lname, "reduc", 1, true)
+                        and not string.find(lname, "redut", 1, true) then
+                        hitIdx, hitName, hitVal = i, name, val
+                    end
+                    i += 1
+                    if i > 80 then break end
+                end
+                if hitIdx then
+                    register(fn, hitIdx, hitName, hitVal, "name", #sib > 0 and table.concat(sib, ",") or nil)
+                end
+            end)
+        end
+        -- pass 2: constant fingerprint "RCL" (only if names found nothing)
+        if found == 0 and type(debug.getconstants) == "function" then
+            for _, fn in ipairs(fnsList) do
+                pcall(function()
+                    local consts = debug.getconstants(fn)
+                    if type(consts) ~= "table" then return end
+                    local hasRCL = false
+                    for _, c in ipairs(consts) do
+                        if c == "RCL" then
+                            hasRCL = true
+                            break
+                        end
+                    end
+                    if not hasRCL then return end
+                    local i = 1
+                    while true do
+                        local name, val = debug.getupvalue(fn, i)
+                        if name == nil then break end
+                        if type(val) == "number" and val > 0.01 and val < 100000 then
+                            local matched = orig and math.abs(val - orig) < orig * 0.02
+                            register(fn, i, name, val, matched and "rcl+match" or "rcl", "RCL-const")
+                        end
+                        i += 1
+                        if i > 80 then break end
+                    end
+                end)
+            end
+        end
+        recoilCopy.lastScan = os.clock()
+        if announce or found > 0 then
+            print(("[criminality] recoil copy scan: fns=%d found=%d (pct %d, orig %s)"):format(
+                fns, found, math.floor(pctNow + 0.5), orig and string.format("%.4f", orig) or "?"))
+            for _, line in ipairs(lines) do
+                print("[criminality]   copy " .. line)
+            end
+        end
+    end)
+    recoilCopyScanning = false
+    return #recoilCopy.cells
+end
+
+local function applyRecoilCopy(pct, announce)
+    local n = 0
+    for i = #recoilCopy.cells, 1, -1 do
+        local c = recoilCopy.cells[i]
+        if c.how ~= "rcl" then
+            local want = c.base * pct / 100
+            local ok = pcall(debug.setupvalue, c.fn, c.idx, want)
+            if not ok then
+                table.remove(recoilCopy.cells, i)
+            else
+                n += 1
+            end
+        end
+    end
+    if announce then
+        print(("[criminality] recoil copy: live-patched %d cell(s) to %d%%"):format(n, math.floor(pct + 0.5)))
+    end
+    return n
+end
+
 -- Scale the current gun + every gun equipped later (tools move from the
 -- backpack into the character when equipped).
 local function rescaleAndPatch()
@@ -1497,9 +1646,16 @@ local function rescaleAndPatch()
     pcall(applySnapshotPatches)
     pcall(applyAnchoredPatches)
     pcall(applyCandidates)
+    local pctNow = tonumber(Config.Weapons.RecoilPct) or 100
+    pcall(function() applyRecoilCopy(pctNow) end)
+    -- find the loaded gun's Recoil copy cell (one bounded scan, throttled;
+    -- always try the first time, then only while the slider is off 100%)
+    if (#recoilCopy.cells == 0 or pctNow ~= 100) and os.clock() - recoilCopy.lastScan > 20 then
+        task.delay(0.8, function() pcall(findRecoilCopy, "equip") end)
+    end
     -- full recoil hunt once per gun when the slider is off 100% (brief
     -- one-time hitch, then every slider move is instant from the registry)
-    if (tonumber(Config.Weapons.RecoilPct) or 100) ~= 100 then
+    if pctNow ~= 100 then
         task.delay(0.9, function() pcall(runHunt, "equip") end)
     end
 end
@@ -1923,18 +2079,19 @@ local function buildMenu()
             if not quiet then notify("Re-equip: UnequipTools failed - use your drop key") end
             return false
         end
-        -- smooth swap: poll the backpack every frame and re-equip the instant
-        -- the gun lands back in it (usually 1-2 frames) - the old fixed 0.45s
-        -- wait drew the fists out for everyone to see
+        -- the 0.45s gap matters: the gun script must fully stop and the game
+        -- must process the unequip before the re-pick reloads the config
+        -- (v15 tried an instant swap - the new % did NOT apply)
+        task.wait(0.45)
         local toolName = tool.Name
         local again = bp and bp:FindFirstChild(toolName)
-        local deadline = os.clock() + 1.2
+        local deadline = os.clock() + 1.0
         while not again and os.clock() < deadline do
             task.wait()
             again = bp and bp:FindFirstChild(toolName)
         end
         if not again then
-            again = (bp and bp:FindFirstChildOfClass("Tool")) or char:FindFirstChildOfClass("Tool")
+            again = char:FindFirstChildOfClass("Tool") or (bp and bp:FindFirstChildOfClass("Tool"))
         end
         if not again then
             if not quiet then notify("Re-equip: gun missing after unequip - grab it manually") end
@@ -1960,12 +2117,16 @@ local function buildMenu()
                 local guns = applyGunRecoil()
                 local anchored = applyAnchoredPatches()
                 local cands = applyCandidates()
-                print(("[criminality] recoil %d%% -> configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
-                    math.floor(v + 0.5), guns, applied, anchored, cands,
+                local copyN = applyRecoilCopy(v)
+                print(("[criminality] recoil %d%% -> copy %d, configs %d, CamShake %d | anchored %d, candidates %d%s"):format(
+                    math.floor(v + 0.5), copyN, guns, applied, anchored, cands,
                     blocked > 0 and (" (" .. blocked .. " locked)") or ""))
                 if math.floor(v + 0.5) ~= 100
                     and #recoilCandidates.numbers.list == 0 and #recoilCandidates.fields.list == 0 then
                     task.delay(0.7, function() pcall(runHunt, "slider") end)
+                end
+                if copyN == 0 and os.clock() - recoilCopy.lastScan > 20 then
+                    task.delay(0.5, function() pcall(findRecoilCopy, "slider") end)
                 end
             end)
             if Config.Weapons.AutoApply then
@@ -2355,9 +2516,20 @@ local function buildMenu()
             recycleGunNow(false)
         end)
     end)
-    note(p3, "Set the %, then 'Apply % (drop + re-equip)' cycles the gun exactly like a manual drop/pick (that is " ..
-        "how the game picks up a new %). 'Auto apply' does it automatically ~1s after you let go of the slider. " ..
-        "Trace v2 is for the recoil hunt: set 100%, hold a gun, hit it and FIRE when told - send the console block.")
+    button(p3, "Find recoil copy (live patch)", function()
+        task.spawn(function()
+            findRecoilCopy(true)
+            local n = applyRecoilCopy(tonumber(Config.Weapons.RecoilPct) or 100, true)
+            if n > 0 then
+                notify(("Recoil copy: %d live cell(s) - the slider now changes recoil instantly"):format(n))
+            else
+                notify("Recoil copy: none found - hold the gun (picked at 100%) and try again")
+            end
+        end)
+    end)
+    note(p3, "'Find recoil copy' once (gun held, picked at 100%) = the slider then changes recoil INSTANTLY while " ..
+        "you shoot (it patches the copy the gun made at load). 'Apply %' cycles the gun like a manual drop/pick " ..
+        "and 'Auto apply' does that ~1s after you let go of the slider, as backup.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
