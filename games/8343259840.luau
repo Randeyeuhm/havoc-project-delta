@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v17"
+local SCRIPT_VERSION = "crim-v18"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -829,18 +829,22 @@ wrapSpringInstance = function(obj)
 end
 
 -- ============================================================
--- LIVE RECOIL KICK INTERCEPTOR (the RCL event swap)
+-- LIVE RECOIL KICK INTERCEPTOR (RCL)
 -- ============================================================
 -- Decoded from the dump: the gun module builds the recoil kick from the
 -- config value it copied at load and fires it as
 --     Events2.RCL:Fire(Vector3.new(rand(-R, R) / 4, 0, rand(R / 2, R)))
--- Events2 is the folder ReplicatedStorage.Events2 and the fire site looks
--- up the "RCL" child BY NAME on every shot. So: rename the original event,
--- drop in our own "RCL", scale the vector by the slider and forward it to
--- the original - the game's camera listener (wherever it lives) receives
--- the scaled kick. Live percentage, any gun, no drop/pick, no hooks, no
--- remote traffic (BindableEvent is client-local).
-local rclHook = { original = nil, mine = nil, active = false }
+-- Two interception modes, one active at a time:
+--   "hook": __namecall intercept on the original RCL instance's Fire -
+--           catches the kick no matter how the gun holds the reference
+--           (works even if the game cached the instance at load).
+--   "swap": rename the original to RCLBackup and insert our own "RCL"
+--           child, scale, forward to the original (fallback for executors
+--           without metamethod hooks; covers the dynamic-lookup path).
+-- No remotes are touched (BindableEvent is client-local).
+local rclHook = { original = nil, mine = nil, active = false, mode = "none", hooked = false }
+local rclForwarding = false
+local rclShared = (type(getgenv) == "function" and getgenv()) or _G
 
 local function rclFactor()
     return (tonumber(Config.Weapons.RecoilPct) or 100) / 100
@@ -850,6 +854,8 @@ local function resetRCLHook()
     rclHook.original = nil
     rclHook.mine = nil
     rclHook.active = false
+    rclHook.mode = "none"
+    rclHook.hooked = false
     local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
     if not e2 then return end
     local backup = e2:FindFirstChild("RCLBackup")
@@ -867,10 +873,46 @@ local function installRCLHook()
     if rclHook.active then return true end
     local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
     local orig = e2 and e2:FindFirstChild("RCL")
-    if not orig or not orig:IsA("BindableEvent") or not e2 then
+    if not e2 or not orig or not orig:IsA("BindableEvent") then
         return false
     end
-    pcall(function()
+    rclHook.original = orig
+    -- mode 1: __namecall hook (preferred - catches cached references too)
+    if type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
+        local ok = pcall(function()
+            local old
+            old = hookmetamethod(game, "__namecall", function(self, ...)
+                if self == orig and getnamecallmethod() == "Fire" and not rclForwarding then
+                    if rclShared.__HavocRclSkip then
+                        return old(self, ...)
+                    end
+                    local v = ...
+                    if typeof(v) == "Vector3" then
+                        local f = rclFactor()
+                        if f ~= 1 then
+                            -- mark so older stacked hooks pass through unscaled
+                            rclShared.__HavocRclSkip = true
+                            local res = old(self, v * f, select(2, ...))
+                            rclShared.__HavocRclSkip = false
+                            return res
+                        end
+                    end
+                end
+                return old(self, ...)
+            end)
+            if type(old) == "function" then
+                rclHook.hooked = true
+            end
+        end)
+        if ok and rclHook.hooked then
+            rclHook.active = true
+            rclHook.mode = "hook"
+            print("[criminality] rcl hook: installed via __namecall (live recoil kick scaling)")
+            return true
+        end
+    end
+    -- mode 2: folder-child swap (dynamic lookup path)
+    local ok = pcall(function()
         orig.Name = "RCLBackup"
         local mine = Instance.new("BindableEvent")
         mine.Name = "RCL"
@@ -883,19 +925,27 @@ local function installRCLHook()
             end
             local o = rclHook.original
             if o and o.Parent then
+                rclForwarding = true
                 o:Fire(out, ...)
+                rclForwarding = false
             end
         end)
-        rclHook.original = orig
         rclHook.mine = mine
         rclHook.active = true
-        print("[criminality] rcl hook: installed (live recoil kick scaling)")
+        rclHook.mode = "swap"
     end)
-    return rclHook.active
+    if ok and rclHook.mode == "swap" then
+        print("[criminality] rcl hook: installed via event swap (no metamethod hook available)")
+        return true
+    end
+    rclHook.mode = "none"
+    return false
 end
 
 pcall(resetRCLHook)
 pcall(installRCLHook)
+print(("[criminality] rcl: hookmetamethod=%s getnamecallmethod=%s getconnections=%s"):format(
+    tostring(type(hookmetamethod)), tostring(type(getnamecallmethod)), tostring(type(getconnections))))
 
 -- ============================================================
 -- SNAPSHOT PATCHING (slider changes without re-picking the gun)
@@ -2594,13 +2644,34 @@ local function buildMenu()
         task.spawn(function()
             resetRCLHook()
             local ok = installRCLHook()
-            notify(ok and "Live recoil hook reinstalled - slider is instant"
+            notify(ok and ("Live recoil hook reinstalled (" .. rclHook.mode .. ") - slider is instant")
                 or "Live recoil: RCL event not found (are you in a game session?)")
         end)
     end)
-    note(p3, "Live recoil installs at load (watch for 'rcl hook: installed') - the slider then scales the kick " ..
-        "instantly while you shoot, on any gun, no drop/pick. 'Apply %' cycles the gun manually and 'Auto apply' " ..
-        "does that ~1s after the slider settles, as backup. 'Find recoil copy' is a diagnostic scan.")
+    button(p3, "RCL probe (shoot 5s)", function()
+        task.spawn(function()
+            local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
+            local cur = e2 and e2:FindFirstChild("RCL")
+            local bak = e2 and e2:FindFirstChild("RCLBackup")
+            print(("[criminality] rcl probe: mode=%s hooked=%s active=%s | RCL=%s backup=%s | hook=%s method=%s conns=%s"):format(
+                rclHook.mode, tostring(rclHook.hooked), tostring(rclHook.active),
+                tostring(cur and cur.ClassName), tostring(bak and bak.ClassName),
+                tostring(type(hookmetamethod)), tostring(type(getnamecallmethod)), tostring(type(getconnections))))
+            local firesA, firesB = 0, 0
+            local c1 = cur and cur:IsA("BindableEvent") and cur.Event:Connect(function() firesA += 1 end)
+            local c2 = bak and bak:IsA("BindableEvent") and bak.Event:Connect(function() firesB += 1 end)
+            notify("RCL probe: SHOOT for 5 seconds")
+            print("[criminality] rcl probe: FIRE NOW (5s)")
+            task.wait(5)
+            if c1 then c1:Disconnect() end
+            if c2 then c2:Disconnect() end
+            print(("[criminality] rcl probe: kicks on 'RCL'=%d, on original=%d | pct %d"):format(
+                firesA, firesB, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+        end)
+    end)
+    note(p3, "Live recoil installs at load (watch for 'rcl hook: installed'). If it still doesn't scale: hit 'RCL probe', " ..
+        "SHOOT for 5s and send the console - it shows whether the kick fires on our event or the original. 'Apply %' " ..
+        "cycles the gun manually, 'Auto apply' does it ~1s after the slider settles - reliable backups.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
