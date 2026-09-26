@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v28"
+local SCRIPT_VERSION = "crim-v29"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -733,6 +733,70 @@ local function safeSetField(t, key, want)
     return false
 end
 
+-- ============================================================
+-- FCF READ TRACER (authorized hook) - crim-v29
+-- ============================================================
+-- The one thing we never learned: WHO reads the gun's live config values
+-- and WHEN. The config proxy (newproxy userdata) forwards every read
+-- through its __index - swapping that __index for an IDENTICAL forwarder
+-- that logs reveals exactly which consumer reads Recoil / RecoilRedution /
+-- ... and from which source. This is NOT the v18 instance-namecall hook
+-- (the detector that caught that watches game metatables) - this touches a
+-- plain config proxy object. Values returned are unchanged (the backing
+-- table, which we already patch), so the game cannot tell the difference.
+local fcfTrace = { traced = setmetatable({}, { __mode = "k" }), logs = {}, count = 0 }
+local FCF_WATCH = { Recoil = true, RecoilRedution = true, RecoilSpeed = true, RecoilDamper = true, CameraRecoilingEnabled = true }
+
+local function setupFcfTrace()
+    if type(getrawmetatable) ~= "function" or type(setrawmetatable) ~= "function" then
+        return false
+    end
+    local hooked = 0
+    for _, s in ipairs(liveFcf.states) do
+        local proxy = safeField(s.t, "fcf")
+        if type(proxy) == "userdata" and not fcfTrace.traced[proxy] then
+            local ok = pcall(function()
+                local mt = getrawmetatable(proxy)
+                if type(mt) ~= "table" then return end
+                local orig = mt.__index
+                if type(orig) ~= "table" and type(orig) ~= "function" then return end
+                fcfTrace.traced[proxy] = true
+                mt.__index = function(self, k)
+                    local v
+                    if type(orig) == "table" then
+                        v = orig[k]
+                    else
+                        v = orig(self, k)
+                    end
+                    if FCF_WATCH[k] then
+                        fcfTrace.count += 1
+                        pcall(function()
+                            local s1, l1, s2, l2 = "?", "?", "?", "?"
+                            if type(debug) == "table" and type(debug.info) == "function" then
+                                s1, l1 = debug.info(2, "sl")
+                                s2, l2 = debug.info(3, "sl")
+                            end
+                            local keyId = tostring(k) .. "|" .. tostring(s1)
+                            local last = fcfTrace.logs[keyId] or 0
+                            if os.clock() - last > 1.5 then
+                                fcfTrace.logs[keyId] = os.clock()
+                                print(("[criminality] fcf read: %s=%s from %s:%s  (caller %s:%s)"):format(
+                                    tostring(k), tostring(v), tostring(s1), tostring(l1), tostring(s2), tostring(l2)))
+                            end
+                        end)
+                    end
+                    return v
+                end
+                hooked += 1
+            end)
+        end
+    end
+    if hooked > 0 then
+        print(("[criminality] fcf trace armed on %d config proxy(ies) - shoot and watch for read lines"):format(hooked))
+    end
+    return hooked > 0
+end
+
 local function liveLooksLikeGunConfig(t)
     if type(t) ~= "table" then return false end
     return type(safeField(t, "Recoil")) == "number"
@@ -857,6 +921,7 @@ local function liveFcfScan(announce)
         end
         notify(("Live copy scan: %d match(es), %d state table(s) - console has details"):format(count, #liveFcf.states))
     end
+    pcall(setupFcfTrace)
     return count
 end
 
