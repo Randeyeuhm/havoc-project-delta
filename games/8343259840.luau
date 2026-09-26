@@ -726,12 +726,16 @@ local function liveFcfScan(announce)
     pcall(function() lists[#lists + 1] = getgc(false) end)
     pcall(function() lists[#lists + 1] = getgc() end)
     local seen, count = {}, 0
+    liveFcf.hasUBL = false
     for _, list in ipairs(lists) do
         for _, obj in pairs(list) do
             if type(obj) == "table" and not seen[obj] then
                 seen[obj] = true
                 if liveLooksLikeGunConfig(obj) then
                     count += 1
+                    if type(obj.Customs) == "table" and obj.Customs.UnderbarrelLauncher then
+                        liveFcf.hasUBL = true
+                    end
                     if #liveFcf.cands < 32 then
                         local rd = obj.RecoilRedution
                         liveFcf.cands[#liveFcf.cands + 1] = {
@@ -745,8 +749,9 @@ local function liveFcfScan(announce)
         end
     end
     if announce then
-        print(("[criminality] live copy scan: %d gun-config table(s) in GC (%s)"):format(
-            count, ref and "equipped config found" or "no equipped config"))
+        print(("[criminality] live copy scan: %d gun-config table(s) in GC (%s, ubl=%s)"):format(
+            count, ref and "equipped config found" or "no equipped config",
+            tostring(liveFcf.hasUBL)))
         for i, c in ipairs(liveFcf.cands) do
             if i > 8 then break end
             print(("  [%d] %s Recoil=%s RecoilRedution=%s Speed=%s|Damper=%s"):format(
@@ -786,11 +791,20 @@ local function liveFcfApply(pct, announce)
 end
 
 -- FireModeSwitch re-reads Recoil from the live copy when the bullet-type
--- key is pressed. VirtualInputManager key events ride the same pipeline as
--- a physical key - not a hook, indistinguishable from real input.
+-- key is pressed - but ONLY on the underbarrel branch of the gun module
+-- (verified in the dump: the refresh sits inside the UBL toggle). So the
+-- refresh taps Z TWICE: the UBL state cycles and lands back where it
+-- started while the main config gets re-read on one of the two presses.
+-- VirtualInputManager key events ride the same pipeline as a physical key -
+-- not a hook, indistinguishable from real input.
 local function triggerBulletRefresh()
+    if not liveFcf.hasUBL then return false end
     return (pcall(function()
         local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(true, Enum.KeyCode.Z, false, game)
+        task.wait(0.06)
+        vim:SendKeyEvent(false, Enum.KeyCode.Z, false, game)
+        task.wait(0.55)
         vim:SendKeyEvent(true, Enum.KeyCode.Z, false, game)
         task.wait(0.06)
         vim:SendKeyEvent(false, Enum.KeyCode.Z, false, game)
@@ -802,16 +816,17 @@ local function liveApplyNow(announce)
     pcall(applyGunRecoil)
     local n = liveFcfApply(pct, false)
     local sent = false
-    if n > 0 then
+    if n > 0 and liveFcf.hasUBL then
         sent = triggerBulletRefresh()
-        task.wait(0.15)
+        task.wait(0.2)
     end
     if announce then
         if n == 0 then
             notify("Live apply: no live copy found - use Apply % / Auto apply instead")
+        elseif not sent then
+            notify("Live copy patched - this gun has no underbarrel, so the live refresh needs a re-equip (Auto apply)")
         else
-            notify(("Live apply: %d copy(ies) patched%s"):format(
-                n, sent and ", refresh key sent (ammo type toggled)" or ""))
+            notify(("Live apply: %d copy(ies) patched, refresh key sent (launcher toggled twice, ends same)"):format(n))
         end
     end
     return n, sent
@@ -3051,10 +3066,10 @@ local function buildMenu()
         end)
     end)
     note(p3, "Live apply: patches the running gun's config copy in memory, then taps your bullet-type key (default Z) " ..
-        "so the gun re-reads it - instant, no drop/pick. The keypress briefly toggles ammo type (that toggle IS the " ..
-        "game's own config refresh; harmless). Works best on guns with bullet types - others keep the copy patch but " ..
-        "re-read on next equip. Swap + rewire stays as the backup path; 'RCL probe' + 'Test kick' send diagnostics; " ..
-        "'Apply %' / 'Auto apply' always work; 'Undo live hook' restores normal.")
+        "so the gun re-reads it - instant, no drop/pick. The refresh runs on guns with an underbarrel launcher (the " ..
+        "key toggles the launcher twice and ends where it started - harmless); other guns get the in-memory patch and " ..
+        "re-read on their next equip, so use Auto apply for those. Swap + rewire stays as the backup path; 'Apply %' / " ..
+        "'Auto apply' always work; 'Undo live hook' restores normal.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
