@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v66"
+local SCRIPT_VERSION = "de-v67"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -61,6 +61,7 @@ local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { AutoFarm = false, AutoRequeue = false },
     Delivery = { Enabled = false, Hard = true },
+    Outlaw   = { Enabled = false },
     -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -2342,6 +2343,240 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- OUTLAW (CRIMINAL JOB) AUTO-FARM (Money tab)
+-- ============================================================
+-- The criminal job loop, mirrored from the game's own client code:
+--   1. Become an outlaw - RequestStartJobSession("Criminal", "jobPad").
+--   2. Bust ATMs (parts tagged CriminalATMClient - State/EngagingPlayerId
+--      live on the parent model): AttemptATMBustStart(model), wait out the
+--      hold, then AttemptATMBustComplete(model). Every bust adds a crime
+--      (= a wanted star) and the next hit pays more (x1 .. x5).
+--   3. At 5 stars, step onto a CriminalDropOffPoint and
+--      AttemptCriminalJobComplete(model) cashes the whole bounty in.
+-- Getting arrested before the cash-in loses the bounty, so the farm
+-- cashes in the moment it hits 5 stars. Runs on foot - the server checks
+-- distances against the character pivot (10 studs at the drop-off,
+-- ATM activation distance + 5 for busts).
+
+local OUTLAW_ATMS_PER_RUN = 5   -- wanted stars needed for the drop-off
+local OUTLAW_BUST_WAIT = 3.5    -- server floor is (bust time - 2.5s); 3.5 clears both pass states
+local OUTLAW_REACH = 9          -- how close to land before interacting
+
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {} }
+
+local function outlawAnchorModel(inst)
+    if not inst or not inst.Parent then return nil end
+    if inst:IsA("Model") then return inst end
+    if inst:IsA("BasePart") and inst.Parent:IsA("Model") then return inst.Parent end
+    return inst
+end
+
+local function outlawPickATM(pos)
+    local best, bestPos, bestD = nil, nil, math.huge
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("CriminalATMClient")) do
+            local model = outlawAnchorModel(inst)
+            if model and model.Parent then
+                local engage = model:GetAttribute("EngagingPlayerId")
+                local skipUntil = outlawFarm.skipAt[model]
+                if model:GetAttribute("State") ~= "Busted"
+                    and (engage == nil or engage == LocalPlayer.UserId)
+                    and not (skipUntil and os.clock() < skipUntil) then
+                    local p = model:GetPivot().Position
+                    local d = (pos - p).Magnitude
+                    if d < bestD then best, bestPos, bestD = model, p, d end
+                end
+            end
+        end
+    end)
+    return best, bestPos
+end
+
+local function outlawPickDropOff(pos)
+    local best, bestPos, bestD = nil, nil, math.huge
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("CriminalDropOffPoint")) do
+            local model = outlawAnchorModel(inst)
+            if model and model.Parent then
+                local skipUntil = outlawFarm.skipAt[model]
+                if not (skipUntil and os.clock() < skipUntil) then
+                    local p = model:GetPivot().Position
+                    local d = (pos - p).Magnitude
+                    if d < bestD then best, bestPos, bestD = model, p, d end
+                end
+            end
+        end
+    end)
+    return best, bestPos
+end
+
+local function outlawTick()
+    if Config.Outlaw.Enabled ~= true then
+        outlawFarm.state = nil
+        return
+    end
+    local now = os.clock()
+    if raceBusy then return end
+    if Config.Delivery.Enabled == true then
+        outlawFarm.state = nil
+        if now - outlawFarm.clashAt > 120 then
+            outlawFarm.clashAt = now
+            notify("Outlaw farm paused - turn the delivery farm off first")
+        end
+        return
+    end
+    if now < outlawFarm.cooldownUntil then return end
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or not char.PrimaryPart then return end
+
+    -- the game hides its prompts while driving - the job runs on foot
+    if hum.Sit then
+        pcall(function()
+            hum.Sit = false
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+        if hum.Sit then
+            if now - outlawFarm.seatWarnAt > 30 then
+                outlawFarm.seatWarnAt = now
+                notify("Outlaw farm: hop out of the car - the job runs on foot")
+            end
+            return
+        end
+        task.wait(0.2)
+    end
+
+    -- 1. become an outlaw (the same remote the job pad fires)
+    if LocalPlayer:GetAttribute("JobId") ~= "Criminal" then
+        outlawFarm.state = nil
+        if now - outlawFarm.lastStart > 4 then
+            outlawFarm.lastStart = now
+            if Remotes and type(Remotes.fireServer) == "function" then
+                pcall(Remotes.fireServer, "RequestStartJobSession", "Criminal", "jobPad")
+            end
+            if now - outlawFarm.jobWarnAt > 60 then
+                outlawFarm.jobWarnAt = now
+                notify("Outlaw farm: becoming an outlaw...")
+            end
+        end
+        return
+    end
+
+    if not (Remotes and type(Remotes.invokeServer) == "function") then return end
+
+    -- bounty lost (arrested / expired) = the run is dead; start over
+    local crimes = tonumber(char:GetAttribute("CrimesCommitted")) or 0
+    if outlawFarm.lastCrimes and crimes < outlawFarm.lastCrimes and now > outlawFarm.cashGraceUntil then
+        if now - outlawFarm.arrestAt > 20 then
+            outlawFarm.arrestAt = now
+            notify("Outlaw farm: bounty lost (got arrested) - starting a new run")
+        end
+        outlawFarm.state = nil
+    end
+    outlawFarm.lastCrimes = crimes
+
+    if char:GetAttribute("ArrestDebounce") ~= nil then
+        outlawFarm.state = nil
+        return
+    end
+
+    local pos = char:GetPivot().Position
+
+    -- 2. at 5 stars: cash the whole bounty in at a drop-off point
+    if crimes >= OUTLAW_ATMS_PER_RUN then
+        local point, pp = outlawPickDropOff(pos)
+        if not point then
+            if now - outlawFarm.noAtmAt > 90 then
+                outlawFarm.noAtmAt = now
+                notify("Outlaw farm: no drop-off point found")
+            end
+            return
+        end
+        if (pos - pp).Magnitude > OUTLAW_REACH then
+            if now - outlawFarm.tpAt > 1 then
+                outlawFarm.tpAt = now
+                pcall(function() char:PivotTo(CFrame.new(pp + Vector3.new(0, 4, 0))) end)
+            end
+            return
+        end
+        if now - outlawFarm.lastCashAt > 2.5 then
+            outlawFarm.lastCashAt = now
+            local okc, ok = pcall(function() return Remotes.invokeServer("AttemptCriminalJobComplete", point) end)
+            if okc and ok then
+                notify("Outlaw farm: bounty cashed in - running it again")
+                outlawFarm.state = nil
+                outlawFarm.lastCrimes = 0
+                outlawFarm.cashGraceUntil = os.clock() + 15
+                outlawFarm.cooldownUntil = os.clock() + 3
+                outlawFarm.cashTries = 0
+            else
+                outlawFarm.cashTries = (outlawFarm.cashTries or 0) + 1
+                if outlawFarm.cashTries % 5 == 0 then
+                    pcall(function() char:PivotTo(CFrame.new(pp + Vector3.new(0, 4, 0))) end)
+                end
+                if outlawFarm.cashTries >= 8 then
+                    outlawFarm.cashTries = 0
+                    outlawFarm.skipAt[point] = os.clock() + 60
+                end
+            end
+        end
+        return
+    end
+
+    -- 3. an in-flight bust? wait out the hold and complete it
+    if outlawFarm.state == "busting" and outlawFarm.target then
+        local t = outlawFarm.target
+        if not t.Parent or t:GetAttribute("State") == "Busted" then
+            outlawFarm.state, outlawFarm.target = nil, nil
+            return
+        end
+        if now < outlawFarm.bustDoneAt then return end
+        outlawFarm.state, outlawFarm.target = nil, nil
+        local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustComplete", t) end)
+        if not (okc and ok) then
+            outlawFarm.skipAt[t] = os.clock() + 15
+        end
+        return
+    end
+
+    -- 4. pick the next ATM, land next to it, start the bust
+    if char:GetAttribute("ATMBustDebounce") ~= nil then return end
+    local target, tpos = outlawPickATM(pos)
+    if not target then
+        if now - outlawFarm.noAtmAt > 90 then
+            outlawFarm.noAtmAt = now
+            notify("Outlaw farm: no ATMs nearby right now")
+        end
+        return
+    end
+    if (pos - tpos).Magnitude > OUTLAW_REACH then
+        if now - outlawFarm.tpAt > 1 then
+            outlawFarm.tpAt = now
+            pcall(function() char:PivotTo(CFrame.new(tpos + Vector3.new(0, 3, 0))) end)
+        end
+        return
+    end
+    local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustStart", target) end)
+    if okc and ok then
+        outlawFarm.state = "busting"
+        outlawFarm.target = target
+        outlawFarm.bustDoneAt = os.clock() + OUTLAW_BUST_WAIT
+    else
+        outlawFarm.skipAt[target] = now + 12
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(outlawTick)
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -2655,6 +2890,29 @@ local function buildMenu()
         end
     end)
     note(p5, "Teleports to each pickup/dropoff and freezes your car while on. Hard pays more; outlaws can steal. Pacing holds each stop so runs don't complete at teleport speed.")
+
+    section(p5, "Outlaw auto-farm  (Criminal job)")
+    toggle(p5, "Auto-run the outlaw job",
+        function() return Config.Outlaw.Enabled end,
+        function(v)
+            Config.Outlaw.Enabled = v
+            outlawFarm.state = nil
+            outlawFarm.target = nil
+            outlawFarm.lastStart = 0
+            if v and Config.Delivery.Enabled == true then
+                notify("Outlaw farm on - turn the delivery farm off first")
+            else
+                notify(v and "Outlaw farm on - becoming an outlaw" or "Outlaw farm off")
+            end
+        end)
+    button(p5, "Quit outlaw job", function()
+        if Remotes and type(Remotes.fireServer) == "function" then
+            pcall(Remotes.fireServer, "RequestEndJobSession", "jobPad")
+        end
+        Config.Outlaw.Enabled = false
+        outlawFarm.state = nil
+        notify("Outlaw job quit")
+    end)
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
