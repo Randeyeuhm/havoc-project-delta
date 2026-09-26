@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v68"
+local SCRIPT_VERSION = "de-v69"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -62,6 +62,7 @@ local DEFAULTS = {
     Race     = { AutoFarm = false, AutoRequeue = false },
     Delivery = { Enabled = false, Hard = true },
     Outlaw   = { Enabled = false },
+    Bank     = { Enabled = false },
     -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -1890,7 +1891,7 @@ refreshTeleportQueue(true)
 -- runs, so every stop dwells this long before its first interaction fires.
 local DELIVERY_PACE = 5
 
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0, arrivedKey = nil, arrivedAt = 0, runStartAt = 0, robbedAt = nil }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0, arrivedKey = nil, arrivedAt = 0, runStartAt = 0, robbedAt = nil, lastStreak = nil }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -1961,6 +1962,24 @@ local function deliveryRadius()
     return deliveryFarm.radius or 70
 end
 
+-- Delivery level = the streak attribute shown as min(streak, max tier).
+-- Max tier comes from the live config (read lazily, cached after the first hit).
+local deliveryUtilRef = nil
+local function deliveryMaxTier()
+    if not deliveryUtilRef then
+        local ok, util = pcall(function()
+            local node = waitPath(ReplicatedStorage, { "Modules", "Shared", "Jobs", "Delivery", "DeliveryUtil" })
+            return node and require(node) or nil
+        end)
+        if ok and type(util) == "table" then deliveryUtilRef = util end
+    end
+    if deliveryUtilRef and type(deliveryUtilRef.GetMaxTier) == "function" then
+        local ok, v = pcall(deliveryUtilRef.GetMaxTier)
+        if ok then return tonumber(v) end
+    end
+    return nil
+end
+
 -- The game fires ONE interact when you drive into the circle and the server
 -- then releases items over time. We fire the moment we arrive, follow up
 -- with a short burst (in case the server counts the fire itself), then keep
@@ -1986,6 +2005,19 @@ end
 local function deliveryTick()
     if Config.Delivery.Enabled ~= true then return end
     if raceBusy then return end  -- the race assist has the car
+    -- Delivery level watch (the "resets at max level?" question): the level
+    -- is the DeliveryStreak attribute shown as min(streak, max tier). If it
+    -- ever DROPS while the farm runs, that's the reset being reported.
+    do
+        local lc = LocalPlayer.Character
+        local streak = lc and tonumber(lc:GetAttribute("DeliveryStreak"))
+        if streak then
+            if deliveryFarm.lastStreak and streak < deliveryFarm.lastStreak and deliveryFarm.lastStreak >= 10 then
+                notify(("Delivery level dropped: Lv. %d -> Lv. %d (that's the max-level reset)"):format(deliveryFarm.lastStreak, streak))
+            end
+            deliveryFarm.lastStreak = streak
+        end
+    end
     local st = deliveryFarm.state
     local now = os.clock()
     local pace = DELIVERY_PACE
@@ -2607,8 +2639,10 @@ end
 local OUTLAW_ATMS_PER_RUN = 5   -- wanted stars needed for the drop-off
 local OUTLAW_BUST_WAIT = 3.5    -- server floor is (bust time - 2.5s); 3.5 clears both pass states
 local OUTLAW_REACH = 9          -- how close to land before interacting
+local OUTLAW_CASHIN_MARGIN = 30 -- cash in when this little wanted time is left
+local OUTLAW_HOLD_MAX = 600     -- hold at most this long since wanted began
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {} }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2705,6 +2739,14 @@ local function outlawTick()
         end
         return
     end
+    if Config.Bank.Enabled == true then
+        outlawFarm.state = nil
+        if now - outlawFarm.clashAt > 120 then
+            outlawFarm.clashAt = now
+            notify("Outlaw farm paused - turn the bank farm off first")
+        end
+        return
+    end
     if now < outlawFarm.cooldownUntil then return end
 
     local char = LocalPlayer.Character
@@ -2753,6 +2795,8 @@ local function outlawTick()
             notify("Outlaw farm: bounty lost (got arrested) - starting a new run")
         end
         outlawFarm.state = nil
+        outlawFarm.wantedSince = nil
+        outlawFarm.holdNotified = nil
     end
     outlawFarm.lastCrimes = crimes
 
@@ -2765,6 +2809,20 @@ local function outlawTick()
 
     -- 2. at 5 stars: cash the whole bounty in at a drop-off point
     if crimes >= OUTLAW_ATMS_PER_RUN then
+        -- Cops can reach a sitting outlaw, and the bounty clocks ~$100/s
+        -- while wanted: run the escape timer down in the open and cash in
+        -- near its end rather than instantly teleporting the run away.
+        local expire = tonumber(char:GetAttribute("CriminalExpireEpoch"))
+        local remaining = expire and (expire - workspace:GetServerTimeNow()) or nil
+        if not outlawFarm.wantedSince then outlawFarm.wantedSince = now end
+        if remaining and remaining > OUTLAW_CASHIN_MARGIN and (now - outlawFarm.wantedSince) < OUTLAW_HOLD_MAX then
+            if not outlawFarm.holdNotified then
+                outlawFarm.holdNotified = true
+                notify(("Outlaw farm: holding out - %.0fs of wanted left (cash-in near the end)"):format(remaining))
+            end
+            return
+        end
+        outlawFarm.holdNotified = nil
         local point, pp = outlawPickDropOff(pos)
         if not point then
             -- none streamed in: travel to a remembered drop-off spot and
@@ -2798,6 +2856,8 @@ local function outlawTick()
                 notify("Outlaw farm: bounty cashed in - running it again")
                 outlawFarm.state = nil
                 outlawFarm.lastCrimes = 0
+                outlawFarm.wantedSince = nil
+                outlawFarm.holdNotified = nil
                 outlawFarm.cashGraceUntil = os.clock() + 15
                 outlawFarm.cooldownUntil = os.clock() + 3
                 outlawFarm.cashTries = 0
@@ -2887,6 +2947,361 @@ task.spawn(function()
     while true do
         task.wait(1)
         pcall(outlawTick)
+    end
+end)
+
+-- ============================================================
+-- BANK HEIST AUTO-RUN (Money tab)
+-- ============================================================
+-- The bank runs on a cycle: workspace.Game.Heists.BankHeist flips
+-- HeistActive on a timer, which arms the entrance prompt
+-- (CanAccessHeist). The run: enter (fire the prompt) -> submit the vault
+-- code (HeistCodeEntered remote - the code is readable from the model's
+-- Code attribute) -> grab the loot prompts -> leave through the door
+-- quit prompt / remove teleport. Wanted players can't enter, so the run
+-- waits that out first. Hazard "return to the heist?" offers are
+-- auto-accepted.
+
+local BANK_HEIST_ID = "BankHeist"
+local bankFarm = { state = nil, stateAt = 0, tpAt = 0, clashAt = 0, notReadyAt = 0, wantedAt = 0, seekWarnAt = 0, promptWarnAt = 0, seatWarnAt = 0, cooldownUntil = 0, codeSentAt = 0, codeNotified = false, lootAt = 0, lootIdle = 0, lootGrabbed = 0, modelScanAt = 0, modelCached = nil, hooked = false }
+
+local function bankHeistModel(now)
+    local m = bankFarm.modelCached
+    if m and m.Parent then return m end
+    bankFarm.modelCached = nil
+    local ok, found = pcall(function()
+        local g = workspace:FindFirstChild("Game")
+        local h = g and g:FindFirstChild("Heists")
+        local model = h and h:FindFirstChild(BANK_HEIST_ID)
+        if model and model:GetAttribute("HeistActive") ~= nil then return model end
+        if now - (bankFarm.modelScanAt or 0) > 30 then
+            bankFarm.modelScanAt = now
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d:IsA("Model") and d.Name == BANK_HEIST_ID and d:GetAttribute("HeistActive") ~= nil then
+                    return d
+                end
+            end
+        end
+        return nil
+    end)
+    if ok and found then bankFarm.modelCached = found end
+    return (ok and found) or nil
+end
+
+local function bankAnchorPos()
+    local p = atmPos(atmIndex.bank)
+    if p then return p end
+    local part = findPart("bank")
+    if part then
+        atmIndex.bank = { part.Position.X, part.Position.Y, part.Position.Z }
+        atmSave()
+        return part.Position
+    end
+    return nil
+end
+
+local function bankEntrancePrompt()
+    local best, bestD = nil, math.huge
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        local char = LocalPlayer.Character
+        local myPos = char and char.PrimaryPart and char:GetPivot().Position
+        for _, inst in ipairs(cs:GetTagged("BankHeistEntranceProximityPrompt")) do
+            local prompt = inst
+            if not prompt:IsA("ProximityPrompt") then prompt = inst:FindFirstChildWhichIsA("ProximityPrompt") end
+            if prompt and prompt.Parent then
+                local d = myPos and (prompt.Parent.Position - myPos).Magnitude or 0
+                if d < bestD then best, bestD = prompt, d end
+            end
+        end
+    end)
+    return best
+end
+
+local function bankQuitPrompt()
+    local best = nil
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("BankHeistEntranceDoor")) do
+            local att = inst:FindFirstChild("Attachment") or inst:FindFirstChild("Attachment", true)
+            local p = att and att:FindFirstChildOfClass("ProximityPrompt")
+            if p then best = p end
+        end
+    end)
+    return best
+end
+
+local function bankNearestLoot(pos)
+    local best, bestPos, bestD = nil, nil, math.huge
+    pcall(function()
+        local cs = game:GetService("CollectionService")
+        for _, inst in ipairs(cs:GetTagged("HeistLoot")) do
+            local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart")
+            if part and part.Parent then
+                local d = (part.Position - pos).Magnitude
+                if d < bestD then best, bestPos, bestD = inst, part.Position, d end
+            end
+        end
+    end)
+    return best, bestPos
+end
+
+local function bankLootPrompt(inst)
+    local p = inst:FindFirstChild("ProximityPrompt", true)
+    if p and p:IsA("ProximityPrompt") then return p end
+    return nil
+end
+
+local function firePrompt(prompt)
+    if not prompt or not prompt.Parent then return false end
+    if type(fireproximityprompt) == "function" then
+        local ok = pcall(fireproximityprompt, prompt)
+        if ok then return true end
+    end
+    local ok = pcall(function()
+        prompt.HoldDuration = 0
+        prompt:InputHoldBegin()
+        task.wait(0.05)
+        prompt:InputHoldEnd()
+    end)
+    return ok
+end
+
+local function bankTick()
+    if Config.Bank.Enabled ~= true then
+        bankFarm.state = nil
+        return
+    end
+    if not bankFarm.hooked and Remotes and type(Remotes.connect) == "function" then
+        bankFarm.hooked = true
+        pcall(function()
+            Remotes.connect("HeistHazardReturnOffer", function()
+                if Config.Bank.Enabled == true and type(Remotes.fireServer) == "function" then
+                    pcall(Remotes.fireServer, "HeistHazardReturnChoice", true)
+                    notify("Bank farm: hazard caught - took the return offer")
+                end
+            end)
+        end)
+    end
+    local now = os.clock()
+    if raceBusy then return end
+    if Config.Outlaw.Enabled == true then
+        bankFarm.state = nil
+        if now - bankFarm.clashAt > 120 then
+            bankFarm.clashAt = now
+            notify("Bank farm paused - turn the outlaw farm off first")
+        end
+        return
+    end
+    if now < bankFarm.cooldownUntil then return end
+
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or not char.PrimaryPart then return end
+
+    if hum.Sit then
+        pcall(function()
+            hum.Sit = false
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+        end)
+        if hum.Sit then
+            if now - bankFarm.seatWarnAt > 30 then
+                bankFarm.seatWarnAt = now
+                notify("Bank farm: hop out of the car first")
+            end
+            return
+        end
+        task.wait(0.2)
+    end
+
+    if not (Remotes and type(Remotes.fireServer) == "function") then return end
+
+    local inHeist = char:GetAttribute("InHeist") == true
+    local model = bankHeistModel(now)
+
+    if bankFarm.state == "exiting" then
+        if not inHeist then
+            notify(("Bank farm: out - grabbed %d loot. Escape the security!"):format(bankFarm.lootGrabbed or 0))
+            bankFarm.state = nil
+            bankFarm.cooldownUntil = now + 20
+            bankFarm.lootGrabbed = 0
+        elseif now - bankFarm.stateAt > 60 then
+            bankFarm.state = nil
+        end
+        return
+    end
+
+    if bankFarm.state == "entering" then
+        if inHeist then
+            bankFarm.state = "inside"
+            bankFarm.stateAt = now
+            bankFarm.codeSentAt = 0
+        elseif now - bankFarm.stateAt > 12 then
+            notify("Bank farm: entry didn't stick - retrying")
+            bankFarm.state = nil
+            bankFarm.cooldownUntil = now + 6
+        end
+        return
+    end
+
+    if not inHeist then
+        if not model then
+            local anchor = bankAnchorPos()
+            if anchor and (char:GetPivot().Position - anchor).Magnitude > 40 then
+                if now - bankFarm.tpAt > 1 then
+                    bankFarm.tpAt = now
+                    pcall(function() char:PivotTo(CFrame.new(anchor + Vector3.new(0, 5, 0))) end)
+                    atmSweepAsync(anchor)
+                end
+            elseif now - bankFarm.seekWarnAt > 90 then
+                bankFarm.seekWarnAt = now
+                notify("Bank farm: bank not streamed yet - sweeping for it")
+            end
+            return
+        end
+        if model:GetAttribute("HeistActive") ~= true then
+            if now - bankFarm.notReadyAt > 240 then
+                bankFarm.notReadyAt = now
+                notify("Bank farm: the bank isn't active yet (it opens on a timer) - waiting")
+            end
+            return
+        end
+        local expire = tonumber(char:GetAttribute("CriminalExpireEpoch"))
+        if expire and expire > workspace:GetServerTimeNow() then
+            if now - bankFarm.wantedAt > 60 then
+                bankFarm.wantedAt = now
+                notify("Bank farm: can't enter while wanted - waiting out the timer")
+            end
+            return
+        end
+        if char:GetAttribute("ArrestDebounce") ~= nil then return end
+
+        local prompt = bankEntrancePrompt()
+        if not prompt then
+            local mp = model:GetPivot().Position
+            if (char:GetPivot().Position - mp).Magnitude > 30 then
+                if now - bankFarm.tpAt > 1 then
+                    bankFarm.tpAt = now
+                    pcall(function() char:PivotTo(CFrame.new(mp + Vector3.new(0, 5, 0))) end)
+                    atmSweepAsync(mp)
+                end
+            elseif now - bankFarm.promptWarnAt > 90 then
+                bankFarm.promptWarnAt = now
+                notify("Bank farm: no entrance prompt found near the bank")
+            end
+            return
+        end
+        if prompt:GetAttribute("CanAccessHeist") == false then
+            if now - bankFarm.notReadyAt > 240 then
+                bankFarm.notReadyAt = now
+                notify("Bank farm: the entrance says the heist isn't active yet")
+            end
+            return
+        end
+        local pr = prompt.Parent
+        local prPos = (pr and pr:IsA("BasePart")) and pr.Position or model:GetPivot().Position
+        if (char:GetPivot().Position - prPos).Magnitude > 12 then
+            if now - bankFarm.tpAt > 1 then
+                bankFarm.tpAt = now
+                pcall(function() char:PivotTo(CFrame.new(prPos + Vector3.new(0, 3, 0))) end)
+            end
+            return
+        end
+        if firePrompt(prompt) then
+            bankFarm.state = "entering"
+            bankFarm.stateAt = now
+            bankFarm.lootGrabbed = 0
+            bankFarm.codeNotified = false
+            notify("Bank farm: entering the bank")
+        else
+            bankFarm.cooldownUntil = now + 5
+        end
+        return
+    end
+
+    -- inside the heist --------------------------------------------------
+    bankFarm.state = "inside"
+    local codeAt = bankFarm.codeSentAt or 0
+    if now - codeAt > 12 then
+        local code = model and model:GetAttribute("Code")
+        if code == nil then
+            pcall(function()
+                local cs = game:GetService("CollectionService")
+                for _, inst in ipairs(cs:GetTagged("HeistCodeProximityPrompt")) do
+                    local anc = inst
+                    for _ = 1, 4 do
+                        anc = anc and anc.Parent
+                        if anc and anc:GetAttribute("Code") ~= nil then
+                            code = anc:GetAttribute("Code")
+                            break
+                        end
+                    end
+                    if code ~= nil then break end
+                end
+            end)
+        end
+        if code ~= nil then
+            pcall(Remotes.fireServer, "HeistCodeEntered", tostring(code))
+            bankFarm.codeSentAt = now
+            if not bankFarm.codeNotified then
+                bankFarm.codeNotified = true
+                notify("Bank farm: vault code sent")
+            end
+        end
+        pcall(function()
+            local cs = game:GetService("CollectionService")
+            for _, inst in ipairs(cs:GetTagged("HeistCodeProximityPrompt")) do
+                local part = inst:IsA("BasePart") and inst or inst:FindFirstChildWhichIsA("BasePart")
+                if part then
+                    char:PivotTo(CFrame.new(part.Position + Vector3.new(0, 3, 0)))
+                    break
+                end
+            end
+        end)
+    end
+
+    if now - bankFarm.lootAt > 1.2 then
+        bankFarm.lootAt = now
+        local loot, lpos = bankNearestLoot(char:GetPivot().Position)
+        if loot then
+            local lp = bankLootPrompt(loot)
+            if lpos and (char:GetPivot().Position - lpos).Magnitude > 6 then
+                pcall(function() char:PivotTo(CFrame.new(lpos + Vector3.new(0, 3, 0))) end)
+            end
+            if lp and firePrompt(lp) then
+                bankFarm.lootGrabbed = (bankFarm.lootGrabbed or 0) + 1
+            end
+            bankFarm.lootIdle = 0
+        else
+            bankFarm.lootIdle = (bankFarm.lootIdle or 0) + 1
+        end
+    end
+
+    local lootLeft = false
+    pcall(function()
+        lootLeft = #game:GetService("CollectionService"):GetTagged("HeistLoot") > 0
+    end)
+    local longEnough = (now - bankFarm.stateAt) > 8
+    if (not lootLeft and longEnough) or bankFarm.lootIdle > 20 or (now - bankFarm.stateAt) > 120 then
+        local quit = bankQuitPrompt()
+        if quit then firePrompt(quit) end
+        pcall(function()
+            local t = model and model:FindFirstChild("Teleports")
+            local part = t and t:FindFirstChild("RemovePlayerTeleport")
+            if part and part:IsA("BasePart") then
+                char:PivotTo(CFrame.new(part.Position + Vector3.new(0, 3, 0)))
+            end
+        end)
+        bankFarm.state = "exiting"
+        bankFarm.stateAt = now
+        notify(("Bank farm: looted %d - leaving"):format(bankFarm.lootGrabbed or 0))
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(bankTick)
     end
 end)
 
@@ -3167,7 +3582,12 @@ local function buildMenu()
             Config.Delivery.Enabled = v
             if v then
                 deliveryFarm.lastStart = 0
-                notify("Delivery auto-farm on - requesting a shift")
+                local lc = LocalPlayer.Character
+                local streak = lc and tonumber(lc:GetAttribute("DeliveryStreak"))
+                local cap = deliveryMaxTier()
+                notify(("Delivery auto-farm on - Lv. %s%s - requesting a shift"):format(
+                    streak and tostring(math.floor(streak)) or "?",
+                    cap and (" / cap Lv. " .. tostring(cap)) or ""))
             else
                 notify("Delivery auto-farm off")
             end
@@ -3230,6 +3650,24 @@ local function buildMenu()
     button(p5, "Index ATMs (stream the map)", function()
         atmBootstrapRun()
     end)
+
+    section(p5, "Bank heist auto-run")
+    toggle(p5, "Auto-run the bank heist",
+        function() return Config.Bank.Enabled end,
+        function(v)
+            Config.Bank.Enabled = v
+            bankFarm.state = nil
+            bankFarm.cooldownUntil = 0
+            bankFarm.codeSentAt = 0
+            bankFarm.codeNotified = false
+            bankFarm.lootGrabbed = 0
+            bankFarm.modelCached = nil
+            if v and Config.Outlaw.Enabled == true then
+                notify("Bank farm on - turn the outlaw farm off first")
+            else
+                notify(v and "Bank farm on - checking the heist timer" or "Bank farm off")
+            end
+        end)
 
     -- ---------------- Misc ----------------
     local p6 = pages[5]
