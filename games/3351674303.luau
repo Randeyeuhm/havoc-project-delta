@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v63"
+local SCRIPT_VERSION = "de-v64"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -59,7 +59,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
-    Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
+    Race     = { AutoFarm = false, AutoRequeue = false },
     Delivery = { Enabled = false, Hard = true },
     -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
@@ -187,10 +187,6 @@ Config.Vehicle.SteerMult = math.clamp(tonumber(Config.Vehicle.SteerMult) or 1, 1
 Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.Vehicle.NoTires = Config.Vehicle.NoTires == true
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
-Config.Race.HopDelay = math.clamp(tonumber(Config.Race.HopDelay) or 0.5, 0.5, 1.5)
-Config.Race.SweepDist = math.clamp(tonumber(Config.Race.SweepDist) or 12, 6, 60)
-Config.Race.PayoutBuffer = math.clamp(tonumber(Config.Race.PayoutBuffer) or 1, 0, 60)
-Config.Race.CarLimitPad = math.clamp(tonumber(Config.Race.CarLimitPad) or 1.25, 1, 3)
 Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
@@ -1221,6 +1217,13 @@ local function fmtSecs(v)
     return tostring(math.round(v * 10) / 10)
 end
 
+-- Race assist tuning - locked to the tested values. No config keys and no
+-- sliders; stale saved values in the config file are ignored by the merge.
+local RACE_HOP_DELAY = 0.5
+local RACE_SWEEP_DIST = 10
+local RACE_PAYOUT_BUFFER = 3
+local RACE_CAR_TIME_PAD = 1.10
+
 -- The server also sanity-checks finish times against the car: your finish
 -- can't be faster than the track physically allows at that car's top speed.
 -- Compute that floor from the track's checkpoint distances + the car's tune
@@ -1247,7 +1250,7 @@ local function carAwareMinTime(chassis, trackModel, laps)
     -- (EngineSpeed*2 feeds WheelSpeed; the gear-find compares tune*mult*2
     -- to velocity; boost doubles TopSpeed again). x2, not x1.6.
     local topStuds = math.clamp(topMPH * 2, 100, 1200)
-    local pad = Config.Race.CarLimitPad or 1.25
+    local pad = RACE_CAR_TIME_PAD
     local floorTime = (length / topStuds) * pad
     print(("[driving-empire] car limit: track %.0f studs, car top %.0f (=%.0f studs/s), floor %.1fs (pad %.2f)"):format(length, topMPH, topStuds, floorTime, pad))
     return floorTime
@@ -1332,11 +1335,11 @@ local function waitForPayout(minTime, startClock)
         elapsed = os.clock() - startClock  -- fallback: since the assist started
     end
     if not elapsed then return end
-    local target = minTime + (Config.Race.PayoutBuffer or 1)
+    local target = minTime + RACE_PAYOUT_BUFFER
     if elapsed >= target then return end
     local waitFor = math.min(target - elapsed, 600)
     if waitFor > 0.5 then
-        notify(("Race assist: holding %.1fs before the finish - finish gate %ss + %ss buffer"):format(waitFor, fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1)))
+        notify(("Race assist: holding %.1fs before the finish - finish gate %ss + %ss buffer"):format(waitFor, fmtSecs(minTime), fmtSecs(RACE_PAYOUT_BUFFER)))
     end
     -- wait precisely: half-second chunks until close, then tenths, so the
     -- finish crossing lands right after the minimum
@@ -1381,7 +1384,7 @@ end
 
 local function crossCheckpoint(cp, dir)
     local last = "none"
-    local sd = Config.Race.SweepDist or 12
+    local sd = RACE_SWEEP_DIST
     for _, v in ipairs({ { sd, 0 }, { sd + 4, 4 } }) do
         local res = sweepCheckpoint(cp, dir, v[1], v[2])
         if res == "ok" then return "ok" end
@@ -1402,7 +1405,7 @@ local function tryFinish(finishPart, approachDir, full)
     else
         look = look.Unit
     end
-    local sd = Config.Race.SweepDist or 12
+    local sd = RACE_SWEEP_DIST
     local attempts = {
         { pos, approachDir, sd },
         { pos, approachDir, sd + 28 },
@@ -1462,10 +1465,10 @@ local function runRaceRoutine()
         local minTxt = ""
         if carMin then
             local hold = math.max(minTime or 0, carMin)
-            minTxt = (" - car limit ~%ss (crossing ~%ss)"):format(fmtSecs(carMin), fmtSecs(hold + (Config.Race.PayoutBuffer or 1)))
+            minTxt = (" - car limit ~%ss (crossing ~%ss)"):format(fmtSecs(carMin), fmtSecs(hold + RACE_PAYOUT_BUFFER))
             minTime = hold
         elseif minTime then
-            minTxt = (" - track minimum %ss (buffer +%ss)"):format(fmtSecs(minTime), fmtSecs(Config.Race.PayoutBuffer or 1))
+            minTxt = (" - track minimum %ss (buffer +%ss)"):format(fmtSecs(minTime), fmtSecs(RACE_PAYOUT_BUFFER))
         end
         if trackName and RaceUtil then
             -- show the game's own payout numbers: fixed cash per finishing
@@ -1537,7 +1540,7 @@ local function runRaceRoutine()
                         notify(("Race assist: checkpoint %d rejected (%s) - redoing it"):format(i, tostring(res)))
                         local cleared = false
                         for _ = 1, 4 do
-                            task.wait(Config.Race.HopDelay or 0.5)
+                            task.wait(RACE_HOP_DELAY)
                             local res2 = crossCheckpoint(cps[i], dirs[i])
                             if res2 == "ok" then
                                 cleared = true
@@ -1562,7 +1565,7 @@ local function runRaceRoutine()
                         taken = taken + 1
                         notify(("Race assist: checkpoint %d accepted after redoing it"):format(i))
                     end
-                    task.wait(Config.Race.HopDelay or 0.5)  -- hop delay (Race tab slider)
+                    task.wait(RACE_HOP_DELAY)
                 end
                 return taken, skipped
             end
@@ -1736,7 +1739,7 @@ end
 -- RACE AUTO-FARM (Money tab)
 -- ============================================================
 -- "Auto-run" starts the normal race assist (same routine as the button,
--- same Race tab timing settings) whenever a race goes live. "Auto-queue"
+-- same locked timing settings) whenever a race goes live. "Auto-queue"
 -- re-joins the same track after each race using the game's own queue call:
 -- Remotes.invokeServer("JoinRacingQueue", track) -> (ok, ticketOrMessage).
 local function farmRaceMode()
@@ -2549,21 +2552,8 @@ local function buildMenu()
 
     section(p1, "Race assist")
     button(p1, "Finish race (take all checkpoints)", function() runRaceRoutine() end)
-    slider(p1, "Hop delay (s)",
-        function() return Config.Race.HopDelay end,
-        function(v) Config.Race.HopDelay = v end, 0.05, 0.5, 1.5)
-    slider(p1, "Sweep distance",
-        function() return Config.Race.SweepDist end,
-        function(v) Config.Race.SweepDist = v end, 1, 6, 60)
-    slider(p1, "Payout buffer (s)",
-        function() return Config.Race.PayoutBuffer end,
-        function(v) Config.Race.PayoutBuffer = v end, 1, 0, 60)
-    slider(p1, "Car time pad",
-        function() return Config.Race.CarLimitPad end,
-        function(v) Config.Race.CarLimitPad = v end, 0.05, 1, 3)
     button(p1, "Print payout table (console)", function() printPayoutTable() end)
-    note(p1, "Sweep = gate placement; buffer = extra finish delay.")
-    note(p1, "Wait for GO. No payout? Raise Car time pad.")
+    note(p1, "Race tuning is locked (hop 0.5s, sweep 10, buffer 3s, car pad 1.10).")
 
     -- ---------------- Teleports ----------------
     local p2 = pages[2]
@@ -2682,7 +2672,7 @@ local function buildMenu()
         function() return Config.Race.AutoFarm end,
         function(v)
             Config.Race.AutoFarm = v
-            notify(v and "Race auto-farm on - races run themselves (Race tab settings apply)"
+            notify(v and "Race auto-farm on - races run themselves (locked race tuning applies)"
                 or "Race auto-farm off")
         end)
     toggle(p5, "Auto-queue the next race",
