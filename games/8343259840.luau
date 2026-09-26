@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v5"
+local SCRIPT_VERSION = "crim-v6"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -664,6 +664,12 @@ local function applyGunRecoil()
         local want = rec.Recoil * (pct / 100)
         local ok = pcall(function() t.Recoil = want end)
         if ok and t.Recoil == want then applied += 1 end
+        -- the kit also carries an intended reduction factor (RecoilRedution)
+        -- - set it from the same slider so whichever value the client reads
+        -- (live or at load) lands on the percentage.
+        if type(t.RecoilRedution) == "number" then
+            pcall(function() t.RecoilRedution = math.clamp(1 - pct / 100, 0, 1) end)
+        end
     end
     return applied
 end
@@ -711,6 +717,8 @@ local function hookSpringClass(class)
     return wrapped
 end
 
+local wrapSpringInstance  -- assigned below; the factory wrapper uses it
+
 local function installSpringHook()
     pcall(function()
         local storage = ReplicatedStorage:FindFirstChild("Storage")
@@ -719,17 +727,48 @@ local function installSpringHook()
         if not mod then return end
         local m = require(mod)
         if type(m) ~= "table" then return end
-        local wrapped = hookSpringClass(m)
-        if type(m.spring) == "table" then wrapped += hookSpringClass(m.spring) end
-        for _, v in pairs(m) do
-            if type(v) == "table" and type(v.new) == "function" then
-                wrapped += hookSpringClass(v)
+        local detail = {}
+        -- the factory (probe: SpringModule = {mt=table, new=function}): wrap
+        -- new so every spring created afterwards gets its accelerate wrapped
+        if type(m.new) == "function" and not wrappedSpringFns[m.new] then
+            local origNew = m.new
+            m.new = function(...)
+                local inst = origNew(...)
+                if wrapSpringInstance then pcall(wrapSpringInstance, inst) end
+                return inst
+            end
+            wrappedSpringFns[origNew] = true
+            wrappedSpringFns[m.new] = true
+            table.insert(detail, "new")
+        end
+        -- class methods live on mt / its __index (and legacy module shapes)
+        local function wrapMethods(tbl, label)
+            if type(tbl) ~= "table" then return end
+            for _, name in ipairs({ "accelerate", "impulse", "shove", "push", "add" }) do
+                if type(tbl[name]) == "function" and wrapSpringFn(name, tbl[name], tbl) then
+                    table.insert(detail, label .. "." .. name)
+                end
             end
         end
-        if wrapped > 0 then
-            print(("[criminality] spring hook: wrapped %d spring method(s)"):format(wrapped))
+        wrapMethods(m, "self")
+        wrapMethods(m.mt, "mt")
+        if type(m.mt) == "table" and type(m.mt.__index) == "table" then
+            wrapMethods(m.mt.__index, "mt.__index")
+        end
+        if type(m.spring) == "table" then
+            wrapMethods(m.spring, "spring")
+            if type(m.spring.mt) == "table" then wrapMethods(m.spring.mt, "spring.mt") end
+        end
+        if #detail > 0 then
+            print(("[criminality] spring hook: wrapped %s"):format(table.concat(detail, ", ")))
         else
-            print("[criminality] spring hook: no methods found on SpringModule (will rely on Deep apply)")
+            local names = {}
+            if type(m.mt) == "table" then
+                for k, v in pairs(m.mt) do table.insert(names, tostring(k) .. ":" .. type(v)) end
+            end
+            table.sort(names)
+            print(("[criminality] spring hook: nothing obvious to wrap (mt: %s)"):format(
+                #names > 0 and table.concat(names, ", ") or "empty"))
         end
     end)
 end
@@ -741,7 +780,7 @@ local function looksLikeSpring(t)
         and type(t.s) == "number" and type(t.d) == "number"
 end
 
-local function wrapSpringInstance(obj)
+wrapSpringInstance = function(obj)
     if type(obj) ~= "table" or obj.__havocSpring then return false end
     local orig = obj.accelerate
     if type(orig) ~= "function" then
@@ -760,39 +799,100 @@ local function wrapSpringInstance(obj)
     return true
 end
 
--- One-time fallback scan (button-triggered, NEVER automatic): finds the
--- config tables the weapon scripts actually hold AND every live spring
--- instance, scaling/wrapping both.
-local function deepScanAll()
-    if type(getgc) ~= "function" then return 0, 0 end
-    local cfgs, springs = 0, 0
-    local function consider(t)
-        if type(t) ~= "table" then return end
-        if looksLikeGunConfig(t) and not recoilGun.tables[t] then
-            recoilGun.tables[t] = { Recoil = t.Recoil }
-            cfgs += 1
-        elseif looksLikeSpring(t) and wrapSpringInstance(t) then
-            springs += 1
+-- Closure scan of the equipped gun's own script: the Client LocalScript
+-- holds ITS config table (and any snapshotted numbers) as upvalues. This
+-- finds them via getscriptclosure - the table found here is the exact one
+-- the script reads, so scaling it always lands.
+local function closureScanEquipped()
+    local report = { scripts = 0, newTables = 0, numbers = {}, available = true }
+    if type(getscriptclosure) ~= "function" then
+        report.available = false
+        return report
+    end
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return report end
+    local seen = {}
+    local budget = 0
+    local function visit(val)
+        if type(val) == "table" then
+            if looksLikeGunConfig(val) and not recoilGun.tables[val] then
+                recoilGun.tables[val] = { Recoil = val.Recoil }
+                report.newTables += 1
+            end
+        elseif typeof(val) == "number" then
+            local key = tostring(val)
+            report.numbers[key] = (report.numbers[key] or 0) + 1
         end
     end
-    pcall(function()
-        for _, obj in pairs(getgc(true)) do
-            if type(obj) == "table" then
-                consider(obj)
-            elseif type(obj) == "function" then
-                pcall(function()
-                    local i = 1
-                    while true do
-                        local name, val = debug.getupvalue(obj, i)
-                        if not name then break end
-                        consider(val)
-                        i += 1
-                    end
-                end)
+    local function walk(fn)
+        if type(fn) ~= "function" or seen[fn] or budget > 500 then return end
+        seen[fn] = true
+        budget += 1
+        pcall(function()
+            local i = 1
+            while true do
+                local name, val = debug.getupvalue(fn, i)
+                if not name then break end
+                visit(val)
+                i += 1
+            end
+        end)
+        pcall(function()
+            for _, proto in ipairs(debug.getprotos(fn)) do
+                walk(proto)
+            end
+        end)
+    end
+    for _, name in ipairs({ "Client", "PassClient" }) do
+        local scr = tool:FindFirstChild(name)
+        if scr and scr:IsA("LocalScript") then
+            report.scripts += 1
+            local ok, closure = pcall(getscriptclosure, scr)
+            if ok and type(closure) == "function" then
+                walk(closure)
             end
         end
-    end)
-    return cfgs, springs
+    end
+    return report
+end
+
+-- One-time fallback scan (button-triggered, NEVER automatic): finds the
+-- config tables the weapon scripts actually hold AND every live spring
+-- instance, scaling/wrapping both. Also runs the closure scan.
+local function deepScanAll()
+    local cfgs, springs = 0, 0
+    if type(getgc) == "function" then
+        local function consider(t)
+            if type(t) ~= "table" then return end
+            if looksLikeGunConfig(t) and not recoilGun.tables[t] then
+                recoilGun.tables[t] = { Recoil = t.Recoil }
+                cfgs += 1
+            elseif looksLikeSpring(t) and wrapSpringInstance(t) then
+                springs += 1
+            end
+        end
+        pcall(function()
+            for _, obj in pairs(getgc(true)) do
+                if type(obj) == "table" then
+                    consider(obj)
+                elseif type(obj) == "function" then
+                    pcall(function()
+                        local i = 1
+                        while true do
+                            local name, val = debug.getupvalue(obj, i)
+                            if not name then break end
+                            consider(val)
+                            i += 1
+                        end
+                    end)
+                end
+            end
+        end)
+    end
+    local closure = nil
+    pcall(function() closure = closureScanEquipped() end)
+    return cfgs, springs, closure
 end
 
 -- Scale the current gun + every gun equipped later (tools move from the
@@ -819,6 +919,36 @@ end
 
 if LocalPlayer.Character then watchToolsForRecoil(LocalPlayer.Character) end
 LocalPlayer.CharacterAdded:Connect(watchToolsForRecoil)
+
+-- Guns snapshot their config when they ARRIVE (their Client script starts
+-- then, not on equip), so scale each one the moment it shows up in the
+-- backpack - before the script's first read - and again shortly after.
+local function scaleOneTool(tool)
+    if not tool or not tool.Parent then return end
+    pcall(function()
+        local mod = tool:FindFirstChild("Config")
+        if mod then trackGunCfg(require(mod)) end
+    end)
+    pcall(applyGunRecoil)
+end
+
+local function watchBackpackForRecoil(bp)
+    if not bp then return end
+    bp.ChildAdded:Connect(function(child)
+        if not child:IsA("Tool") then return end
+        scaleOneTool(child)
+        task.delay(0.05, function() scaleOneTool(child) end)
+        task.delay(0.25, function() scaleOneTool(child) end)
+        task.delay(0.75, function() scaleOneTool(child) end)
+    end)
+    for _, child in ipairs(bp:GetChildren()) do
+        if child:IsA("Tool") then scaleOneTool(child) end
+    end
+end
+if LocalPlayer.Backpack then watchBackpackForRecoil(LocalPlayer.Backpack) end
+LocalPlayer.ChildAdded:Connect(function(child)
+    if child.Name == "Backpack" then watchBackpackForRecoil(child) end
+end)
 
 -- Probe: run it with a gun equipped and copy the console output back.
 -- It never fires remotes - it only reads what the tool carries.
@@ -865,13 +995,17 @@ local function recoilProbe()
         for k, v in pairs(m) do table.insert(top, tostring(k) .. ":" .. type(v)) end
         table.sort(top)
         print("SpringModule fields:", table.concat(top, ", "))
-        local class = type(m.spring) == "table" and m.spring or m
-        local meth = {}
-        for k, v in pairs(class) do
-            if type(v) == "function" then table.insert(meth, tostring(k)) end
+        local function memberList(tbl, label)
+            if type(tbl) ~= "table" then return end
+            local names = {}
+            for k, v in pairs(tbl) do table.insert(names, tostring(k) .. ":" .. type(v)) end
+            table.sort(names)
+            print(("  %s: %s"):format(label, #names > 0 and table.concat(names, ", ") or "(empty)"))
         end
-        table.sort(meth)
-        print("  factory members:", #meth > 0 and table.concat(meth, ", ") or "(none at top level)")
+        memberList(m.mt, "mt members")
+        if type(m.mt) == "table" and type(m.mt.__index) == "table" then
+            memberList(m.mt.__index, "mt.__index members")
+        end
     end)
     local char = LocalPlayer.Character
     local tool = char and char:FindFirstChildOfClass("Tool")
@@ -1171,18 +1305,28 @@ local function buildMenu()
     end)
     button(p3, "Deep apply (one-time scan)", function()
         task.spawn(function()
-            local cfgs, springs = deepScanAll()
+            local cfgs, springs, closure = deepScanAll()
             local guns = applyGunRecoil()
             local shake = applyRecoil()
             notify(("Deep scan: +%d gun config(s), +%d spring(s) wrapped - shoot to test"):format(cfgs, springs))
             print(("[criminality] deep scan: +%d configs, +%d springs wrapped, %d guns tracked, CamShake %d (pct %d%%)"):format(
                 cfgs, springs, guns, shake, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+            if closure then
+                local nums = {}
+                for k, v in pairs(closure.numbers) do table.insert(nums, ("%sx%d"):format(k, v)) end
+                table.sort(nums)
+                local shown = {}
+                for i = 1, math.min(#nums, 10) do table.insert(shown, nums[i]) end
+                print(("[criminality] closure scan: %s, scripts %d, +%d config tables, numbers: %s"):format(
+                    closure.available and "ok" or "getscriptclosure missing",
+                    closure.scripts, closure.newTables, table.concat(shown, ", ")))
+            end
         end)
     end)
-    note(p3, "100% = the game's own recoil. Two layers: (1) each gun's own config (Recoil=21 on the G-17) is " ..
-        "scaled on equip/slider change; (2) every kick that flows through the spring system is live-scaled, so its " ..
-        "amount scales after any snapshot. If shooting still feels the same: equip the gun, hit Deep apply once " ..
-        "(one-time scan), shoot again.")
+    note(p3, "100% = the game's own recoil. Three layers: a gun's config (Recoil + RecoilRedution) is scaled the " ..
+        "moment it ARRIVES in your backpack and again on equip; every spring kick vector is live-scaled; Deep apply " ..
+        "does a one-time scan of live tables + springs + the gun script's own closure. If a gun you already hold " ..
+        "ignores the slider at 0%, it cached its values when it arrived - grab a new gun (or rejoin) and test.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
