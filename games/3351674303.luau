@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v60"
+local SCRIPT_VERSION = "de-v61"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1955,7 +1955,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0, arrivedKey = nil, arrivedAt = 0, runStartAt = 0 }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0, arrivedKey = nil, arrivedAt = 0, runStartAt = 0, robbedAt = nil }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -2135,10 +2135,34 @@ local function deliveryTick()
     local items = tonumber(st.ItemsCarried) or 0
     local maxCap = tonumber(st.MaxCapacity) or 4
     if items ~= deliveryFarm.lastItems then
+        if items < (deliveryFarm.lastItems or 0) then
+            deliveryFarm.robbedAt = now  -- cargo stolen: watch for a dead run
+        end
         deliveryFarm.lastItems = items
         deliveryFarm.itemsAt = now
         if items == 0 then
             deliveryFarm.pickupDone = false
+        end
+    end
+
+    -- Robbed dry: a steal can empty the load while the pickup pile is empty
+    -- too - nothing left to collect or deliver, and the server does not
+    -- always fail the run, so the farm used to sit at the pickup forever.
+    -- After a short grace, drop the dead delivery and start a fresh shift.
+    if deliveryFarm.robbedAt and items == 0 and not st.IsDropping then
+        local remNow = tonumber(st.PackagesRemainingAtPickup)
+        local deadAfter = (remNow ~= nil and remNow <= 0) and 8 or 25
+        if (now - deliveryFarm.robbedAt) > deadAfter and (now - deliveryFarm.itemsAt) > deadAfter then
+            deliveryFarm.robbedAt = nil
+            deliveryFarm.state = nil
+            deliveryFarm.pickupDone = false
+            deliveryFarm.lastItems = -1
+            deliveryFarm.wantRestart = true
+            deliveryFarm.startSince = 0
+            deliveryFarm.lastStart = 0
+            notify("Delivery farm: cargo was stolen - restarting the run")
+            print("[driving-empire] delivery farm: load stolen and nothing left to collect - restarting")
+            return
         end
     end
 
@@ -2281,6 +2305,7 @@ local function installDeliveryProbe()
             if s and not deliveryFarm.state then
                 deliveryFarm.arrivedKey = nil  -- new run: re-arm pacing
                 deliveryFarm.runStartAt = os.clock()
+                deliveryFarm.robbedAt = nil
             end
             deliveryFarm.state = s
             deliveryFarm.stateAt = os.clock()
@@ -2304,6 +2329,7 @@ local function installDeliveryProbe()
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             deliveryFarm.lastStart = 0  -- a new shift can start right away
             deliveryFarm.arrivedKey = nil  -- re-arm pacing for the next run
+            deliveryFarm.robbedAt = nil
             local reward = info and tonumber(info.CashReward)
             local failure = info and info.FailureReason
             -- Safety net: pacing usually prevents zero-pay runs; if two
