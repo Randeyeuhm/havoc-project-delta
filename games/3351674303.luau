@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v69"
+local SCRIPT_VERSION = "de-v70"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2642,7 +2642,7 @@ local OUTLAW_REACH = 9          -- how close to land before interacting
 local OUTLAW_CASHIN_MARGIN = 30 -- cash in when this little wanted time is left
 local OUTLAW_HOLD_MAX = 600     -- hold at most this long since wanted began
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0 }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2652,20 +2652,24 @@ local function outlawAnchorModel(inst)
 end
 
 local function outlawPickATM(pos)
-    local best, bestPos, bestD = nil, nil, math.huge
+    -- "Busted" = already looted, "Disabled" = a depleted custom crate.
+    -- Cargo crates (CustomATMTypeId = Water / OffRoading) carry the far
+    -- bigger loot, so they win the pick from a fair way further out.
+    local best, bestPos, bestScore = nil, nil, math.huge
     pcall(function()
         local cs = game:GetService("CollectionService")
         for _, inst in ipairs(cs:GetTagged("CriminalATMClient")) do
             local model = outlawAnchorModel(inst)
             if model and model.Parent then
+                local state = model:GetAttribute("State")
                 local engage = model:GetAttribute("EngagingPlayerId")
                 local skipUntil = outlawFarm.skipAt[model]
-                if model:GetAttribute("State") ~= "Busted"
+                if state ~= "Busted" and state ~= "Disabled"
                     and (engage == nil or engage == LocalPlayer.UserId)
                     and not (skipUntil and os.clock() < skipUntil) then
                     local p = model:GetPivot().Position
-                    local d = (pos - p).Magnitude
-                    if d < bestD then best, bestPos, bestD = model, p, d end
+                    local score = (pos - p).Magnitude - (model:GetAttribute("CustomATMTypeId") and 1200 or 0)
+                    if score < bestScore then best, bestPos, bestScore = model, p, score end
                 end
             end
         end
@@ -2885,7 +2889,12 @@ local function outlawTick()
         if now < outlawFarm.bustDoneAt then return end
         outlawFarm.state, outlawFarm.target = nil, nil
         local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustComplete", t) end)
-        if not (okc and ok) then
+        if okc and ok then
+            if t:GetAttribute("CustomATMTypeId") and (os.clock() - outlawFarm.crateToastAt) > 600 then
+                outlawFarm.crateToastAt = os.clock()
+                notify("Outlaw farm: looted a cargo crate!")
+            end
+        else
             outlawFarm.skipAt[t] = os.clock() + 15
         end
         return
@@ -2926,7 +2935,8 @@ local function outlawTick()
         end
         return
     end
-    if (pos - tpos).Magnitude > OUTLAW_REACH then
+    local reach = target:GetAttribute("CustomATMTypeId") and 16 or OUTLAW_REACH
+    if (pos - tpos).Magnitude > reach then
         if now - outlawFarm.tpAt > 1 then
             outlawFarm.tpAt = now
             pcall(function() char:PivotTo(CFrame.new(tpos + Vector3.new(0, 3, 0))) end)
