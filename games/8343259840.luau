@@ -85,7 +85,7 @@ local DEFAULTS = {
     -- not look mechanical. TeamCheck off by default (most lobbies are solo).
     Aimbot   = { Enabled = false, Mode = "Hold RMB", FOV = 100, Smoothness = 6,
                  TeamCheck = false, VisibleOnly = true, FOVCircle = true },
-    Weapons  = { RecoilPct = 100, AutoApply = false },
+    Weapons  = { RecoilPct = 100, AutoApply = false, LiveApply = false },
     Misc     = { Fullbright = false, AntiAFK = true },
 }
 
@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v21"
+local SCRIPT_VERSION = "crim-v22"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -677,6 +677,144 @@ local function applyGunRecoil()
         end
     end
     return applied
+end
+
+-- ============================================================
+-- LIVE FCF (running-gun config copy + keypress refresh) - crim-v22
+-- ============================================================
+-- Decoded from the dump (FireModeSwitch, gun module L370549+): the running
+-- gun module deep-copies the tool's Config into a private table ("fcf") and
+-- only re-reads Recoil/RecoilRedution from it when FireModeSwitch runs -
+-- which the bullet-type key (default Z) triggers through RefreshInputs.
+-- Executors hide game CLOSURES from debug.getupvalue, but plain Lua TABLES
+-- are visible in getgc - so the live apply is:
+--   1) scan GC tables for the gun-config signature (Recoil + RecoilSpeed +
+--      RecoilDamper + CrossExpansion numeric fields),
+--   2) write the scaled values into every match (re-scan when the gun or
+--      the slider changed),
+--   3) tap the bullet-type key via VirtualInputManager - an ordinary
+--      keypress through the normal input pipeline (no hooks, no metatable
+--      patching - nothing the AC flags),
+--   4) the gun re-reads the patched copy and every later shot kicks with
+--      the new % - no drop/pick cycle needed.
+local liveFcf = { cands = {}, lastScan = 0, toolRef = nil }
+
+local function liveLooksLikeGunConfig(t)
+    return type(t) == "table"
+        and type(t.Recoil) == "number"
+        and type(t.RecoilSpeed) == "number"
+        and type(t.RecoilDamper) == "number"
+        and type(t.CrossExpansion) == "number"
+end
+
+local function liveFcfScan(announce)
+    liveFcf.cands = {}
+    liveFcf.lastScan = os.clock()
+    pcall(function()
+        local char = LocalPlayer.Character
+        liveFcf.toolRef = char and char:FindFirstChildOfClass("Tool") or nil
+    end)
+    if type(getgc) ~= "function" then
+        if announce then notify("Live copy: getgc unavailable in this executor") end
+        return 0
+    end
+    local ref = nil
+    pcall(function() ref = equippedToolConfig() end)
+    if ref then pcall(trackGunCfg, ref) end
+    local lists = {}
+    pcall(function() lists[#lists + 1] = getgc(true) end)
+    pcall(function() lists[#lists + 1] = getgc(false) end)
+    pcall(function() lists[#lists + 1] = getgc() end)
+    local seen, count = {}, 0
+    for _, list in ipairs(lists) do
+        for _, obj in pairs(list) do
+            if type(obj) == "table" and not seen[obj] then
+                seen[obj] = true
+                if liveLooksLikeGunConfig(obj) then
+                    count += 1
+                    if #liveFcf.cands < 32 then
+                        local rd = obj.RecoilRedution
+                        liveFcf.cands[#liveFcf.cands + 1] = {
+                            t = obj,
+                            orig = obj.Recoil,
+                            origRed = (type(rd) == "number") and rd or nil,
+                        }
+                    end
+                end
+            end
+        end
+    end
+    if announce then
+        print(("[criminality] live copy scan: %d gun-config table(s) in GC (%s)"):format(
+            count, ref and "equipped config found" or "no equipped config"))
+        for i, c in ipairs(liveFcf.cands) do
+            if i > 8 then break end
+            print(("  [%d] %s Recoil=%s RecoilRedution=%s Speed=%s|Damper=%s"):format(
+                i, tostring(c.t), tostring(c.orig), tostring(c.origRed),
+                tostring(c.t.RecoilSpeed), tostring(c.t.RecoilDamper)))
+        end
+        notify(("Live copy scan: %d table(s) - console has details"):format(count))
+    end
+    return count
+end
+
+local function liveFcfApply(pct, announce)
+    -- rescan when stale (>5s), when the copy list is empty, or when the
+    -- equipped gun changed (every gun load makes a FRESH private copy)
+    local charTool = nil
+    pcall(function()
+        local char = LocalPlayer.Character
+        charTool = char and char:FindFirstChildOfClass("Tool") or nil
+    end)
+    if #liveFcf.cands == 0 or (os.clock() - liveFcf.lastScan) > 5 or charTool ~= liveFcf.toolRef then
+        liveFcfScan(false)
+        charTool = liveFcf.toolRef
+    end
+    local n = 0
+    for _, c in ipairs(liveFcf.cands) do
+        local ok = pcall(function() c.t.Recoil = c.orig * (pct / 100) end)
+        if c.origRed ~= nil then
+            pcall(function() c.t.RecoilRedution = math.clamp(1 - pct / 100, 0, 1) end)
+        end
+        if ok then n += 1 end
+    end
+    if announce then
+        print(("[criminality] live copy: patched %d table(s) to %d%%"):format(
+            n, math.floor(pct + 0.5)))
+    end
+    return n
+end
+
+-- FireModeSwitch re-reads Recoil from the live copy when the bullet-type
+-- key is pressed. VirtualInputManager key events ride the same pipeline as
+-- a physical key - not a hook, indistinguishable from real input.
+local function triggerBulletRefresh()
+    return (pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        vim:SendKeyEvent(true, Enum.KeyCode.Z, false, game)
+        task.wait(0.06)
+        vim:SendKeyEvent(false, Enum.KeyCode.Z, false, game)
+    end))
+end
+
+local function liveApplyNow(announce)
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    pcall(applyGunRecoil)
+    local n = liveFcfApply(pct, false)
+    local sent = false
+    if n > 0 then
+        sent = triggerBulletRefresh()
+        task.wait(0.15)
+    end
+    if announce then
+        if n == 0 then
+            notify("Live apply: no live copy found - use Apply % / Auto apply instead")
+        else
+            notify(("Live apply: %d copy(ies) patched%s"):format(
+                n, sent and ", refresh key sent (ammo type toggled)" or ""))
+        end
+    end
+    return n, sent
 end
 
 -- ============================================================
@@ -2430,9 +2568,38 @@ local function buildMenu()
                     end)
                 end)
             end
+            if Config.Weapons.LiveApply then
+                autoApply.token += 1
+                local tok = autoApply.token
+                task.delay(1.0, function()
+                    if tok ~= autoApply.token or not Config.Weapons.LiveApply then return end
+                    task.spawn(function()
+                        if autoApply.busy then
+                            task.wait(0.8)
+                            if tok ~= autoApply.token or not Config.Weapons.LiveApply then return end
+                        end
+                        if autoApply.busy then return end
+                        autoApply.busy = true
+                        pcall(liveApplyNow, false)
+                        autoApply.busy = false
+                    end)
+                end)
+            end
         end, 5, 0, 200)
     toggle(p3, "Auto apply (re-cycle gun)", function() return Config.Weapons.AutoApply end,
         function(v) Config.Weapons.AutoApply = v end)
+    toggle(p3, "Live apply (patch + Z refresh)", function() return Config.Weapons.LiveApply end,
+        function(v) Config.Weapons.LiveApply = v end)
+    button(p3, "Apply LIVE now (patch + Z)", function()
+        task.spawn(function()
+            liveApplyNow(true)
+        end)
+    end)
+    button(p3, "Scan live copy (console)", function()
+        task.spawn(function()
+            liveFcfScan(true)
+        end)
+    end)
     button(p3, "Probe recoil (console)", function()
         task.spawn(function()
             local applied, blocked = applyRecoil()
@@ -2883,9 +3050,11 @@ local function buildMenu()
             notify("Live hook removed - the game's own recoil is back")
         end)
     end)
-    note(p3, "Live recoil: swap + rewire (safe - no VM hooks, ever). It absorbs listeners on BOTH the new and " ..
-        "original RCL events and serves scaled kicks. 'RCL probe' + 'Test kick' tell us where the game's listener " ..
-        "sits (send their output). 'Apply %' / 'Auto apply' always work as backup; 'Undo live hook' restores normal.")
+    note(p3, "Live apply: patches the running gun's config copy in memory, then taps your bullet-type key (default Z) " ..
+        "so the gun re-reads it - instant, no drop/pick. The keypress briefly toggles ammo type (that toggle IS the " ..
+        "game's own config refresh; harmless). Works best on guns with bullet types - others keep the copy patch but " ..
+        "re-read on next equip. Swap + rewire stays as the backup path; 'RCL probe' + 'Test kick' send diagnostics; " ..
+        "'Apply %' / 'Auto apply' always work; 'Undo live hook' restores normal.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
