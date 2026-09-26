@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v12"
+local SCRIPT_VERSION = "crim-v13"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -695,6 +695,16 @@ end
 -- Wrapped methods read the slider live, so changes apply instantly.
 local wrappedSpringFns = {}
 
+-- trace instrumentation: proves whether kicks really flow through the
+-- spring module during a firing burst (call counts + last vectors, and a
+-- mute switch used by the runtime trace's final test)
+local springStats = { newCalls = 0, accelCalls = 0, lastVecs = {}, muted = false, moduleRef = nil }
+function springStats.recordVec(src, vec)
+    while #springStats.lastVecs >= 8 do table.remove(springStats.lastVecs, 1) end
+    springStats.lastVecs[#springStats.lastVecs + 1] = { src = src, x = vec.X, y = vec.Y, z = vec.Z, mag = vec.Magnitude }
+end
+local springMethodNames = { "accelerate", "accel", "acc", "impulse", "shove", "push", "kick" }
+
 local function springFactor()
     return (tonumber(Config.Weapons.RecoilPct) or 100) / 100
 end
@@ -702,7 +712,12 @@ end
 local function wrapSpringFn(name, fn, owner)
     if type(fn) ~= "function" or wrappedSpringFns[fn] then return false end
     owner[name] = function(self, vec, ...)
+        if typeof(vec) == "Vector3" then
+            springStats.accelCalls += 1
+            springStats.recordVec(name, vec)
+        end
         local f = springFactor()
+        if springStats.muted then f = 0 end
         if f ~= 1 and typeof(vec) == "Vector3" then vec = vec * f end
         return fn(self, vec, ...)
     end
@@ -714,7 +729,7 @@ end
 local function hookSpringClass(class)
     if type(class) ~= "table" then return 0 end
     local wrapped = 0
-    for _, name in ipairs({ "accelerate", "impulse", "shove", "push", "add" }) do
+    for _, name in ipairs(springMethodNames) do
         if type(class[name]) == "function" and wrapSpringFn(name, class[name], class) then
             wrapped += 1
         end
@@ -732,12 +747,14 @@ local function installSpringHook()
         if not mod then return end
         local m = require(mod)
         if type(m) ~= "table" then return end
+        springStats.moduleRef = m
         local detail = {}
         -- the factory (probe: SpringModule = {mt=table, new=function}): wrap
         -- new so every spring created afterwards gets its accelerate wrapped
         if type(m.new) == "function" and not wrappedSpringFns[m.new] then
             local origNew = m.new
             m.new = function(...)
+                springStats.newCalls += 1
                 local inst = origNew(...)
                 if wrapSpringInstance then pcall(wrapSpringInstance, inst) end
                 return inst
@@ -749,7 +766,7 @@ local function installSpringHook()
         -- class methods live on mt / its __index (and legacy module shapes)
         local function wrapMethods(tbl, label)
             if type(tbl) ~= "table" then return end
-            for _, name in ipairs({ "accelerate", "impulse", "shove", "push", "add" }) do
+            for _, name in ipairs(springMethodNames) do
                 if type(tbl[name]) == "function" and wrapSpringFn(name, tbl[name], tbl) then
                     table.insert(detail, label .. "." .. name)
                 end
@@ -787,17 +804,24 @@ end
 
 wrapSpringInstance = function(obj)
     if type(obj) ~= "table" or obj.__havocSpring then return false end
-    local orig = obj.accelerate
-    if type(orig) ~= "function" then
-        local mt = getmetatable(obj)
-        local idx = type(mt) == "table" and mt.__index
-        if type(idx) == "table" and type(idx.accelerate) == "function" then orig = idx.accelerate end
+    local mt = getmetatable(obj)
+    local idx = type(mt) == "table" and mt.__index
+    local mname, orig
+    for _, name in ipairs(springMethodNames) do
+        local cand = obj[name]
+        if type(cand) ~= "function" and type(idx) == "table" then cand = idx[name] end
+        if type(cand) == "function" then mname, orig = name, cand break end
     end
     if type(orig) ~= "function" then return false end
     if wrappedSpringFns[orig] then return false end  -- class hook already covers it
     obj.__havocSpring = true
-    obj.accelerate = function(self, vec, ...)
+    obj[mname] = function(self, vec, ...)
+        if typeof(vec) == "Vector3" then
+            springStats.accelCalls += 1
+            springStats.recordVec("inst." .. mname, vec)
+        end
         local f = springFactor()
+        if springStats.muted then f = 0 end
         if f ~= 1 and typeof(vec) == "Vector3" then vec = vec * f end
         return orig(self, vec, ...)
     end
@@ -1905,96 +1929,384 @@ local function buildMenu()
                 cfgs, springs, guns, snaps, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
         end)
     end)
-    button(p3, "Recoil trace (fire 10s)", function()
+    button(p3, "Recoil trace v2 (fire 12s)", function()
         task.spawn(function()
             if type(getgc) ~= "function" then
                 notify("Recoil trace: getgc unavailable")
                 return
             end
+            local traceSprings = {}
+            local function vFlat(t, key, name, v, isFn)
+                t[key .. "~x"] = { name = name .. ".x", v = v.X, isFn = isFn }
+                t[key .. "~y"] = { name = name .. ".y", v = v.Y, isFn = isFn }
+                t[key .. "~z"] = { name = name .. ".z", v = v.Z, isFn = isFn }
+            end
             local function snap()
                 local t = {}
-                pcall(function()
-                    for _, obj in pairs(getgc(true)) do
-                        if type(obj) == "function" then
-                            pcall(function()
-                                local i = 1
-                                while true do
-                                    local name, val = debug.getupvalue(obj, i)
-                                    if not name then break end
-                                    if typeof(val) == "number" then
-                                        t[tostring(obj) .. "|" .. tostring(i)] = { name = tostring(name), v = val, isFn = true }
+                local seen = {}
+                local function scanList(list)
+                    for _, obj in pairs(list) do
+                        if not seen[obj] then
+                            seen[obj] = true
+                            if type(obj) == "function" then
+                                pcall(function()
+                                    local i = 1
+                                    while true do
+                                        local name, val = debug.getupvalue(obj, i)
+                                        if not name then break end
+                                        local tv = typeof(val)
+                                        if tv == "number" then
+                                            t[tostring(obj) .. "|" .. tostring(i)] = { name = tostring(name), v = val, isFn = true }
+                                        elseif tv == "Vector3" then
+                                            vFlat(t, tostring(obj) .. "|" .. tostring(i), tostring(name), val, true)
+                                        end
+                                        i += 1
                                     end
-                                    i += 1
-                                end
-                            end)
-                        elseif type(obj) == "table" then
-                            pcall(function()
-                                local n = 0
-                                for k, v in pairs(obj) do
-                                    n += 1
-                                    if n > 50 then break end
-                                    if typeof(v) == "number" then
-                                        t[tostring(obj) .. "T|" .. tostring(k)] = { name = tostring(k), v = v, isFn = false }
+                                end)
+                            elseif type(obj) == "table" then
+                                pcall(function()
+                                    if typeof(obj.p) == "Vector3" and typeof(obj.v) == "Vector3" then
+                                        traceSprings[obj] = true
                                     end
-                                end
-                            end)
+                                end)
+                                pcall(function()
+                                    local iters, n = 0, 0
+                                    for k, v in pairs(obj) do
+                                        iters += 1
+                                        if iters > 240 or n > 120 then break end
+                                        local tv = typeof(v)
+                                        if tv == "number" or tv == "Vector3" then
+                                            n += 1
+                                            if tv == "number" then
+                                                t[tostring(obj) .. "T|" .. tostring(k)] = { name = tostring(k), v = v, isFn = false }
+                                            else
+                                                vFlat(t, tostring(obj) .. "T|" .. tostring(k), tostring(k), v, false)
+                                            end
+                                        end
+                                    end
+                                end)
+                            end
                         end
                     end
-                end)
+                end
+                pcall(function() scanList(getgc(true)) end)
+                pcall(function() scanList(getgc(false)) end)
+                pcall(function() scanList(getgc()) end)
                 return t
             end
-            notify("Recoil trace: FIRE THE GUN NOW for ~10 seconds")
-            print("[criminality] recoil trace: snapshot A...")
-            local A = snap()
-            local pitched = {}
-            local conn = RunService.RenderStepped:Connect(function()
+            local function camPitch()
                 local cam = workspace.CurrentCamera
-                if cam then
-                    table.insert(pitched, math.deg(math.asin(math.clamp(cam.CFrame.LookVector.Y, -1, 1))))
-                end
-            end)
-            for i = 10, 1, -1 do
-                print(("[criminality] recoil trace: %d ... fire!"):format(i))
-                task.wait(1)
+                if not cam then return 0 end
+                return math.deg(math.asin(math.clamp(cam.CFrame.LookVector.Y, -1, 1)))
             end
-            pcall(function() conn:Disconnect() end)
-            print("[criminality] recoil trace: snapshot B...")
-            local B = snap()
-            local cntA, cntB = 0, 0
-            for _ in pairs(A) do cntA += 1 end
-            for _ in pairs(B) do cntB += 1 end
-            local changes = {}
-            for k, b in pairs(B) do
-                local a = A[k]
-                if a and a.v ~= b.v then
-                    local d = b.v - a.v
-                    if math.abs(d) > 0 and math.abs(d) < 10000 and math.abs(b.v) < 1000000 then
-                        changes[#changes + 1] = { name = b.name, isFn = b.isFn, from = a.v, to = b.v, d = d }
+            local function noiseName(name)
+                local n = string.lower(name)
+                return string.find(n, "distance", 1, true) ~= nil
+                    or string.find(n, "time", 1, true) ~= nil
+                    or string.find(n, "tick", 1, true) ~= nil
+                    or string.find(n, "clock", 1, true) ~= nil
+            end
+            local function recoilish(name)
+                local n = string.lower(name)
+                for _, pat in ipairs({ "recoil", "kick", "sway", "shake", "spray", "punch", "angle", "aim", "accum", "spring", "spread" }) do
+                    if string.find(n, pat, 1, true) then return true end
+                end
+                return false
+            end
+            local function valueDump()
+                local t = {}
+                local roots = {}
+                if LocalPlayer.Character then table.insert(roots, LocalPlayer.Character) end
+                local bp = LocalPlayer:FindFirstChild("Backpack")
+                if bp then table.insert(roots, bp) end
+                local stats = workspace:FindFirstChild("CharStats")
+                local meStats = stats and stats:FindFirstChild(LocalPlayer.Name)
+                if meStats then table.insert(roots, meStats) end
+                for _, root in ipairs(roots) do
+                    pcall(function()
+                        for _, d in ipairs(root:GetDescendants()) do
+                            local pname = d:GetFullName()
+                            if d:IsA("ValueBase") then
+                                t[pname] = tostring(d.Value)
+                            end
+                            local attrs = d:GetAttributes()
+                            if attrs then
+                                for k, av in pairs(attrs) do
+                                    local tv = type(av)
+                                    if tv == "number" or tv == "string" or tv == "boolean" then
+                                        t[pname .. "@" .. k] = tostring(av)
+                                    end
+                                end
+                            end
+                        end
+                    end)
+                end
+                local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                if not tool and bp then tool = bp:FindFirstChildOfClass("Tool") end
+                local cfgMod = tool and tool:FindFirstChild("Config")
+                if cfgMod then
+                    local okm, cfg = pcall(require, cfgMod)
+                    if okm and type(cfg) == "table" then
+                        for k, v in pairs(cfg) do
+                            local tv = type(v)
+                            if tv == "number" or tv == "string" or tv == "boolean" then
+                                t["Config." .. tostring(k)] = tostring(v)
+                            end
+                        end
+                    end
+                end
+                return t
+            end
+            local function diffSnap(X, Y)
+                local out = {}
+                for k, y in pairs(Y) do
+                    local x = X[k]
+                    if x and x.v ~= y.v then
+                        local d = y.v - x.v
+                        if math.abs(d) > 0 and math.abs(d) < 10000 and math.abs(y.v) < 1000000 then
+                            out[#out + 1] = { name = y.name, isFn = y.isFn, from = x.v, to = y.v, d = d }
+                        end
+                    end
+                end
+                table.sort(out, function(a, b) return math.abs(a.d) > math.abs(b.d) end)
+                return out
+            end
+            local function printList(label, list, limit)
+                print(("[criminality] %s (%d)"):format(label, #list))
+                for i = 1, math.min(#list, limit) do
+                    local c = list[i]
+                    print(("[criminality]   %2d) %-26s %9.4f -> %9.4f (d=%+.4f) %s"):format(
+                        i, c.name, c.from, c.to, c.d, c.isFn and "upvalue" or "field"))
+                end
+            end
+            local function countKeys(t)
+                local n = 0
+                for _ in pairs(t) do n += 1 end
+                return n
+            end
+            local function shapeOf(o)
+                local parts = {}
+                for k, v in pairs(o) do parts[#parts + 1] = tostring(k) .. ":" .. typeof(v) end
+                table.sort(parts)
+                print("[criminality]   spring fields: " .. table.concat(parts, ", "))
+                local mt = getmetatable(o)
+                if type(mt) == "table" then
+                    local mparts = {}
+                    for k, v in pairs(mt) do mparts[#mparts + 1] = tostring(k) .. ":" .. typeof(v) end
+                    table.sort(mparts)
+                    print("[criminality]   spring mt: " .. table.concat(mparts, ", "))
+                    if type(mt.__index) == "table" and mt.__index ~= mt then
+                        local ip = {}
+                        for k, v in pairs(mt.__index) do ip[#ip + 1] = tostring(k) .. ":" .. typeof(v) end
+                        table.sort(ip)
+                        print("[criminality]   spring mt.__index: " .. table.concat(ip, ", "))
                     end
                 end
             end
-            table.sort(changes, function(x, y) return math.abs(x.d) > math.abs(y.d) end)
-            print(("[criminality] recoil trace: A=%d B=%d changed=%d"):format(cntA, cntB, #changes))
-            for i = 1, math.min(#changes, 30) do
-                local c = changes[i]
-                print(("[criminality] recoil trace %2d) %-24s %8.4f -> %8.4f  (d=%+.4f) %s"):format(
-                    i, c.name, c.from, c.to, c.d, c.isFn and "upvalue" or "field"))
+            if springStats.moduleRef then
+                local base = {}
+                for k, v in pairs(springStats.moduleRef) do base[#base + 1] = tostring(k) .. ":" .. typeof(v) end
+                table.sort(base)
+                print("[criminality] SpringModule: " .. table.concat(base, ", "))
+                local smt = springStats.moduleRef.mt
+                if type(smt) == "table" then
+                    local m1 = {}
+                    for k, v in pairs(smt) do m1[#m1 + 1] = tostring(k) .. ":" .. typeof(v) end
+                    table.sort(m1)
+                    print("[criminality] SpringModule.mt: " .. table.concat(m1, ", "))
+                    if type(smt.__index) == "table" and smt.__index ~= smt then
+                        local m2 = {}
+                        for k, v in pairs(smt.__index) do m2[#m2 + 1] = tostring(k) .. ":" .. typeof(v) end
+                        table.sort(m2)
+                        print("[criminality] SpringModule.mt.__index: " .. table.concat(m2, ", "))
+                    end
+                end
             end
+            notify("Trace v2: get ready - FIRE when it says")
+            print("[criminality] trace v2: snapshot A...")
+            local A = snap()
+            local pitchA = camPitch()
+            local valsA = valueDump()
+            local newA, accA = springStats.newCalls, springStats.accelCalls
+            local pitched = {}
+            local conn = RunService.RenderStepped:Connect(function()
+                pitched[#pitched + 1] = camPitch()
+            end)
+            for i = 5, 1, -1 do
+                print(("[criminality] trace v2: %d ..."):format(i))
+                task.wait(1)
+            end
+            print("[criminality] trace v2: FIRE NOW - keep firing until it says STOP")
+            notify("FIRE NOW - keep firing until it says STOP")
+            task.wait(5)
+            print("[criminality] trace v2: mid snapshot (hiccup is normal - keep firing)...")
+            local M = snap()
+            local pitchM = camPitch()
+            print("[criminality] trace v2: keep firing...")
+            task.wait(5)
+            print("[criminality] trace v2: snapshot B...")
+            local B = snap()
+            local pitchB = camPitch()
+            local valsB = valueDump()
+            pcall(function() conn:Disconnect() end)
+            print("[criminality] trace v2: STOP firing - analysing")
+            local chAB = diffSnap(A, B)
+            local chAM = diffSnap(A, M)
+            print(("[criminality] trace v2: A=%d M=%d B=%d | changed A->B %d, A->mid %d"):format(
+                countKeys(A), countKeys(M), countKeys(B), #chAB, #chAM))
+
+            local cleanAM = {}
+            for _, c in ipairs(chAM) do
+                if not noiseName(c.name) and math.abs(c.d) < 100 and math.abs(c.to) < 100000 then
+                    cleanAM[#cleanAM + 1] = c
+                end
+            end
+            printList("in-burst moves (A->mid, world noise removed)", cleanAM, 20)
+
+            local cleanAB = {}
+            for _, c in ipairs(chAB) do
+                if not noiseName(c.name) and math.abs(c.d) < 100 and math.abs(c.to) < 100000 then
+                    cleanAB[#cleanAB + 1] = c
+                end
+            end
+            printList("net moves (A->B, world noise removed)", cleanAB, 20)
+
+            local mono = {}
+            for k, b in pairs(B) do
+                local a, m = A[k], M[k]
+                if a and m and a.v ~= m.v and m.v ~= b.v then
+                    local d1, d2 = m.v - a.v, b.v - m.v
+                    if d1 * d2 > 0 and math.abs(d1) < 80 and math.abs(d2) < 80
+                        and math.abs(b.v - a.v) > 0.02 and math.abs(b.v - a.v) < 400
+                        and math.abs(b.v) < 100000 and not noiseName(b.name) then
+                        mono[#mono + 1] = { name = b.name, isFn = b.isFn, from = a.v, mid = m.v, to = b.v, total = b.v - a.v }
+                    end
+                end
+            end
+            table.sort(mono, function(x, y) return math.abs(x.total) > math.abs(y.total) end)
+            print(("[criminality] sustained trends (A->mid->B same direction) (%d)"):format(#mono))
+            for i = 1, math.min(#mono, 20) do
+                local c = mono[i]
+                print(("[criminality]   %2d) %-26s %9.4f -> %9.4f -> %9.4f (d=%+.4f) %s"):format(
+                    i, c.name, c.from, c.mid, c.to, c.total, c.isFn and "upvalue" or "field"))
+            end
+
+            local named = {}
+            for _, c in ipairs(chAB) do
+                if recoilish(c.name) then named[#named + 1] = c end
+            end
+            printList("recoil-ish names", named, 15)
+
+            local vch = {}
+            for k, v in pairs(valsB) do
+                local a = valsA[k]
+                if a and a ~= v then vch[#vch + 1] = { name = k, from = a, to = v } end
+            end
+            table.sort(vch, function(x, y) return x.name < y.name end)
+            print(("[criminality] Value-object / attribute changes (%d)"):format(#vch))
+            for i = 1, math.min(#vch, 20) do
+                print(("[criminality]   %2d) %s: %s -> %s"):format(i, vch[i].name, vch[i].from, vch[i].to))
+            end
+
+            print(("[criminality] spring stats: new=%d accelerate=%d in burst"):format(
+                springStats.newCalls - newA, springStats.accelCalls - accA))
+            if springStats.accelCalls > accA then
+                print("[criminality] spring vectors seen (last ones):")
+                for _, v in ipairs(springStats.lastVecs) do
+                    print(("[criminality]   spring %-10s (%.4f, %.4f, %.4f) |v|=%.4f"):format(v.src, v.x, v.y, v.z, v.mag))
+                end
+            else
+                print("[criminality] spring pipeline IDLE in burst - gun recoil does not ride this module (or bypasses the wrapper)")
+            end
+            local springCount, wrappedNow, shown = 0, 0, 0
+            for o in pairs(traceSprings) do
+                springCount += 1
+                local okW, didW = pcall(wrapSpringInstance, o)
+                if okW and didW then wrappedNow += 1 end
+                if shown < 2 then
+                    shown += 1
+                    pcall(shapeOf, o)
+                end
+            end
+            print(("[criminality] live spring-ish tables seen: %d (newly wrapped %d)"):format(springCount, wrappedNow))
+
             local mn, mx = math.huge, -math.huge
             for _, p in ipairs(pitched) do
                 if p < mn then mn = p end
                 if p > mx then mx = p end
             end
-            if mn < math.huge then
-                print(("[criminality] recoil trace: camera pitch %.2f .. %.2f (swing %.2f deg)"):format(mn, mx, mx - mn))
+            local burstSwing = (mn < math.huge) and (mx - mn) or -1
+            print(("[criminality] cam pitch: A %.2f / mid %.2f / B %.2f | swing %.2f deg"):format(
+                pitchA, pitchM, pitchB, burstSwing))
+
+            if springStats.accelCalls > accA then
+                local accMute = springStats.accelCalls
+                print("[criminality] spring MUTE test - KEEP FIRING: kicks through this module are zeroed for 6s")
+                notify("KEEP FIRING 6s - spring mute test")
+                springStats.muted = true
+                local mp = {}
+                local mconn = RunService.RenderStepped:Connect(function()
+                    mp[#mp + 1] = camPitch()
+                end)
+                for i = 6, 1, -1 do
+                    print(("[criminality] spring mute %d"):format(i))
+                    task.wait(1)
+                end
+                springStats.muted = false
+                pcall(function() mconn:Disconnect() end)
+                local mmn, mmx = math.huge, -math.huge
+                for _, p in ipairs(mp) do
+                    if p < mmn then mmn = p end
+                    if p > mmx then mmx = p end
+                end
+                local muteSwing = (mmn < math.huge) and (mmx - mmn) or -1
+                print(("[criminality] spring mute: %d kicks zeroed, mute swing %.2f deg vs burst swing %.2f - similar = springs not the lever, near zero = THEY ARE"):format(
+                    springStats.accelCalls - accMute, muteSwing, burstSwing))
             end
-            print("[criminality] recoil trace done - copy this output back")
-            notify("Recoil trace done - copy the console output")
+
+            print("[criminality] trace v2 done - copy the whole output back")
+            notify("Trace v2 done - copy the console output")
         end)
     end)
-    note(p3, "100% = the game's own recoil. If the slider still doesn't update live: set 100%, drop & pick the gun so " ..
-        "it recoils again, hit Recoil trace, FIRE for 10s, and send the printed changed-values list - it shows " ..
-        "exactly which number is recoil (we then patch that number directly). Deep apply forces a fresh full scan.")
+    button(p3, "Apply % (drop + re-equip)", function()
+        task.spawn(function()
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not char or not hum then notify("Re-equip: no character") return end
+            local bp = LocalPlayer:FindFirstChild("Backpack")
+            local held = char:FindFirstChildOfClass("Tool")
+            local tool = held or (bp and bp:FindFirstChildOfClass("Tool"))
+            if not tool then notify("Re-equip: no gun found - equip one first") return end
+            if not held then
+                pcall(scaleOneTool, tool)
+                local okE = pcall(function() hum:EquipTool(tool) end)
+                if okE then
+                    notify("Re-equip: " .. tool.Name .. " equipped with the stored %")
+                else
+                    notify("Re-equip: EquipTool failed - use the hotbar key")
+                end
+                return
+            end
+            print("[criminality] re-equip: cycling " .. tool.Name .. " (same as a manual drop/pick)")
+            pcall(scaleOneTool, tool)
+            local okU = pcall(function() hum:UnequipTools() end)
+            if not okU then notify("Re-equip: UnequipTools failed - use your drop key") return end
+            task.wait(0.45)
+            local again = char:FindFirstChildOfClass("Tool") or (bp and bp:FindFirstChildOfClass("Tool"))
+            if not again then notify("Re-equip: gun missing after unequip - grab it manually") return end
+            pcall(scaleOneTool, again)
+            local okE = pcall(function() hum:EquipTool(again) end)
+            if not okE then notify("Re-equip: EquipTool failed - use the hotbar key") return end
+            task.wait(0.15)
+            pcall(scaleOneTool, again)
+            notify("Re-equip done - " .. again.Name .. " reloaded with the current %, like a manual cycle")
+        end)
+    end)
+    note(p3, "Trace v2: set the slider to 100%, hold a gun that recoils, hit the trace, and FIRE whenever it says " ..
+        "(hiccups are the snapshots - keep firing). It prints in-burst and net value moves, sustained increases (the " ..
+        "recoil climb), gun Value changes, spring traffic, live spring shapes and a 6s spring-mute test. Send the " ..
+        "whole console block. 'Apply % (drop + re-equip)' does the manual drop/pick trick for you when the slider " ..
+        "cannot update live.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
