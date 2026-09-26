@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v23"
+local SCRIPT_VERSION = "crim-v24"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -859,11 +859,20 @@ local function liveApplyNow(announce)
         sent = triggerBulletRefresh()
         task.wait(0.2)
     end
+    local toolName = "none"
+    pcall(function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        toolName = tool and tool.Name or "none"
+    end)
+    -- one copyable line: tells us exactly which stage happened
+    print(("[criminality] live apply: tool=%s matches=%d ubl=%s patched=%d keySent=%s pct=%d"):format(
+        toolName, #liveFcf.cands, tostring(liveFcf.hasUBL), n, tostring(sent), math.floor(pct + 0.5)))
     if announce then
         if n == 0 then
             notify("Live apply: no live copy found - use Apply % / Auto apply instead")
-        elseif not sent then
-            notify("Live copy patched - this gun has no underbarrel, so the live refresh needs a re-equip (Auto apply)")
+        elseif not liveFcf.hasUBL then
+            notify(("Live copy patched (%d) - BUT this gun has no underbarrel, so the game never re-reads it live. Test on a launcher gun, or use Auto apply."):format(n))
         else
             notify(("Live apply: %d copy(ies) patched, refresh key sent (launcher toggled twice, ends same)"):format(n))
         end
