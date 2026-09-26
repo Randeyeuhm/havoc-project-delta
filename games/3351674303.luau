@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v76"
+local SCRIPT_VERSION = "de-v77"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1159,7 +1159,7 @@ end
 
 -- Race assist tuning - locked to the tested values. No config keys and no
 -- sliders; stale saved values in the config file are ignored by the merge.
-local RACE_HOP_DELAY = 0.5
+local RACE_HOP_DELAY = 0  -- hops as fast as allowed - task.wait(0) is one frame
 local RACE_SWEEP_DIST = 10
 local RACE_PAYOUT_BUFFER = 3
 local RACE_CAR_TIME_PAD = 1.10
