@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v29"
+local SCRIPT_VERSION = "crim-v30"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -797,6 +797,81 @@ local function setupFcfTrace()
     return hooked > 0
 end
 
+-- ============================================================
+-- rCRED READ TRACER + DYNAMIC OVERRIDE - crim-v30
+-- ============================================================
+-- Metatables cannot see reads of EXISTING keys - so the raw rCRED field is
+-- moved behind __index instead: every read logs its source AND receives the
+-- LIVE scaled value ((1 - pct/100)) computed at read time. If any system
+-- reads rCRED per shot, hipfire scales live right there - and the log line
+-- names the reader.
+local rcredTrace = { armed = setmetatable({}, { __mode = "k" }), logs = {}, count = 0 }
+
+local function rcredWant()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    return math.clamp(1 - pct / 100, 0, 1)
+end
+
+local function setupRcredTrace()
+    local hooked = 0
+    for _, s in ipairs(liveFcf.states) do
+        local t = s.t
+        if type(t) == "table" and not rcredTrace.armed[t] then
+            pcall(function()
+                local mt = getmetatable(t)
+                if mt ~= nil then return end -- only touch clean tables
+                local shadow = rawget(t, "rCRED")
+                if type(shadow) ~= "number" then return end
+                rcredTrace.armed[t] = true
+                setmetatable(t, {
+                    __index = function(tt, k)
+                        if k == "rCRED" then
+                            rcredTrace.count += 1
+                            pcall(function()
+                                local s1, l1, s2, l2 = "?", "?", "?", "?"
+                                if type(debug) == "table" and type(debug.info) == "function" then
+                                    s1, l1 = debug.info(2, "sl")
+                                    s2, l2 = debug.info(3, "sl")
+                                end
+                                local keyId = "rCRED|" .. tostring(s1)
+                                local last = rcredTrace.logs[keyId] or 0
+                                if os.clock() - last > 1.5 then
+                                    rcredTrace.logs[keyId] = os.clock()
+                                    print(("[criminality] state read: rCRED (serving %.3f) from %s:%s  (caller %s:%s)"):format(
+                                        rcredWant(), tostring(s1), tostring(l1), tostring(s2), tostring(l2)))
+                                end
+                            end)
+                            return rcredWant()
+                        end
+                        return nil
+                    end,
+                })
+                rawset(t, "rCRED", nil)
+                hooked += 1
+            end)
+        end
+    end
+    if hooked > 0 then
+        print(("[criminality] rCRED tracer armed on %d state table(s) - live value served at read time"):format(hooked))
+    end
+    return hooked > 0
+end
+
+-- the module rewrites rCRED raw at init/refresh; move it back behind
+-- __index so reads keep being logged/served in live
+ task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(function()
+            for t in pairs(rcredTrace.armed) do
+                if type(t) == "table" and rawget(t, "rCRED") ~= nil then
+                    rawset(t, "rCRED", nil)
+                end
+            end
+        end)
+    end
+end)
+
 local function liveLooksLikeGunConfig(t)
     if type(t) ~= "table" then return false end
     return type(safeField(t, "Recoil")) == "number"
@@ -922,6 +997,7 @@ local function liveFcfScan(announce)
         notify(("Live copy scan: %d match(es), %d state table(s) - console has details"):format(count, #liveFcf.states))
     end
     pcall(setupFcfTrace)
+    pcall(setupRcredTrace)
     return count
 end
 
