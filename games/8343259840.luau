@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v22"
+local SCRIPT_VERSION = "crim-v23"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -699,12 +699,43 @@ end
 --      the new % - no drop/pick cycle needed.
 local liveFcf = { cands = {}, lastScan = 0, toolRef = nil }
 
+-- Metatable-proof field access. Game "strict" objects (Crosshair PhysicModule
+-- style) THROW from __index on unknown keys, and the gun config's protected
+-- wrapper is a newproxy userdata whose __newindex always errors - so never
+-- touch a candidate with plain indexing without a guard. rawget sees the
+-- real backing TABLES (protectTable decrypts every key into one), and the
+-- pcall fallback covers forwarding proxies.
+local function safeField(t, key)
+    if type(t) ~= "table" then
+        local ok, val = pcall(function() return t[key] end)
+        if ok then return val end
+        return nil
+    end
+    local v = rawget(t, key)
+    if v ~= nil then return v end
+    local ok, val = pcall(function() return t[key] end)
+    if ok then return val end
+    return nil
+end
+
+local function safeSetField(t, key, want)
+    if type(t) ~= "table" then return false end
+    local ok = pcall(function() t[key] = want end)
+    if ok and rawget(t, key) == want then return true end
+    if pcall(rawset, t, key, want) and rawget(t, key) == want then return true end
+    if ok then
+        local ok2, val = pcall(function() return t[key] end)
+        if ok2 and val == want then return true end
+    end
+    return false
+end
+
 local function liveLooksLikeGunConfig(t)
-    return type(t) == "table"
-        and type(t.Recoil) == "number"
-        and type(t.RecoilSpeed) == "number"
-        and type(t.RecoilDamper) == "number"
-        and type(t.CrossExpansion) == "number"
+    if type(t) ~= "table" then return false end
+    return type(safeField(t, "Recoil")) == "number"
+        and type(safeField(t, "RecoilSpeed")) == "number"
+        and type(safeField(t, "RecoilDamper")) == "number"
+        and type(safeField(t, "CrossExpansion")) == "number"
 end
 
 local function liveFcfScan(announce)
@@ -725,40 +756,47 @@ local function liveFcfScan(announce)
     pcall(function() lists[#lists + 1] = getgc(true) end)
     pcall(function() lists[#lists + 1] = getgc(false) end)
     pcall(function() lists[#lists + 1] = getgc() end)
-    local seen, count = {}, 0
+    local seen, count, looked = {}, 0, 0
     liveFcf.hasUBL = false
     for _, list in ipairs(lists) do
         for _, obj in pairs(list) do
             if type(obj) == "table" and not seen[obj] then
                 seen[obj] = true
-                if liveLooksLikeGunConfig(obj) then
-                    count += 1
-                    if type(obj.Customs) == "table" and obj.Customs.UnderbarrelLauncher then
-                        liveFcf.hasUBL = true
+                looked += 1
+                -- per-object pcall: a hostile __index must never kill the scan
+                pcall(function()
+                    if liveLooksLikeGunConfig(obj) then
+                        count += 1
+                        local customs = safeField(obj, "Customs")
+                        if type(customs) == "table" and safeField(customs, "UnderbarrelLauncher") then
+                            liveFcf.hasUBL = true
+                        end
+                        if #liveFcf.cands < 64 then
+                            local rd = safeField(obj, "RecoilRedution")
+                            liveFcf.cands[#liveFcf.cands + 1] = {
+                                t = obj,
+                                orig = safeField(obj, "Recoil"),
+                                origRed = (type(rd) == "number") and rd or nil,
+                            }
+                        end
                     end
-                    if #liveFcf.cands < 32 then
-                        local rd = obj.RecoilRedution
-                        liveFcf.cands[#liveFcf.cands + 1] = {
-                            t = obj,
-                            orig = obj.Recoil,
-                            origRed = (type(rd) == "number") and rd or nil,
-                        }
-                    end
-                end
+                end)
             end
         end
     end
     if announce then
-        print(("[criminality] live copy scan: %d gun-config table(s) in GC (%s, ubl=%s)"):format(
-            count, ref and "equipped config found" or "no equipped config",
+        print(("[criminality] live copy scan: %d match(es), %d table(s) looked at (%s, ubl=%s)"):format(
+            count, looked, ref and "equipped config found" or "no equipped config",
             tostring(liveFcf.hasUBL)))
         for i, c in ipairs(liveFcf.cands) do
             if i > 8 then break end
-            print(("  [%d] %s Recoil=%s RecoilRedution=%s Speed=%s|Damper=%s"):format(
-                i, tostring(c.t), tostring(c.orig), tostring(c.origRed),
-                tostring(c.t.RecoilSpeed), tostring(c.t.RecoilDamper)))
+            pcall(function()
+                print(("  [%d] %s Recoil=%s RecoilRedution=%s Speed=%s|Damper=%s"):format(
+                    i, tostring(c.t), tostring(safeField(c.t, "Recoil")), tostring(c.origRed),
+                    tostring(safeField(c.t, "RecoilSpeed")), tostring(safeField(c.t, "RecoilDamper"))))
+            end)
         end
-        notify(("Live copy scan: %d table(s) - console has details"):format(count))
+        notify(("Live copy scan: %d match(es) - console has details"):format(count))
     end
     return count
 end
@@ -777,11 +815,12 @@ local function liveFcfApply(pct, announce)
     end
     local n = 0
     for _, c in ipairs(liveFcf.cands) do
-        local ok = pcall(function() c.t.Recoil = c.orig * (pct / 100) end)
-        if c.origRed ~= nil then
-            pcall(function() c.t.RecoilRedution = math.clamp(1 - pct / 100, 0, 1) end)
+        if safeSetField(c.t, "Recoil", c.orig * (pct / 100)) then
+            n += 1
         end
-        if ok then n += 1 end
+        if c.origRed ~= nil then
+            safeSetField(c.t, "RecoilRedution", math.clamp(1 - pct / 100, 0, 1))
+        end
     end
     if announce then
         print(("[criminality] live copy: patched %d table(s) to %d%%"):format(
