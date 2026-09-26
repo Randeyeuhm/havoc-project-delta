@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v56"
+local SCRIPT_VERSION = "de-v57"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1954,7 +1954,7 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
-local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil }
+local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0 }
 
 local function deliveryLocationPart(pos)
     if not pos then return nil end
@@ -2006,6 +2006,23 @@ local function findDeliveryPad(fromPos)
         end
     end)
     return best
+end
+
+-- Live pickup radius (the server rejects interactions beyond it). Fetched
+-- from the game's own DeliveryUtil, cached for a minute; the old hard-coded
+-- 70 was well past the real circle (25 on the live build).
+local function deliveryRadius()
+    if not deliveryFarm.radius or (os.clock() - (deliveryFarm.radiusAt or 0)) > 60 then
+        deliveryFarm.radiusAt = os.clock()
+        local ok, r = pcall(function()
+            local utilInst = waitPath(ReplicatedStorage, { "Modules", "Shared", "Jobs", "Delivery", "DeliveryUtil" })
+            if not utilInst then return nil end
+            local util = require(utilInst)
+            return util.GetPickupRadius and util.GetPickupRadius()
+        end)
+        if ok and tonumber(r) then deliveryFarm.radius = tonumber(r) end
+    end
+    return deliveryFarm.radius or 70
 end
 
 -- The game fires ONE interact when you drive into the circle and the server
@@ -2142,12 +2159,17 @@ local function deliveryTick()
     end
     deliveryFarm.noCarWarned = false
 
+    -- The server rejects interactions beyond the live pickup radius (25 on
+    -- the current build - the old hard-coded 70 was well past the circle).
+    -- Stay a few studs inside so the seat-position server check passes.
+    local near = math.max(12, deliveryRadius() - 3)
+
     -- Teleport stick check: a teleport was issued but the car is STILL far
     -- from the same target a few ticks later - the game snapped it back or
     -- the handle was stale. Strikes retry harder; after 6 the user gets
     -- told once (resetting the car unblocks the server's side).
     if deliveryFarm.tpTarget and (now - (deliveryFarm.tpAt or 0)) > 4 then
-        if (veh:GetPivot().Position - deliveryFarm.tpTarget).Magnitude > 70 then
+        if (veh:GetPivot().Position - deliveryFarm.tpTarget).Magnitude > near then
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             deliveryFarm.tpStrikes = (deliveryFarm.tpStrikes or 0) + 1
             if deliveryFarm.tpStrikes >= 3 and (now - (deliveryFarm.tpWarnedAt or 0)) > 60 then
@@ -2189,7 +2211,7 @@ local function deliveryTick()
     if st.IsDropping then
         local tgt = st.DestinationPosition or veh:GetPivot().Position
         local dHold = (veh:GetPivot().Position - tgt).Magnitude
-        if dHold > 70 then
+        if dHold > near then
             if (now - deliveryFarm.lastMove) > 6 then
                 deliveryFarm.lastMove = now
                 local cf = veh:GetPivot()
@@ -2207,7 +2229,7 @@ local function deliveryTick()
     -- While carrying, wait at the pickup until the pile stops giving items
     -- (truck full / pile empty / count stalled), then head for the drop-off.
     if carrying and st.PickupPosition then
-        local atPickup = (veh:GetPivot().Position - st.PickupPosition).Magnitude <= 70
+        local atPickup = (veh:GetPivot().Position - st.PickupPosition).Magnitude <= near
         local rem = tonumber(st.PackagesRemainingAtPickup)
         local full = items >= maxCap
         local exhausted = rem ~= nil and rem <= 0
@@ -2235,7 +2257,7 @@ local function deliveryTick()
     end
 
     local d = (veh:GetPivot().Position - target).Magnitude
-    if d > 70 then
+    if d > near then
         if (now - deliveryFarm.lastMove) > 6 then
             deliveryFarm.lastMove = now
             local cf = veh:GetPivot()
@@ -2274,10 +2296,12 @@ local function installDeliveryProbe()
             deliveryFarm.tpUserWarned = false
             deliveryFarm.tpTarget, deliveryFarm.tpAt = nil, 0
             if s then
-                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s"):format(
+                print(("[driving-empire] delivery state: items=%s cap=%s pickup=%s dest=%s collecting=%s dropping=%s type=%s cash=%s towing=%s towable=%s planned=%s"):format(
                     tostring(s.ItemsCarried), tostring(s.MaxCapacity),
                     tostring(s.PickupPosition), tostring(s.DestinationPosition),
-                    tostring(s.IsCollecting), tostring(s.IsDropping)))
+                    tostring(s.IsCollecting), tostring(s.IsDropping),
+                    tostring(s.DeliveryTypeId), tostring(s.CashReward),
+                    tostring(s.IsTowing), tostring(s.TowableId), tostring(s.IsPlanned)))
             else
                 print("[driving-empire] delivery state: cleared")
             end
@@ -2302,6 +2326,22 @@ local function installDeliveryProbe()
             print(("[driving-empire] DeliveryCompleted: reward=%s failure=%s streak=%s"):format(
                 tostring(info and info.CashReward), tostring(failure),
                 tostring(info and info.PreviousStreak)))
+            -- The payout ladder tops out after enough clean runs and the
+            -- server then pays 0 (seen live: 5200..16700, then 0, 0).
+            -- Re-hiring resets the ladder - exactly what a manual re-exec
+            -- did - so do it automatically after two zero-pay runs.
+            if not failure and reward == 0 then
+                deliveryFarm.zeroPays = (deliveryFarm.zeroPays or 0) + 1
+                if deliveryFarm.zeroPays >= 2 then
+                    deliveryFarm.zeroPays = 0
+                    deliveryFarm.wantRestart = true
+                    deliveryFarm.lastStart = 0
+                    notify("Delivery farm: payouts at 0 - re-hiring to reset the payout ladder")
+                    print("[driving-empire] delivery farm: two zero-payout runs - re-hiring the shift to reset the payout ladder")
+                end
+            elseif reward and reward > 0 then
+                deliveryFarm.zeroPays = 0
+            end
             if Config.Delivery.Enabled == true then
                 if failure then
                     notify(("Delivery auto-farm: failed - %s"):format(tostring(failure)))
