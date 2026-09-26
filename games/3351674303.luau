@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v62"
+local SCRIPT_VERSION = "de-v63"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,7 +60,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true, NoTires = false },
     Race     = { HopDelay = 0.5, SweepDist = 12, PayoutBuffer = 1, CarLimitPad = 1.25, AutoFarm = false, AutoRequeue = false },
-    Delivery = { Enabled = false, Hard = true, Pace = 5 },
+    Delivery = { Enabled = false, Hard = true },
     -- ESP gets filled out by ESPUI.fill (the full ESP library schema); these four
     -- exist before the module loads so the file merge has typed targets.
     ESP      = { Enabled = false, TeamCheck = false, VisibleOnly = false, MaxDistance = 2000 },
@@ -196,7 +196,6 @@ Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
 Config.Delivery.Enabled = Config.Delivery.Enabled == true
 Config.Delivery.Hard = Config.Delivery.Hard ~= false
-Config.Delivery.Pace = math.clamp(tonumber(Config.Delivery.Pace) or 5, 0, 90)
 
 -- ============================================================
 -- SCREEN GUI + TOASTS
@@ -1955,6 +1954,11 @@ refreshTeleportQueue(true)
 --   DeliveryLocationInteracted(locationPart)             - pickup / dropoff
 -- The farm teleports the car onto whichever location the state names, fires
 -- the interaction, and repeats.
+
+-- Locked in at 5s (tested live): the server voids payouts on teleport-fast
+-- runs, so every stop dwells this long before its first interaction fires.
+local DELIVERY_PACE = 5
+
 local deliveryFarm = { state = nil, lastStart = 0, lastMove = 0, lastInteract = 0, warned = false, noCarWarned = false, lastDiag = 0, lastItems = -1, itemsAt = 0, pickupDone = false, interactLabel = nil, lastInteractPrint = 0, interactTarget = nil, burstLeft = 0, stateAt = 0, jobMisses = 0, wantRestart = false, tpTarget = nil, tpAt = 0, tpStrikes = 0, tpWarnedAt = 0, tpUserWarned = false, startSince = 0, lastLocated = nil, radius = nil, radiusAt = 0, zeroPays = 0, arrivedKey = nil, arrivedAt = 0, runStartAt = 0, robbedAt = nil }
 
 local function deliveryLocationPart(pos)
@@ -2053,7 +2057,7 @@ local function deliveryTick()
     if raceBusy then return end  -- the race assist has the car
     local st = deliveryFarm.state
     local now = os.clock()
-    local pace = math.clamp(tonumber(Config.Delivery.Pace) or 0, 0, 90)
+    local pace = DELIVERY_PACE
 
     -- Shift watchdog. The shift can die server-side without a
     -- DeliveryCompleted (timeout, impound, sub-place hop) and the stale
@@ -2280,10 +2284,9 @@ local function deliveryTick()
         return
     end
 
-    -- Pacing: dwell at the stop for Config.Delivery.Pace seconds before the
-    -- first interaction fires. Teleport-fast runs complete in ~13s total -
-    -- the long fast runs came back with 0 pay, so slow every arrival down to
-    -- something plausibly driveable before interacting (0 = old behaviour).
+    -- Pacing: dwell at the stop for DELIVERY_PACE seconds before the first
+    -- interaction fires (locked at 5s - the server voids payouts on
+    -- teleport-fast runs).
     if pace > 0 then
         local tkey = label .. ":" .. math.floor(target.X) .. ":" .. math.floor(target.Z)
         if deliveryFarm.arrivedKey ~= tkey then
@@ -2711,8 +2714,6 @@ local function buildMenu()
             Config.Delivery.Hard = v
             notify(v and "Deliveries: Hard - more cash, outlaws can steal" or "Deliveries: Safe - less cash")
         end)
-    slider(p5, "Delivery pacing (s)", function() return Config.Delivery.Pace end,
-        function(v) Config.Delivery.Pace = v end, 5, 0, 90)
     button(p5, "End delivery shift", function()
         if Remotes and type(Remotes.fireServer) == "function" then
             pcall(Remotes.fireServer, "RequestEndJobSession", "jobPad")
