@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v77"
+local SCRIPT_VERSION = "de-v78"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -1162,7 +1162,7 @@ end
 local RACE_HOP_DELAY = 0  -- hops as fast as allowed - task.wait(0) is one frame
 local RACE_SWEEP_DIST = 10
 local RACE_PAYOUT_BUFFER = 3
-local RACE_CAR_TIME_PAD = 1.10
+local RACE_CAR_TIME_PAD = 1.05
 
 -- The server also sanity-checks finish times against the car: your finish
 -- can't be faster than the track physically allows at that car's top speed.
