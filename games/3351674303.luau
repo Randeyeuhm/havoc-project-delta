@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v71"
+local SCRIPT_VERSION = "de-v72"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2645,7 +2645,7 @@ local OUTLAW_REACH = 9          -- how close to land before interacting
 local OUTLAW_CASHIN_MARGIN = 20 -- cash in the bounty when the escape timer is this close to expiring
 local OUTLAW_HOLD_MAX = 600     -- hold at most this long since wanted began
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0, fiveStarNotified = nil, evadeAt = 0, evadeToastAt = 0 }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0, fiveStarNotified = nil, evadeAt = 0, evadeToastAt = 0, promptHold = nil }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2697,6 +2697,22 @@ local function outlawPickDropOff(pos)
         end
     end)
     return best, bestPos
+end
+
+-- the prompt the game's own ATM client holds to claim a bust - cargo
+-- crates only claim through it (instant remote fires don't award them)
+local function outlawCratePrompt(model)
+    local prompt = nil
+    pcall(function()
+        local att = model:FindFirstChild("PromptAttachment")
+        if att then
+            prompt = att:FindFirstChildOfClass("ProximityPrompt")
+        end
+        if not prompt then
+            prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+        end
+    end)
+    return prompt
 end
 
 -- nearest remembered drop-off position (when none is streamed in yet)
@@ -2906,14 +2922,28 @@ local function outlawTick()
         end
         if now < outlawFarm.bustDoneAt then return end
         outlawFarm.state, outlawFarm.target = nil, nil
-        local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustComplete", t) end)
-        if okc and ok then
-            if t:GetAttribute("CustomATMTypeId") and (os.clock() - outlawFarm.crateToastAt) > 600 then
+        if outlawFarm.promptHold then
+            outlawFarm.promptHold = false
+            -- the crate's prompt Triggered already sent the game's own
+            -- AttemptBustComplete - just close the held input and log it
+            local prompt = outlawCratePrompt(t)
+            if prompt then pcall(function() prompt:InputHoldEnd() end) end
+            if t:GetAttribute("State") == nil or t:GetAttribute("State") == "Normal" then
+                outlawFarm.skipAt[t] = os.clock() + 12
+            elseif (os.clock() - outlawFarm.crateToastAt) > 600 then
                 outlawFarm.crateToastAt = os.clock()
                 notify("Outlaw farm: looted a cargo crate!")
             end
         else
-            outlawFarm.skipAt[t] = os.clock() + 15
+            local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustComplete", t) end)
+            if okc and ok then
+                if t:GetAttribute("CustomATMTypeId") and (os.clock() - outlawFarm.crateToastAt) > 600 then
+                    outlawFarm.crateToastAt = os.clock()
+                    notify("Outlaw farm: looted a cargo crate!")
+                end
+            else
+                outlawFarm.skipAt[t] = os.clock() + 15
+            end
         end
         return
     end
@@ -2961,10 +2991,29 @@ local function outlawTick()
         end
         return
     end
+    -- Water cargo crates only claim through their own proximity prompt (an
+    -- instant remote fire doesn't award them): hold the prompt like a player
+    -- - its events fire the game's own AttemptStartBusting/Complete remotes.
+    if target:GetAttribute("CustomATMTypeId") then
+        local prompt = outlawCratePrompt(target)
+        if prompt then
+            pcall(function() prompt.Enabled = true end)
+            local held = pcall(function() prompt:InputHoldBegin() end)
+            if held then
+                outlawFarm.state = "busting"
+                outlawFarm.target = target
+                outlawFarm.promptHold = true
+                local holdFor = math.max(2.5, tonumber(prompt.HoldDuration) or 5)
+                outlawFarm.bustDoneAt = os.clock() + holdFor + 2
+                return
+            end
+        end
+    end
     local okc, ok = pcall(function() return Remotes.invokeServer("AttemptATMBustStart", target) end)
     if okc and ok then
         outlawFarm.state = "busting"
         outlawFarm.target = target
+        outlawFarm.promptHold = false
         outlawFarm.bustDoneAt = os.clock() + OUTLAW_BUST_WAIT
     else
         outlawFarm.skipAt[target] = now + 12
