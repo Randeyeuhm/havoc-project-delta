@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v78"
+local SCRIPT_VERSION = "de-v79"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -60,6 +60,7 @@ local CONFIG_FILE = "driving_empire_config.json"
 local DEFAULTS = {
     Vehicle  = { SpeedMult = 1, TorqueMult = 1, GripMult = 1, SteerMult = 1, BrakeMult = 1, InfNitro = false, NoSpeedCap = false, InstantShift = true },
     Race     = { AutoFarm = false, AutoRequeue = false },
+    RaceExact = { Enabled = false, Target = 0 },
     Delivery = { Enabled = false, Hard = true },
     Outlaw   = { Enabled = false },
     Bank     = { Enabled = false },
@@ -190,6 +191,8 @@ Config.Vehicle.InstantShift = Config.Vehicle.InstantShift ~= false
 Config.ESP.MaxDistance = math.clamp(tonumber(Config.ESP.MaxDistance) or 2000, 100, 10000)
 Config.Race.AutoFarm = Config.Race.AutoFarm == true
 Config.Race.AutoRequeue = Config.Race.AutoRequeue == true
+Config.RaceExact.Enabled = Config.RaceExact.Enabled == true
+Config.RaceExact.Target = math.clamp(tonumber(Config.RaceExact.Target) or 0, 0, 7200)
 Config.Misc.TeleportExec = Config.Misc.TeleportExec ~= false
 Config.Delivery.Enabled = Config.Delivery.Enabled == true
 Config.Delivery.Hard = Config.Delivery.Hard ~= false
@@ -365,6 +368,14 @@ local function installBoostRestore()
     end
 end
 
+-- PRECISION FINISH (Extra tab) state - declared before the invoke probe
+-- so the wrapper below can time race remotes. The finish remote carries
+-- NO time: the server stamps FinalTime from ITS clock when it processes
+-- the crossing invoke. So the only lever is WHEN we cross - we time the
+-- final leg with a learned offset (server FinalTime minus our race-clock
+-- reading at a real crossing, measured from finished runs).
+local raceExact = { offset = nil, samples = 0, rtt = nil, crossRace = nil, crossAt = nil }
+
 -- RACE PROBE: the race client tells the server "I crossed checkpoint N"
 -- through invokeServer("RaceCheckpoint", N) and reads the answer back
 -- (ok, reason when rejected). Wrapping invokeServer lets the race assist
@@ -379,13 +390,25 @@ local function installInvokeProbe()
     local orig = vehicleHooks.origInvokeServer
     Remotes.invokeServer = function(name, ...)
         local args = table.pack(...)
+        -- the crossing moment is the moment the invoke LEAVES - capture it
+        -- before the round trip (precision-finish offset sampling)
+        if name == "RaceFinishLine" and raceExact.onFinishInvoke then
+            pcall(raceExact.onFinishInvoke)
+        end
+        local t0 = os.clock()
         local ret = table.pack(orig(name, table.unpack(args, 1, args.n)))
+        local rtt = os.clock() - t0
         if name == "RaceCheckpoint" or name == "RaceFinishLine" then
             raceProbe.seq = raceProbe.seq + 1
             raceProbe.kind = (name == "RaceFinishLine") and "finish" or "cp"
             raceProbe.num = args[1]
             raceProbe.ok = ret[1] and true or false
             raceProbe.reason = ret[2]
+            if name == "RaceCheckpoint" then
+                -- rolling round-trip estimate (seeds the offset before the
+                -- first real finish sample is learned)
+                raceExact.rtt = raceExact.rtt and (raceExact.rtt * 0.7 + rtt * 0.3) or rtt
+            end
         end
         return table.unpack(ret, 1, ret.n)
     end
@@ -441,6 +464,9 @@ local function installRaceFinishedProbe()
             tostring(a[5]), tostring(a[6]), tostring(a[7]), tostring(a[8])))
         if raceResult.mine and raceResultToast then
             pcall(raceResultToast, raceResult.time, raceResult.bestLap, raceResult.racers, raceResult.place)
+        end
+        if raceResult.mine and raceExact.onServerFinal then
+            pcall(raceExact.onServerFinal)
         end
     end)
 end
@@ -1224,6 +1250,67 @@ raceResultToast = function(time, bestLap, racers, place)
         tostring(place or "?"), fmtSecs(time or 0), fmtSecs(bestLap or 0), tostring(racers or "?")))
 end
 
+-- ============================================================
+-- PRECISION FINISH: learned offset + persistence (needs notify, so it
+-- lives below raceResultToast). The game's own client fires RaceFinishLine
+-- the instant it sees the car cross the gate; onFinishInvoke remembers the
+-- race-clock reading at that moment, and when RaceFinished comes back with
+-- the server's FinalTime the difference is the exact compensation to apply
+-- on the next run (ping + server processing + the client's detect tick).
+-- ============================================================
+local RACE_EXACT_FILE = "driving_empire_race_exact.json"
+
+local function raceExactSave()
+    if type(writefile) ~= "function" then return end
+    pcall(function()
+        writefile(RACE_EXACT_FILE, HttpService:JSONEncode({
+            offset = raceExact.offset, samples = raceExact.samples,
+        }))
+    end)
+end
+
+local function raceExactLoad()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+    pcall(function()
+        if not isfile(RACE_EXACT_FILE) then return end
+        local d = HttpService:JSONDecode(readfile(RACE_EXACT_FILE))
+        if type(d) ~= "table" then return end
+        local off = tonumber(d.offset)
+        if off and math.abs(off) < 5 then raceExact.offset = off end
+        raceExact.samples = math.max(0, math.floor(tonumber(d.samples) or 0))
+    end)
+end
+
+raceExact.onFinishInvoke = function()
+    raceExact.crossRace = raceElapsed()
+    raceExact.crossAt = os.clock()
+end
+
+raceExact.onServerFinal = function()
+    local cross = raceExact.crossRace
+    if not (raceResult.time and cross and raceExact.crossAt) then return end
+    if (os.clock() - raceExact.crossAt) > 240 then return end  -- stale crossing
+    local sample = raceResult.time - cross
+    if sample < -2 or sample > 5 then return end  -- implausible, skip
+    if raceExact.offset then
+        raceExact.offset = raceExact.offset * 0.6 + sample * 0.4
+    else
+        raceExact.offset = sample
+    end
+    raceExact.samples = raceExact.samples + 1
+    raceExactSave()
+    notify(("Precision finish: server recorded %ss vs clock %ss at the crossing - offset now %+.3fs (%d sample%s)"):format(
+        fmtSecs(raceResult.time), fmtSecs(cross), raceExact.offset, raceExact.samples, raceExact.samples == 1 and "" or "s"))
+    local tgt = tonumber(Config.RaceExact.Target)
+    if tgt and tgt > 0 then
+        local diff = raceResult.time - tgt
+        notify(("Precision finish: landed %s the target %.3fs (%+.0f ms)"):format(
+            math.abs(diff) <= 0.03 and "on" or (diff > 0 and "past" or "before"), tgt, diff * 1000))
+    end
+end
+
+raceExactLoad()
+
 -- Watch leaderstats.Cash after a finished race and report when the payout
 -- actually lands (or that it never came). Also reports whether the game
 -- uploaded its race recording, how many players were in the session, and
@@ -1365,6 +1452,132 @@ local function tryFinish(finishPart, approachDir, full)
         task.wait(0.3)
     end
     return "none"
+end
+
+-- ============================================================
+-- PRECISION FINISH (Extra tab): glide onto the finish so the crossing
+-- lands on an exact leaderboard time.
+--   - checkpoints are crossed as usual; this only governs the last leg
+--   - the car is TWEENED (position is clock-driven every frame), not
+--     hopped, so the plane crossing happens on the chosen frame - and a
+--     race recording shows ordinary motion, not a teleport at the line
+--   - the crossing target is [target - learned offset]: the offset is
+--     the server's own FinalTime minus our race-clock reading at a real
+--     crossing, learned from finished runs (ping + processing + detect)
+-- Returns "ok" (accepted), "delegate" (let the normal sweep finish) or
+-- "novh" (no drivable car).
+-- ============================================================
+local RACE_EXACT_OVERSHOOT = 22    -- studs past the gate the glide ends at
+local RACE_EXACT_VMIN = 150        -- slowest glide speed (studs/s)
+local RACE_EXACT_VMAX = 1100       -- fastest glide speed (studs/s)
+
+local function precisionArmed()
+    return Config.RaceExact.Enabled == true and (tonumber(Config.RaceExact.Target) or 0) > 0
+end
+
+local function precisionFinish(finishPart, approachDir, minTime)
+    local target = tonumber(Config.RaceExact.Target)
+    if not target or target <= 0 then return "delegate" end
+    local veh = getDrivenVehicle()
+    local model = veh and veh.Object
+    if not model or not model.Parent then return "novh" end
+    local okP, pivot = pcall(function() return model:GetPivot() end)
+    if not okP or not pivot then return "novh" end
+
+    local dir = (approachDir or Vector3.new(1, 0, 0)) * Vector3.new(1, 0, 1)
+    if dir.Magnitude < 0.1 then dir = Vector3.new(1, 0, 0) else dir = dir.Unit end
+
+    local off = raceExact.offset or ((raceExact.rtt or 0.1) + 0.012)
+    local targetR = target - off  -- race-clock value wanted at the crossing
+
+    if minTime and target < minTime + RACE_PAYOUT_BUFFER then
+        notify(("Precision finish: target %.3fs is under the track payout floor (%ss) - the payout may be withheld"):format(
+            target, fmtSecs(minTime + RACE_PAYOUT_BUFFER)))
+    end
+
+    local gate = finishPart.Position
+    local from = pivot.Position
+    local along = (gate - from):Dot(dir)
+    if not (along and along > 1) then
+        return "delegate"  -- already level with/past the gate - can't glide
+    end
+
+    local now = raceElapsed()
+    if not now then return "delegate" end
+    local late = targetR - now
+    if late <= 0.05 then
+        notify(("Precision finish: only %.0f ms to target - crossing as fast as possible now"):format(late * 1000))
+        return "delegate"
+    end
+    -- start-now speed: the crossing happens 'along' studs into the glide
+    local total = along + RACE_EXACT_OVERSHOOT
+    local v = along / late
+    local startAt = now  -- race-clock time the glide begins
+    if v < RACE_EXACT_VMIN then
+        v = RACE_EXACT_VMIN
+        startAt = targetR - along / v
+    elseif v > RACE_EXACT_VMAX then
+        v = RACE_EXACT_VMAX
+        startAt = targetR - along / v
+        if startAt < now - 0.02 then
+            notify(("Precision finish: %.0f studs in %.2fs is out of reach - crossing as fast as possible"):format(along, late))
+            return "delegate"
+        end
+    end
+    local dur = total / v
+    local startCF = pivot
+    local endPos = gate + dir * RACE_EXACT_OVERSHOOT
+    local endCF = CFrame.lookAt(endPos, endPos + dir)
+    if (startCF.Position - endCF.Position).Magnitude < 1 then return "delegate" end
+
+    local epoch0 = raceClock.epoch
+    notify(("Precision finish: target %.3fs - holding, then a %.2fs glide at %.0f studs/s (offset %+.3fs)"):format(
+        target, dur, v, off))
+
+    -- hold until glide start (car pinned so it doesn't roll)
+    while true do
+        if raceClock.epoch ~= epoch0 then return "delegate" end
+        local e = raceElapsed()
+        if not e then return "delegate" end
+        if e >= startAt then break end
+        task.wait((startAt - e) > 0.35 and 0.1 or nil)
+        pcall(function() teleportCarTo(startCF, model) end)
+    end
+
+    -- clock-driven glide: position = f(elapsed), so the gate crossing lands
+    -- on the frame where the race clock hits [targetR]
+    local snap = raceProbe.seq
+    local t0 = os.clock()
+    while true do
+        if raceClock.epoch ~= epoch0 then return "delegate" end
+        local a = (os.clock() - t0) / dur
+        if a >= 1 then a = 1 end
+        pcall(function() teleportCarTo(startCF:Lerp(endCF, a), model) end)
+        if raceProbe.seq > snap and raceProbe.kind == "finish" and raceProbe.ok then
+            return "ok"
+        end
+        if a >= 1 then break end
+        task.wait()
+    end
+    -- parked past the gate: give the game's own crossing detection and the
+    -- server a moment to register and answer
+    local deadline = os.clock() + 1.6
+    local lastReason = nil
+    while os.clock() < deadline do
+        task.wait(0.05)
+        pcall(function() teleportCarTo(endCF, model) end)
+        if raceProbe.seq > snap and raceProbe.kind == "finish" then
+            if raceProbe.ok then return "ok" end
+            lastReason = raceProbe.reason
+            snap = raceProbe.seq
+        end
+    end
+    if lastReason then
+        notify(("Precision finish: finish rejected (%s) - falling back to the normal sweep"):format(tostring(lastReason)))
+    else
+        notify("Precision finish: no crossing detected - falling back to the normal sweep")
+    end
+    return "delegate"
 end
 
 local function runRaceRoutine()
@@ -1562,8 +1775,9 @@ local function runRaceRoutine()
                     end
                     notify(("Race assist: lap %d/%d done (%d taken, %d skipped)"):format(pass, laps, taken, skipped))
                     -- take the finish line too on the last lap, or every
-                    -- lap when the lap count couldn't be read
-                    if pass == laps or not lapsKnown then
+                    -- lap when the lap count couldn't be read - unless the
+                    -- precision finish is armed (it owns the last leg)
+                    if (pass == laps or not lapsKnown) and not precisionArmed() then
                         waitForPayout(minTime, startClock)
                         local fres = tryFinish(finish, finishDir, false)
                         if fres == "ok" then
@@ -1575,6 +1789,19 @@ local function runRaceRoutine()
                             error("couldn't move your car - make sure you're sitting in it", 0)
                         end
                     end
+                end
+            end
+            -- PRECISION FINISH: when armed, glide the last leg onto the
+            -- gate so the crossing lands on the exact target time.
+            if precisionArmed() then
+                local pres = precisionFinish(finish, finishDir, minTime)
+                if pres == "ok" then
+                    notify("Race assist: race finished!")
+                    watchRacePayout()
+                    return
+                end
+                if pres == "novh" then
+                    error("couldn't move your car - make sure you're sitting in it", 0)
                 end
             end
             -- final finish-line rounds (progress is kept, so a retry only has
@@ -3437,6 +3664,20 @@ track(UserInputService.InputBegan:Connect(function(input, processed)
     end
 end))
 
+-- Race-time text helpers for the Extra tab (target input).
+-- Accepts "42.357" and "0:42.357" / "1:02.357"; returns seconds.
+local function parseRaceTime(str)
+    str = tostring(str or ""):gsub("%s", "")
+    if str == "" then return nil end
+    local mins, rest = str:match("^(%d+):([%d%.]+)$")
+    if mins then
+        local s = tonumber(rest)
+        if not s then return nil end
+        return tonumber(mins) * 60 + s
+    end
+    return tonumber(str)
+end
+
 -- ============================================================
 -- MENU
 -- ============================================================
@@ -3457,7 +3698,7 @@ local function buildMenu()
         title = "HAVOC HUB  ·  DRIVING EMPIRE",
         subtitle = ("PlaceId %d  ·  %s"):format(game.PlaceId, SCRIPT_VERSION),
         size = UDim2.new(0, winW, 0, winH),
-        tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc" },
+        tabs = { "Vehicle", "Teleports", "Visuals", "Money", "Misc", "Extra" },
         controls = guiControls,
         footerHint = "RightShift — show / hide this menu",
         onClose = function()
@@ -3465,7 +3706,7 @@ local function buildMenu()
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4), win.tab(5), win.tab(6) }
 
     local builtCount = 0
     local function guard(what, fn)
@@ -3514,6 +3755,11 @@ local function buildMenu()
                 function(item) return cfgTable[prefix .. item] == true end,
                 function(item, on) cfgTable[prefix .. item] = on end,
                 { overlayParent = win.popupLayer })
+        end)
+    end
+    local function input(page, text, getter, setter, opts)
+        return guard("input " .. text, function()
+            return UILib.makeInput(page, text, getter, setter, opts or {})
         end)
     end
 
@@ -3829,6 +4075,68 @@ local function buildMenu()
         lockNote = "RightShift is the menu key and stays bound",
     })
     note(p6, ("Havoc Hub - Driving Empire (%s). Config: %s"):format(SCRIPT_VERSION, CONFIG_FILE))
+
+    -- ---------------- Extra ----------------
+    local p7 = pages[6]
+    section(p7, "Precision finish  (exact race time)")
+    toggle(p7, "Precision finish (leaderboard)",
+        function() return Config.RaceExact.Enabled == true end,
+        function(v)
+            Config.RaceExact.Enabled = v == true
+            saveConfigDebounced()
+            if v then
+                local t = tonumber(Config.RaceExact.Target) or 0
+                notify(t > 0 and ("Precision finish ARMED: checkpoints as usual, then the gate glide lands on %.3fs"):format(t)
+                    or "Precision finish armed - set a target time first")
+            else
+                notify("Precision finish off")
+            end
+        end)
+    local targetInput = input(p7, "Target time  (42.357 or 0:42.357)",
+        function()
+            local t = tonumber(Config.RaceExact.Target)
+            if not t or t <= 0 then return "" end
+            return ("%.3f"):format(t)
+        end,
+        function(v)
+            local secs = parseRaceTime(v)
+            if not secs or secs <= 0 or secs > 7200 then
+                notify("Precision finish: couldn't read that time - use e.g. 42.357 or 0:42.357")
+                return
+            end
+            secs = math.floor(secs * 1000 + 0.5) / 1000  -- leaderboard ms
+            Config.RaceExact.Target = secs
+            saveConfigDebounced()
+            notify(("Precision finish: target %.3fs set (%s)"):format(secs,
+                raceExact.offset and ("offset %+.3fs will apply"):format(raceExact.offset) or "no offset learned yet - run once to teach it"))
+        end,
+        { placeholder = "42.357" })
+    button(p7, "Use current race clock as target", function()
+        local e = raceElapsed()
+        if not e then
+            notify("Precision finish: no live race clock - start a race first")
+            return
+        end
+        Config.RaceExact.Target = math.floor(e * 1000 + 0.5) / 1000
+        saveConfigDebounced()
+        if targetInput and targetInput.update then pcall(targetInput.update) end
+        notify(("Precision finish: target set to the clock's %.3fs (edit the box for the exact leaderboard time)"):format(Config.RaceExact.Target))
+    end)
+    button(p7, "Precision status", function()
+        local t = tonumber(Config.RaceExact.Target) or 0
+        notify(("Precision finish: target %s | offset %s (%d sample%s) | rtt %s | %s"):format(
+            t > 0 and ("%.3fs"):format(t) or "unset",
+            raceExact.offset and ("%+.3fs"):format(raceExact.offset) or "not learned yet",
+            raceExact.samples, raceExact.samples == 1 and "" or "s",
+            raceExact.rtt and ("%.0f ms"):format(raceExact.rtt * 1000) or "n/a",
+            precisionArmed() and "ARMED" or "off"))
+    end)
+    button(p7, "Reset learned offset", function()
+        raceExact.offset, raceExact.samples = nil, 0
+        raceExactSave()
+        notify("Precision finish: learned offset cleared - the next finished run re-learns it")
+    end, { confirm = true, confirmText = "Click again to reset" })
+    note(p7, "The finish remote carries NO time - the server stamps it the moment you cross - so this times the crossing instead: checkpoints as usual, then the car GLIDES (tween, no teleport) through the gate exactly on the target, corrected by an offset learned from your own finished runs. Run once to teach the offset; every finish sharpens it. Targets under the track payout floor can lose the payout.")
 
     win.setTab(1)
     print(("[driving-empire] menu built (%d controls)"):format(builtCount))
