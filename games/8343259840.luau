@@ -6,6 +6,7 @@
 
       • Camera aimbot   - FOV circle, smoothing, team / visibility checks
       • Player ESP      - boxes, names, health, distance, tracers, chams
+      • Weapons         - recoil percentage (scales the game's CamShake value)
       • Misc            - fullbright, anti-AFK, rejoin server
 
     Anti-cheat notes from the structure dump:
@@ -84,6 +85,7 @@ local DEFAULTS = {
     -- not look mechanical. TeamCheck off by default (most lobbies are solo).
     Aimbot   = { Enabled = false, Mode = "Hold RMB", FOV = 100, Smoothness = 6,
                  TeamCheck = false, VisibleOnly = true, FOVCircle = true },
+    Weapons  = { RecoilPct = 100 },
     Misc     = { Fullbright = false, AntiAFK = true },
 }
 
@@ -161,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v1"
+local SCRIPT_VERSION = "crim-v2"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -557,6 +559,95 @@ local function updateFovCircle(mouse)
 end
 
 -- ============================================================
+-- FEATURES: RECOIL  (percentage of the game's own recoil)
+-- ============================================================
+-- Criminality applies weapon recoil as CAMERA SHAKE: every shot computes
+--   CamShakeConfig.Recoil * shotPower * stateMult
+-- and kicks a spring; the render loop then post-multiplies the spring's
+-- angles onto the camera. Scaling CamShakeConfig.Recoil scales the whole
+-- kick linearly - i.e. a real recoil percentage. The module lives at
+-- ReplicatedStorage.Storage.FrameworkStuff.CamShakeConfig (the service is
+-- renamed, so GetService is used).
+--
+-- require() may hand back a separate copy inside an executor, so the LIVE
+-- table the weapon code reads is found by scanning GC for closures whose
+-- upvalues hold a table with this exact shape - and every copy found is
+-- scaled, so whichever one the game reads is covered.
+local recoilState = { tables = {} }
+
+local function looksLikeCamShake(t)
+    return type(t) == "table"
+        and type(t.Recoil) == "number" and type(t.RecoilSpeed) == "number"
+        and type(t.RecoilDamper) == "number" and type(t.AngleX_Min) == "number"
+        and type(t.AngleX_Max) == "number" and type(t.Accuracy) == "number"
+end
+
+local function findCamShakeTables()
+    local out = {}
+    local function consider(t)
+        if looksLikeCamShake(t) and not recoilState.tables[t] then
+            table.insert(out, t)
+        end
+    end
+    pcall(function()
+        local storage = ReplicatedStorage:FindFirstChild("Storage")
+        local fw = storage and storage:FindFirstChild("FrameworkStuff")
+        local mod = fw and fw:FindFirstChild("CamShakeConfig")
+        if mod then consider(require(mod)) end
+    end)
+    if type(getgc) == "function" then
+        pcall(function()
+            for _, obj in pairs(getgc(true)) do
+                if type(obj) == "function" then
+                    pcall(function()
+                        local i = 1
+                        while true do
+                            local name, val = debug.getupvalue(obj, i)
+                            if not name then break end
+                            consider(val)
+                            i += 1
+                        end
+                    end)
+                elseif type(obj) == "table" then
+                    consider(obj)
+                end
+            end
+        end)
+    end
+    return out
+end
+
+local function applyRecoil()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    for _, t in ipairs(findCamShakeTables()) do
+        recoilState.tables[t] = { orig = t.Recoil }
+    end
+    local applied, blocked = 0, 0
+    for t, rec in pairs(recoilState.tables) do
+        local want = rec.orig * (pct / 100)
+        local ok = pcall(function() t.Recoil = want end)
+        if ok and t.Recoil == want then
+            applied += 1
+        else
+            blocked += 1
+        end
+    end
+    return applied, blocked
+end
+
+-- keep looking until the config is found (it may load with the first gun)
+task.spawn(function()
+    while true do
+        task.wait(8)
+        if (tonumber(Config.Weapons.RecoilPct) or 100) ~= 100 then
+            local tracked = 0
+            for _ in pairs(recoilState.tables) do tracked += 1 end
+            if tracked == 0 then pcall(applyRecoil) end
+        end
+    end
+end)
+
+-- ============================================================
 -- INPUT
 -- ============================================================
 track(UserInputService.InputBegan:Connect(function(input, processed)
@@ -590,7 +681,7 @@ local function buildMenu()
         subtitle = "PlaceId " .. tostring(game.PlaceId) .. "  ·  " .. SCRIPT_VERSION,
         size = UDim2.new(0, winW, 0, winH),
         position = UDim2.new(0, 30, 0, 40),
-        tabs = { "Aimbot", "ESP", "Misc" },
+        tabs = { "Aimbot", "ESP", "Weapons", "Misc" },
         controls = guiControls,
         footerHint = "RightShift — show / hide this menu",
         -- The X hides the whole GUI (RightShift brings it back); the
@@ -600,7 +691,7 @@ local function buildMenu()
             notify("Menu hidden - press RightShift to reopen")
         end,
     }
-    local pages = { win.tab(1), win.tab(2), win.tab(3) }
+    local pages = { win.tab(1), win.tab(2), win.tab(3), win.tab(4) }
 
     -- Page helpers: every widget goes through a labelled pcall, so one bad
     -- row can never empty the rest of the menu - and the console names
@@ -792,8 +883,37 @@ local function buildMenu()
     color(p2, "Tracer colour", Config.ESP, "Tracer")
     note(p2, "Opacity sliders: 1 = fully visible.")
 
+    -- ---------------- Weapons ----------------
+    local p3 = pages[3]
+    section(p3, "Recoil")
+    slider(p3, "Recoil percentage",
+        function() return Config.Weapons.RecoilPct end,
+        function(v)
+            Config.Weapons.RecoilPct = v
+            task.spawn(function()
+                local applied, blocked = applyRecoil()
+                print(("[criminality] recoil %d%% -> scaled %d config copy(ies)%s"):format(
+                    math.floor(v + 0.5), applied, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
+            end)
+        end, 5, 0, 200)
+    button(p3, "Re-detect recoil config", function()
+        task.spawn(function()
+            local applied, blocked = applyRecoil()
+            local tracked = 0
+            for _ in pairs(recoilState.tables) do tracked += 1 end
+            local pct = math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)
+            notify(("Recoil: %d config copy(ies) tracked, %d scaled%s - set to %d%%"):format(
+                tracked, applied, blocked > 0 and (", " .. blocked .. " locked") or "", pct))
+            print(("[criminality] recoil scan: tracked %d, scaled %d, blocked %d, pct %d"):format(
+                tracked, applied, blocked, pct))
+        end)
+    end)
+    note(p3, "100% = the game's own recoil. The slider scales the camera-shake value every shot reads " ..
+        "(CamShakeConfig.Recoil), so it applies live per shot - 0% = no kick, 200% = double. " ..
+        "If a gun ever feels unchanged, hit Re-detect.")
+
     -- ---------------- Misc ----------------
-    local p4 = pages[3]
+    local p4 = pages[4]
     section(p4, "World")
     toggle(p4, "Fullbright",
         function() return Config.Misc.Fullbright end,
@@ -847,6 +967,14 @@ end)
 
 -- Apply the saved state once on load.
 if Config.Misc.Fullbright then pcall(setFullbright, true) end
+task.spawn(function()
+    local applied = applyRecoil()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    if pct ~= 100 then
+        print(("[criminality] recoil %d%% active - %d config copy(ies) scaled"):format(
+            math.floor(pct + 0.5), applied))
+    end
+end)
 
 print(("[Havoc Hub] Criminality script loaded (PlaceId %d)"):format(game.PlaceId))
 notify("Criminality loaded - aimbot + ESP. Keep smoothing high near moderators")
