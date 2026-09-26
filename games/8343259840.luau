@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v24"
+local SCRIPT_VERSION = "crim-v25"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -697,7 +697,7 @@ end
 --      patching - nothing the AC flags),
 --   4) the gun re-reads the patched copy and every later shot kicks with
 --      the new % - no drop/pick cycle needed.
-local liveFcf = { cands = {}, lastScan = 0, toolRef = nil }
+local liveFcf = { cands = {}, states = {}, lastScan = 0, toolRef = nil, stateKeys = nil }
 
 -- Metatable-proof field access. Game "strict" objects (Crosshair PhysicModule
 -- style) THROW from __index on unknown keys, and the gun config's protected
@@ -740,6 +740,8 @@ end
 
 local function liveFcfScan(announce)
     liveFcf.cands = {}
+    liveFcf.states = {}
+    liveFcf.stateKeys = nil
     liveFcf.lastScan = os.clock()
     pcall(function()
         local char = LocalPlayer.Character
@@ -765,6 +767,23 @@ local function liveFcfScan(announce)
                 looked += 1
                 -- per-object pcall: a hostile __index must never kill the scan
                 pcall(function()
+                    -- module state table (the gun module's shared state: carries
+                    -- its rCRED recoil-reduction field AND the fcf proxy)
+                    local rc = safeField(obj, "rCRED")
+                    if type(rc) == "number" and safeField(obj, "fcf") ~= nil then
+                        if #liveFcf.states < 8 then
+                            liveFcf.states[#liveFcf.states + 1] = { t = obj, origRed = rc }
+                        end
+                        if not liveFcf.stateKeys then
+                            local keys = {}
+                            for k in pairs(obj) do
+                                keys[#keys + 1] = tostring(k)
+                                if #keys >= 18 then break end
+                            end
+                            table.sort(keys)
+                            liveFcf.stateKeys = table.concat(keys, ",")
+                        end
+                    end
                     if liveLooksLikeGunConfig(obj) then
                         count += 1
                         local customs = safeField(obj, "Customs")
@@ -785,8 +804,8 @@ local function liveFcfScan(announce)
         end
     end
     if announce then
-        print(("[criminality] live copy scan: %d match(es), %d table(s) looked at (%s, ubl=%s)"):format(
-            count, looked, ref and "equipped config found" or "no equipped config",
+        print(("[criminality] live copy scan: %d match(es), %d state table(s), %d looked at (%s, ubl=%s)"):format(
+            count, #liveFcf.states, looked, ref and "equipped config found" or "no equipped config",
             tostring(liveFcf.hasUBL)))
         for i, c in ipairs(liveFcf.cands) do
             if i > 8 then break end
@@ -796,7 +815,14 @@ local function liveFcfScan(announce)
                     tostring(safeField(c.t, "RecoilSpeed")), tostring(safeField(c.t, "RecoilDamper"))))
             end)
         end
-        notify(("Live copy scan: %d match(es) - console has details"):format(count))
+        for i, s in ipairs(liveFcf.states) do
+            if i > 3 then break end
+            pcall(function()
+                print(("  state[%d] rCRED=%s keys: %s"):format(
+                    i, tostring(safeField(s.t, "rCRED")), tostring(liveFcf.stateKeys or "?")))
+            end)
+        end
+        notify(("Live copy scan: %d match(es), %d state table(s) - console has details"):format(count, #liveFcf.states))
     end
     return count
 end
@@ -822,11 +848,17 @@ local function liveFcfApply(pct, announce)
             safeSetField(c.t, "RecoilRedution", math.clamp(1 - pct / 100, 0, 1))
         end
     end
-    if announce then
-        print(("[criminality] live copy: patched %d table(s) to %d%%"):format(
-            n, math.floor(pct + 0.5)))
+    local statesPatched = 0
+    for _, s in ipairs(liveFcf.states) do
+        if safeSetField(s.t, "rCRED", math.clamp(1 - pct / 100, 0, 1)) then
+            statesPatched += 1
+        end
     end
-    return n
+    if announce then
+        print(("[criminality] live copy: patched %d table(s) + %d state table(s) to %d%%"):format(
+            n, statesPatched, math.floor(pct + 0.5)))
+    end
+    return n, statesPatched
 end
 
 -- FireModeSwitch re-reads Recoil from the live copy when the bullet-type
@@ -853,7 +885,7 @@ end
 local function liveApplyNow(announce)
     local pct = tonumber(Config.Weapons.RecoilPct) or 100
     pcall(applyGunRecoil)
-    local n = liveFcfApply(pct, false)
+    local n, sp = liveFcfApply(pct, false)
     local sent = false
     if n > 0 and liveFcf.hasUBL then
         sent = triggerBulletRefresh()
@@ -866,15 +898,15 @@ local function liveApplyNow(announce)
         toolName = tool and tool.Name or "none"
     end)
     -- one copyable line: tells us exactly which stage happened
-    print(("[criminality] live apply: tool=%s matches=%d ubl=%s patched=%d keySent=%s pct=%d"):format(
-        toolName, #liveFcf.cands, tostring(liveFcf.hasUBL), n, tostring(sent), math.floor(pct + 0.5)))
+    print(("[criminality] live apply: tool=%s matches=%d states=%d patched=%d statesPatched=%d ubl=%s keySent=%s pct=%d"):format(
+        toolName, #liveFcf.cands, #liveFcf.states, n, sp, tostring(liveFcf.hasUBL), tostring(sent), math.floor(pct + 0.5)))
     if announce then
-        if n == 0 then
+        if n == 0 and sp == 0 then
             notify("Live apply: no live copy found - use Apply % / Auto apply instead")
-        elseif not liveFcf.hasUBL then
-            notify(("Live copy patched (%d) - BUT this gun has no underbarrel, so the game never re-reads it live. Test on a launcher gun, or use Auto apply."):format(n))
+        elseif n > 0 and not liveFcf.hasUBL then
+            notify(("Live copies patched (%d+%d) - no underbarrel on this gun, so no key refresh; test if recoil already changed."):format(n, sp))
         else
-            notify(("Live apply: %d copy(ies) patched, refresh key sent (launcher toggled twice, ends same)"):format(n))
+            notify(("Live apply: %d+%d patched, refresh key sent (launcher toggled twice)"):format(n, sp))
         end
     end
     return n, sent
@@ -3105,6 +3137,31 @@ local function buildMenu()
             task.wait(1)
             print("[criminality] kick test done - which bumped the camera, 1st/2nd/both/neither? (use slider 100%)")
             notify("Kick test done - tell Havoc which one bumped (1st/2nd/both/neither)")
+        end)
+    end)
+    button(p3, "RCL kick v2 (exact shot formula)", function()
+        task.spawn(function()
+            local e2 = rclE2()
+            local cur = e2 and e2:FindFirstChild("RCL")
+            local bak = e2 and e2:FindFirstChild("RCLBackup")
+            print(("[criminality] kick v2: RCL=%s backup=%s"):format(
+                tostring(cur and cur.ClassName), tostring(bak and bak.ClassName)))
+            if not (cur and cur:IsA("BindableEvent")) then
+                notify("Kick v2: RCL event not found")
+                return
+            end
+            local R = 21
+            pcall(function()
+                local cfg = equippedToolConfig()
+                local rec = cfg and recoilGun.tables[cfg]
+                if rec and tonumber(rec.Recoil) then R = tonumber(rec.Recoil) end
+            end)
+            local vec = Vector3.new(math.random() * (R / 2) - (R / 4), 0, math.random() * (R / 2) + (R / 2))
+            notify("Kick v2: firing the exact shot formula - watch the camera NOW")
+            pcall(function() cur:Fire(vec) end)
+            task.wait(2.5)
+            print(("[criminality] kick v2 fired Vector3(%.2f, 0, %.2f) on RCL - camera bump yes/no?"):format(vec.X, vec.Z))
+            notify("Kick v2 done - did the camera bump? (yes/no)")
         end)
     end)
     button(p3, "Undo live hook (restore game recoil)", function()
