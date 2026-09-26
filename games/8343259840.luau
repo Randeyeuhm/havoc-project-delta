@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v18"
+local SCRIPT_VERSION = "crim-v19"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -795,7 +795,11 @@ local function installSpringHook()
     end)
 end
 
-installSpringHook()
+-- RETIRED (safety): spring instrumentation wrapped functions on a game
+-- module table and never helped anyway - the v13 trace proved recoil does
+-- not ride the SpringModule (zero accelerate calls in a full mag). Not
+-- worth any AC surface; the manual spring helpers below stay for diagnostics.
+-- installSpringHook()
 
 local function looksLikeSpring(t)
     return type(t) == "table" and typeof(t.p) == "Vector3" and typeof(t.v) == "Vector3"
@@ -829,38 +833,41 @@ wrapSpringInstance = function(obj)
 end
 
 -- ============================================================
--- LIVE RECOIL KICK INTERCEPTOR (RCL)
+-- LIVE RECOIL KICK INTERCEPTOR (RCL) - SAFE MODES ONLY
 -- ============================================================
--- Decoded from the dump: the gun module builds the recoil kick from the
--- config value it copied at load and fires it as
+-- HARD RULE (learned the hard way): NEVER use hookmetamethod / __namecall /
+-- metatable patching in this game - the AC ("namecall instance detector")
+-- kicks within seconds of a hook install. v19 uses only safe techniques:
+--   mode "conns": getconnections() introspection (executor-side read) +
+--                 rewiring the RCL signal: disable the game's listener,
+--                 connect ours which scales the kick vector and invokes
+--                 the saved original handler directly. No VM patching.
+--   mode "swap":  rename original -> RCLBackup, insert our own "RCL"
+--                 child and forward scaled kicks (instance ops only,
+--                 manual opt-in via button).
+-- The kick pipeline (from the dump): every shot fires
 --     Events2.RCL:Fire(Vector3.new(rand(-R, R) / 4, 0, rand(R / 2, R)))
--- Two interception modes, one active at a time:
---   "hook": __namecall intercept on the original RCL instance's Fire -
---           catches the kick no matter how the gun holds the reference
---           (works even if the game cached the instance at load).
---   "swap": rename the original to RCLBackup and insert our own "RCL"
---           child, scale, forward to the original (fallback for executors
---           without metamethod hooks; covers the dynamic-lookup path).
--- No remotes are touched (BindableEvent is client-local).
-local rclHook = { original = nil, mine = nil, active = false, mode = "none", hooked = false }
-local rclForwarding = false
+-- and R is the only consumer of the config value the gun copied at load.
+local rclHook = { original = nil, mine = nil, active = false, mode = "none" }
 local rclShared = (type(getgenv) == "function" and getgenv()) or _G
 
 local function rclFactor()
     return (tonumber(Config.Weapons.RecoilPct) or 100) / 100
 end
 
-local function resetRCLHook()
-    rclHook.original = nil
+local function rclFindOrig()
+    local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
+    local orig = e2 and e2:FindFirstChild("RCL")
+    if orig and orig:IsA("BindableEvent") then return orig end
+    return nil
+end
+
+local function rclCleanupSwap()
     rclHook.mine = nil
-    rclHook.active = false
-    rclHook.mode = "none"
-    rclHook.hooked = false
     local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
     if not e2 then return end
     local backup = e2:FindFirstChild("RCLBackup")
     if backup then
-        -- a previous run left a swap behind: drop our old event, restore name
         local stale = e2:FindFirstChild("RCL")
         if stale and stale ~= backup then
             pcall(function() stale:Destroy() end)
@@ -869,49 +876,85 @@ local function resetRCLHook()
     end
 end
 
-local function installRCLHook()
-    if rclHook.active then return true end
-    local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
-    local orig = e2 and e2:FindFirstChild("RCL")
-    if not e2 or not orig or not orig:IsA("BindableEvent") then
-        return false
-    end
-    rclHook.original = orig
-    -- mode 1: __namecall hook (preferred - catches cached references too)
-    if type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
-        local ok = pcall(function()
-            local old
-            old = hookmetamethod(game, "__namecall", function(self, ...)
-                if self == orig and getnamecallmethod() == "Fire" and not rclForwarding then
-                    if rclShared.__HavocRclSkip then
-                        return old(self, ...)
-                    end
-                    local v = ...
-                    if typeof(v) == "Vector3" then
-                        local f = rclFactor()
-                        if f ~= 1 then
-                            -- mark so older stacked hooks pass through unscaled
-                            rclShared.__HavocRclSkip = true
-                            local res = old(self, v * f, select(2, ...))
-                            rclShared.__HavocRclSkip = false
-                            return res
-                        end
+-- conns mode: disable the game's listeners and call them ourselves with a
+-- scaled vector. Refs live in a getgenv store so re-execs reuse them; each
+-- forwarder self-retires when the generation bumps (no double scaling).
+local function rclInstallConns(orig)
+    if type(getconnections) ~= "function" then return false end
+    local okConns, conns = pcall(getconnections, orig.Event)
+    if not okConns or type(conns) ~= "table" then return false end
+    local st = rclShared.__HavocRcl
+    if st and st.event ~= orig then st = nil end
+    if not st then
+        if #conns == 0 then return false end
+        local saved = {}
+        for _, c in ipairs(conns) do
+            local fn = c.Function or c.func or c.callback
+            if type(fn) == "function" then
+                saved[#saved + 1] = { fn = fn, conn = c }
+            end
+        end
+        if #saved == 0 then return false end
+        local disabled = 0
+        for _, e in ipairs(saved) do
+            local c = e.conn
+            local did = false
+            if type(c.Disable) == "function" then
+                did = pcall(function() c:Disable() end)
+            elseif c.Enabled ~= nil then
+                did = pcall(function() c.Enabled = false end)
+            elseif type(c.Disconnect) == "function" then
+                did = pcall(function() c:Disconnect() end)
+                e.fn = nil -- disconnected: nothing left to re-invoke
+            end
+            if did then disabled += 1 end
+        end
+        if disabled < #saved then
+            -- cannot guarantee single-application: restore and bail out
+            for _, e in ipairs(saved) do
+                if e.conn then
+                    if type(e.conn.Enable) == "function" then
+                        pcall(function() e.conn:Enable() end)
+                    elseif e.conn.Enabled ~= nil then
+                        pcall(function() e.conn.Enabled = true end)
                     end
                 end
-                return old(self, ...)
-            end)
-            if type(old) == "function" then
-                rclHook.hooked = true
             end
-        end)
-        if ok and rclHook.hooked then
-            rclHook.active = true
-            rclHook.mode = "hook"
-            print("[criminality] rcl hook: installed via __namecall (live recoil kick scaling)")
-            return true
+            return false
         end
+        st = { event = orig, origs = saved }
+        rclShared.__HavocRcl = st
     end
-    -- mode 2: folder-child swap (dynamic lookup path)
+    if st.fwd then pcall(function() st.fwd:Disconnect() end) end
+    rclShared.__HavocRclGen = (rclShared.__HavocRclGen or 0) + 1
+    local myGen = rclShared.__HavocRclGen
+    local fwdConn
+    fwdConn = orig.Event:Connect(function(v, ...)
+        if rclShared.__HavocRclGen ~= myGen then
+            pcall(function() fwdConn:Disconnect() end)
+            return
+        end
+        local out = v
+        if typeof(v) == "Vector3" then
+            local f = rclFactor()
+            if f ~= 1 then out = v * f end
+        end
+        for _, e in ipairs(st.origs) do
+            if e.fn then
+                pcall(e.fn, out, ...)
+            end
+        end
+    end)
+    st.fwd = fwdConn
+    rclHook.original = orig
+    rclHook.active = true
+    rclHook.mode = "conns"
+    return true
+end
+
+-- swap mode: instance ops only (manual opt-in)
+local function rclInstallSwap(orig)
+    local e2 = orig.Parent
     local ok = pcall(function()
         orig.Name = "RCLBackup"
         local mine = Instance.new("BindableEvent")
@@ -924,28 +967,65 @@ local function installRCLHook()
                 if f ~= 1 then out = v * f end
             end
             local o = rclHook.original
-            if o and o.Parent then
-                rclForwarding = true
-                o:Fire(out, ...)
-                rclForwarding = false
-            end
+            if o and o.Parent then o:Fire(out, ...) end
         end)
         rclHook.mine = mine
         rclHook.active = true
         rclHook.mode = "swap"
     end)
-    if ok and rclHook.mode == "swap" then
-        print("[criminality] rcl hook: installed via event swap (no metamethod hook available)")
+    return ok and rclHook.mode == "swap"
+end
+
+-- stop everything and give the game its own recoil back
+local function rclRelease()
+    local st = rclShared.__HavocRcl
+    if st then
+        if st.fwd then pcall(function() st.fwd:Disconnect() end) end
+        for _, e in ipairs(st.origs) do
+            if e.conn then
+                local did = false
+                if type(e.conn.Enable) == "function" then
+                    did = pcall(function() e.conn:Enable() end)
+                elseif e.conn.Enabled ~= nil then
+                    did = pcall(function() e.conn.Enabled = true end)
+                end
+                if not did and e.fn then
+                    pcall(function() st.event.Event:Connect(e.fn) end)
+                end
+            elseif e.fn then
+                pcall(function() st.event.Event:Connect(e.fn) end)
+            end
+        end
+        rclShared.__HavocRcl = nil
+    end
+    rclCleanupSwap()
+    rclHook.active = false
+    rclHook.mode = "none"
+end
+
+local function installRCLHook(allowSwap)
+    if rclHook.active then return true end
+    local orig = rclFindOrig()
+    if not orig then return false end
+    rclHook.original = orig
+    if rclInstallConns(orig) then
+        print("[criminality] rcl hook: installed via connections (safe mode - live recoil scaling)")
         return true
     end
+    if allowSwap and rclInstallSwap(orig) then
+        print("[criminality] rcl hook: installed via event swap (instance ops, manual mode)")
+        return true
+    end
+    rclHook.original = nil
     rclHook.mode = "none"
     return false
 end
 
-pcall(resetRCLHook)
-pcall(installRCLHook)
-print(("[criminality] rcl: hookmetamethod=%s getnamecallmethod=%s getconnections=%s"):format(
-    tostring(type(hookmetamethod)), tostring(type(getnamecallmethod)), tostring(type(getconnections))))
+pcall(function()
+    rclCleanupSwap()
+    installRCLHook(false)
+end)
+print(("[criminality] rcl: getconnections=%s"):format(tostring(type(getconnections))))
 
 -- ============================================================
 -- SNAPSHOT PATCHING (slider changes without re-picking the gun)
@@ -2640,12 +2720,25 @@ local function buildMenu()
             end
         end)
     end)
-    button(p3, "Reinstall live hook (RCL)", function()
+    button(p3, "Reinstall live hook (safe)", function()
         task.spawn(function()
-            resetRCLHook()
-            local ok = installRCLHook()
-            notify(ok and ("Live recoil hook reinstalled (" .. rclHook.mode .. ") - slider is instant")
-                or "Live recoil: RCL event not found (are you in a game session?)")
+            rclRelease()
+            local ok = installRCLHook(false)
+            notify(ok and ("Live recoil active (" .. rclHook.mode .. ") - slider scales the kick instantly")
+                or "Safe live mode unavailable here - use Apply % / Auto apply (they always work)")
+        end)
+    end)
+    button(p3, "Try swap hook (manual)", function()
+        task.spawn(function()
+            rclRelease()
+            local orig = rclFindOrig()
+            if not orig then notify("RCL event not found - in game?") return end
+            rclHook.original = orig
+            if rclInstallSwap(orig) then
+                notify("Swap hook installed - shoot & slide; if nothing changes, hit 'Undo live hook'")
+            else
+                notify("Swap hook failed")
+            end
         end)
     end)
     button(p3, "RCL probe (shoot 5s)", function()
@@ -2653,10 +2746,10 @@ local function buildMenu()
             local e2 = game:GetService("ReplicatedStorage"):FindFirstChild("Events2")
             local cur = e2 and e2:FindFirstChild("RCL")
             local bak = e2 and e2:FindFirstChild("RCLBackup")
-            print(("[criminality] rcl probe: mode=%s hooked=%s active=%s | RCL=%s backup=%s | hook=%s method=%s conns=%s"):format(
-                rclHook.mode, tostring(rclHook.hooked), tostring(rclHook.active),
+            print(("[criminality] rcl probe: mode=%s active=%s | RCL=%s backup=%s | getconnections=%s"):format(
+                rclHook.mode, tostring(rclHook.active),
                 tostring(cur and cur.ClassName), tostring(bak and bak.ClassName),
-                tostring(type(hookmetamethod)), tostring(type(getnamecallmethod)), tostring(type(getconnections))))
+                tostring(type(getconnections))))
             local firesA, firesB = 0, 0
             local c1 = cur and cur:IsA("BindableEvent") and cur.Event:Connect(function() firesA += 1 end)
             local c2 = bak and bak:IsA("BindableEvent") and bak.Event:Connect(function() firesB += 1 end)
@@ -2669,9 +2762,15 @@ local function buildMenu()
                 firesA, firesB, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
         end)
     end)
-    note(p3, "Live recoil installs at load (watch for 'rcl hook: installed'). If it still doesn't scale: hit 'RCL probe', " ..
-        "SHOOT for 5s and send the console - it shows whether the kick fires on our event or the original. 'Apply %' " ..
-        "cycles the gun manually, 'Auto apply' does it ~1s after the slider settles - reliable backups.")
+    button(p3, "Undo live hook (restore game recoil)", function()
+        task.spawn(function()
+            rclRelease()
+            notify("Live hook removed - the game's own recoil is back")
+        end)
+    end)
+    note(p3, "Live recoil is SAFE mode now (no VM hooks - the old namecall hook gets you kicked by the AC). It installs at " ..
+        "load when the executor supports it. 'Apply %' / 'Auto apply' replicate the drop/pick and always work. " ..
+        "'RCL probe' shows where kicks land; 'Undo live hook' restores normal recoil.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
@@ -2733,8 +2832,8 @@ task.spawn(function()
     local guns = applyGunRecoil()
     local pct = tonumber(Config.Weapons.RecoilPct) or 100
     if pct ~= 100 then
-        print(("[criminality] recoil %d%% active - gun configs %d, CamShake %d, spring hook installed"):format(
-            math.floor(pct + 0.5), guns, applied))
+        print(("[criminality] recoil %d%% active - gun configs %d, CamShake %d, live mode %s"):format(
+            math.floor(pct + 0.5), guns, applied, rclHook.mode))
     end
 end)
 
