@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v11"
+local SCRIPT_VERSION = "crim-v12"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -1905,10 +1905,96 @@ local function buildMenu()
                 cfgs, springs, guns, snaps, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
         end)
     end)
-    note(p3, "100% = the game's own recoil. The config is scaled when a gun arrives; the recoil hunt then finds the " ..
-        "copies the weapon cached (by their numbers, even without names) and patches them LIVE on every slider move - " ..
-        "it auto-runs once per gun when the slider is off 100, and Deep apply forces a fresh full scan. " ..
-        "Last resort: drop & pick the gun.")
+    button(p3, "Recoil trace (fire 10s)", function()
+        task.spawn(function()
+            if type(getgc) ~= "function" then
+                notify("Recoil trace: getgc unavailable")
+                return
+            end
+            local function snap()
+                local t = {}
+                pcall(function()
+                    for _, obj in pairs(getgc(true)) do
+                        if type(obj) == "function" then
+                            pcall(function()
+                                local i = 1
+                                while true do
+                                    local name, val = debug.getupvalue(obj, i)
+                                    if not name then break end
+                                    if typeof(val) == "number" then
+                                        t[tostring(obj) .. "|" .. tostring(i)] = { name = tostring(name), v = val, isFn = true }
+                                    end
+                                    i += 1
+                                end
+                            end)
+                        elseif type(obj) == "table" then
+                            pcall(function()
+                                local n = 0
+                                for k, v in pairs(obj) do
+                                    n += 1
+                                    if n > 50 then break end
+                                    if typeof(v) == "number" then
+                                        t[tostring(obj) .. "T|" .. tostring(k)] = { name = tostring(k), v = v, isFn = false }
+                                    end
+                                end
+                            end)
+                        end
+                    end
+                end)
+                return t
+            end
+            notify("Recoil trace: FIRE THE GUN NOW for ~10 seconds")
+            print("[criminality] recoil trace: snapshot A...")
+            local A = snap()
+            local pitched = {}
+            local conn = RunService.RenderStepped:Connect(function()
+                local cam = workspace.CurrentCamera
+                if cam then
+                    table.insert(pitched, math.deg(math.asin(math.clamp(cam.CFrame.LookVector.Y, -1, 1))))
+                end
+            end)
+            for i = 10, 1, -1 do
+                print(("[criminality] recoil trace: %d ... fire!"):format(i))
+                task.wait(1)
+            end
+            pcall(function() conn:Disconnect() end)
+            print("[criminality] recoil trace: snapshot B...")
+            local B = snap()
+            local cntA, cntB = 0, 0
+            for _ in pairs(A) do cntA += 1 end
+            for _ in pairs(B) do cntB += 1 end
+            local changes = {}
+            for k, b in pairs(B) do
+                local a = A[k]
+                if a and a.v ~= b.v then
+                    local d = b.v - a.v
+                    if math.abs(d) > 0 and math.abs(d) < 10000 and math.abs(b.v) < 1000000 then
+                        changes[#changes + 1] = { name = b.name, isFn = b.isFn, from = a.v, to = b.v, d = d }
+                    end
+                end
+            end
+            table.sort(changes, function(x, y) return math.abs(x.d) > math.abs(y.d) end)
+            print(("[criminality] recoil trace: A=%d B=%d changed=%d"):format(cntA, cntB, #changes))
+            for i = 1, math.min(#changes, 30) do
+                local c = changes[i]
+                print(("[criminality] recoil trace %2d) %-24s %8.4f -> %8.4f  (d=%+.4f) %s"):format(
+                    i, c.name, c.from, c.to, c.d, c.isFn and "upvalue" or "field"))
+            end
+            local mn, mx = math.huge, -math.huge
+            for _, p in ipairs(pitched) do
+                if p < mn then mn = p end
+                if p > mx then mx = p end
+            end
+            if mn < math.huge then
+                print(("[criminality] recoil trace: camera pitch %.2f .. %.2f (swing %.2f deg)"):format(mn, mx, mx - mn))
+            end
+            print("[criminality] recoil trace done - copy this output back")
+            notify("Recoil trace done - copy the console output")
+        end)
+    end)
+    note(p3, "100% = the game's own recoil. If the slider still doesn't update live: set 100%, drop & pick the gun so " ..
+        "it recoils again, hit Recoil trace, FIRE for 10s, and send the printed changed-values list - it shows " ..
+        "exactly which number is recoil (we then patch that number directly). Deep apply forces a fresh full scan.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
