@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v8"
+local SCRIPT_VERSION = "crim-v9"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -639,7 +639,12 @@ end
 
 local function trackGunCfg(cfg)
     if looksLikeGunConfig(cfg) and not recoilGun.tables[cfg] then
-        recoilGun.tables[cfg] = { Recoil = cfg.Recoil }
+        recoilGun.tables[cfg] = {
+            Recoil = cfg.Recoil,
+            Speed = tonumber(cfg.RecoilSpeed),
+            Damper = tonumber(cfg.RecoilDamper),
+            Redution = tonumber(cfg.RecoilRedution),
+        }
     end
 end
 
@@ -977,6 +982,183 @@ local function applyAnchoredPatches()
     return n
 end
 
+-- ============================================================
+-- VALUE HUNT (ungated: finds copies by their NUMBERS, no names needed)
+-- ============================================================
+-- The identifier-based sweeps can come up empty (stripped names, no
+-- indexing constants, an executor without getconstants). This one needs
+-- NOTHING but the numbers: it walks the equipped gun's own script
+-- closures and flags upvalue numbers equal to the gun's original Recoil
+-- (21 on a G-17) or its currently-scaled value, any upvalue TABLE with a
+-- numeric Recoil field, and tables carrying the kit's distinctive
+-- RecoilSpeed / RecoilDamper numbers (8.5 / 0.9999) - recoil state under
+-- ANY field naming. Candidates are patched live; every scan reports the
+-- equipped tool + counts so nothing stays guesswork.
+local recoilCandidates = { numbers = { list = {}, seen = {} }, fields = { list = {}, seen = {} } }
+
+local function nearVal(a, b)
+    return type(a) == "number" and type(b) == "number" and math.abs(a - b) < 0.01
+end
+
+local function scanValueClosure(fn, seen, budget, ctx, out)
+    if type(fn) ~= "function" or seen[fn] or budget.count > budget.max then return end
+    seen[fn] = true
+    budget.count += 1
+    pcall(function()
+        local i = 1
+        while true do
+            local name, val = debug.getupvalue(fn, i)
+            if not name then break end
+            if typeof(val) == "number" then
+                out.numbers_seen += 1
+                if ctx.orig and (nearVal(val, ctx.orig) or nearVal(val, ctx.orig * ctx.pct / 100)) then
+                    local lname = string.lower(tostring(name))
+                    local blocked = string.find(lname, "damage", 1, true) or string.find(lname, "health", 1, true)
+                        or string.find(lname, "armor", 1, true) or string.find(lname, "range", 1, true)
+                    if blocked then
+                        out.number_blocked += 1
+                    else
+                        local key = tostring(fn) .. "#" .. tostring(i)
+                        if not recoilCandidates.numbers.seen[key] then
+                            recoilCandidates.numbers.seen[key] = true
+                            table.insert(recoilCandidates.numbers.list, { fn = fn, idx = i, base = ctx.orig, name = tostring(name) })
+                            out.number_patches += 1
+                        end
+                    end
+                end
+                if ctx.speed and nearVal(val, ctx.speed) then out.speed_hits += 1 end
+                if ctx.damper and nearVal(val, ctx.damper) then out.damper_hits += 1 end
+            elseif type(val) == "table" then
+                local t = val
+                if type(t.Recoil) == "number" and not recoilGun.tables[t] then
+                    local orig = t.Recoil
+                    if ctx.orig and (nearVal(orig, ctx.orig) or nearVal(orig, ctx.orig * ctx.pct / 100)) then orig = ctx.orig end
+                    recoilGun.tables[t] = { Recoil = orig }
+                    out.table_hits += 1
+                end
+                local combo = false
+                local scanned = 0
+                for _, v in pairs(t) do
+                    scanned += 1
+                    if scanned > 60 then break end
+                    if typeof(v) == "number" and ctx.orig and
+                        ((ctx.speed and nearVal(v, ctx.speed)) or (ctx.damper and nearVal(v, ctx.damper)) or nearVal(v, ctx.orig)) then
+                        combo = true
+                    end
+                end
+                if combo and not recoilGun.tables[t] then
+                    out.combo_tables += 1
+                    for k, v in pairs(t) do
+                        if typeof(v) == "number" and ctx.orig and (nearVal(v, ctx.orig) or nearVal(v, ctx.orig * ctx.pct / 100)) then
+                            local key = tostring(t) .. "." .. tostring(k)
+                            if not recoilCandidates.fields.seen[key] then
+                                recoilCandidates.fields.seen[key] = true
+                                table.insert(recoilCandidates.fields.list, { tbl = t, key = k, base = ctx.orig, name = tostring(k) })
+                                out.field_patches += 1
+                            end
+                        end
+                    end
+                end
+            end
+            i += 1
+        end
+    end)
+    pcall(function()
+        for _, proto in ipairs(debug.getprotos(fn)) do
+            scanValueClosure(proto, seen, budget, ctx, out)
+        end
+    end)
+end
+
+local function valueCtx(tool)
+    local ctx = { tool = tool and tool.Name or nil, orig = nil, speed = nil, damper = nil, pct = tonumber(Config.Weapons.RecoilPct) or 100 }
+    pcall(function()
+        local mod = tool and tool:FindFirstChild("Config")
+        if not mod then return end
+        local cfg = require(mod)
+        local rec = type(cfg) == "table" and recoilGun.tables[cfg]
+        if rec then
+            ctx.orig = tonumber(rec.Recoil)
+            ctx.speed = tonumber(rec.Speed)
+            ctx.damper = tonumber(rec.Damper)
+        end
+    end)
+    return ctx
+end
+
+local function newScanOut()
+    return { tool = "NONE", scripts = 0, numbers_seen = 0, number_patches = 0, number_blocked = 0,
+        table_hits = 0, combo_tables = 0, field_patches = 0, speed_hits = 0, damper_hits = 0, getconstants = "n/a" }
+end
+
+local function scanValuesTool()
+    local out = newScanOut()
+    if type(getscriptclosure) ~= "function" then return out end
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    out.tool = tool and tool.Name or "NONE"
+    if not tool then return out end
+    local ctx = valueCtx(tool)
+    local seen, budget = {}, { count = 0, max = 1200 }
+    pcall(function()
+        local scr = tool:FindFirstChild("Client")
+        if scr and scr:IsA("LocalScript") then
+            out.scripts += 1
+            local ok, closure = pcall(getscriptclosure, scr)
+            if ok and type(closure) == "function" then
+                local okc, consts = pcall(debug.getconstants, closure)
+                out.getconstants = okc and ("ok(" .. tostring(type(consts) == "table" and #consts or 0) .. ")") or "unavailable"
+                scanValueClosure(closure, seen, budget, ctx, out)
+            end
+        end
+        local scr2 = tool:FindFirstChild("PassClient")
+        if scr2 and scr2:IsA("LocalScript") then
+            out.scripts += 1
+            local ok, closure = pcall(getscriptclosure, scr2)
+            if ok and type(closure) == "function" then
+                scanValueClosure(closure, seen, budget, ctx, out)
+            end
+        end
+    end)
+    return out
+end
+
+local function scanValuesBundle()
+    local out = newScanOut()
+    if type(getscriptclosure) ~= "function" then return out end
+    pcall(function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        out.tool = tool and tool.Name or "NONE"
+        if not tool then return end
+        local ctx = valueCtx(tool)
+        local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+        local bundle = ps and ps:FindFirstChild("E2CJMS")
+        local x = bundle and bundle:FindFirstChild("XIIX")
+        if not x then return end
+        local ok, closure = pcall(getscriptclosure, x)
+        if ok and type(closure) == "function" then
+            out.scripts = 1
+            local seen, budget = {}, { count = 0, max = 3000 }
+            scanValueClosure(closure, seen, budget, ctx, out)
+        end
+    end)
+    return out
+end
+
+local function applyCandidates()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    local n = 0
+    for _, c in ipairs(recoilCandidates.numbers.list) do
+        if pcall(debug.setupvalue, c.fn, c.idx, c.base * (pct / 100)) then n += 1 end
+    end
+    for _, c in ipairs(recoilCandidates.fields.list) do
+        local want = c.base * (pct / 100)
+        if pcall(function() c.tbl[c.key] = want end) and c.tbl[c.key] == want then n += 1 end
+    end
+    return n
+end
+
 -- Closure scan of the equipped gun's own script: the Client LocalScript
 -- holds ITS config table (and any snapshotted numbers) as upvalues. This
 -- finds them via getscriptclosure - the table found here is the exact one
@@ -1091,8 +1273,9 @@ local function rescaleAndPatch()
     pcall(applyGunRecoil)
     pcall(function() closureScanEquipped() end)
     pcall(applySnapshotPatches)
-    pcall(function() scanAnchoredAll() end)
     pcall(applyAnchoredPatches)
+    pcall(scanValuesTool)
+    pcall(applyCandidates)
 end
 
 local function watchToolsForRecoil(char)
@@ -1488,12 +1671,15 @@ local function buildMenu()
                 local guns = applyGunRecoil()
                 pcall(function() closureScanEquipped() end)
                 local snaps = applySnapshotPatches()
-                local anchored = nil
-                pcall(function() anchored = scanAnchoredAll() end)
-                local nums = applyAnchoredPatches()
-                print(("[criminality] recoil %d%% -> configs %d, CamShake %d, snapshots %d, anchored +%d/%d%s"):format(
+                local scan = nil
+                pcall(function() scan = scanValuesTool() end)
+                local anchored = applyAnchoredPatches()
+                local cands = applyCandidates()
+                print(("[criminality] recoil %d%% -> configs %d, CamShake %d, snapshots %d | tool %s: +%d num, +%d fld, combo %d, spd %d, dmp %d | anchored %d, candidates %d%s"):format(
                     math.floor(v + 0.5), guns, applied, snaps,
-                    anchored and anchored.tables or 0, nums,
+                    scan and scan.tool or "?", scan and scan.number_patches or 0, scan and scan.field_patches or 0,
+                    scan and scan.combo_tables or 0, scan and scan.speed_hits or 0, scan and scan.damper_hits or 0,
+                    anchored, cands,
                     blocked > 0 and (" (" .. blocked .. " locked)") or ""))
             end)
         end, 5, 0, 200)
@@ -1514,18 +1700,26 @@ local function buildMenu()
             local guns = applyGunRecoil()
             local shake = applyRecoil()
             local snaps = applySnapshotPatches()
-            local anchored = nil
-            pcall(function() anchored = scanAnchoredAll() end)
-            local anchoredBundle = nil
-            pcall(function() anchoredBundle = scanAnchoredBundle() end)
-            local nums = applyAnchoredPatches()
-            notify(("Deep scan: +%d config(s), %d anchored, %d number(s) live - shoot to test"):format(
-                cfgs, (anchored and anchored.tables or 0) + (anchoredBundle and anchoredBundle.tables or 0), nums))
-            print(("[criminality] deep scan: +%d configs, +%d springs, %d guns, CamShake %d, snapshots %d, anchored tool %s / service %s, live numbers %d (pct %d%%)"):format(
-                cfgs, springs, guns, shake, snaps,
-                anchored and ("%d/%d"):format(anchored.tables, anchored.numbers) or "?",
-                anchoredBundle and ("%d/%d"):format(anchoredBundle.tables, anchoredBundle.numbers) or "?",
-                nums, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+            local scanTool = nil
+            pcall(function() scanTool = scanValuesTool() end)
+            local scanBundle = nil
+            pcall(function() scanBundle = scanValuesBundle() end)
+            local anchored = applyAnchoredPatches()
+            local cands = applyCandidates()
+            notify(("Deep scan: tool %s: +%d num, +%d fld | service: +%d num, +%d fld - shoot to test"):format(
+                scanTool and scanTool.tool or "?",
+                scanTool and scanTool.number_patches or 0, scanTool and scanTool.field_patches or 0,
+                scanBundle and scanBundle.number_patches or 0, scanBundle and scanBundle.field_patches or 0))
+            print(("[criminality] deep scan: +%d configs, +%d springs, %d guns, snapshots %d | tool %s: +%d num, +%d fld, combo %d, spd %d, dmp %d, gc %s | service: +%d num, +%d fld, combo %d, spd %d, dmp %d | candidates %d, anchored %d (pct %d%%)"):format(
+                cfgs, springs, guns, snaps,
+                scanTool and scanTool.tool or "?", scanTool and scanTool.number_patches or 0,
+                scanTool and scanTool.field_patches or 0, scanTool and scanTool.combo_tables or 0,
+                scanTool and scanTool.speed_hits or 0, scanTool and scanTool.damper_hits or 0,
+                scanTool and scanTool.getconstants or "?",
+                scanBundle and scanBundle.number_patches or 0, scanBundle and scanBundle.field_patches or 0,
+                scanBundle and scanBundle.combo_tables or 0, scanBundle and scanBundle.speed_hits or 0,
+                scanBundle and scanBundle.damper_hits or 0,
+                cands, anchored, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
             if closure then
                 local nums2 = {}
                 for k, v in pairs(closure.numbers) do table.insert(nums2, ("%sx%d"):format(k, v)) end
