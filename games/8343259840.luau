@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v6"
+local SCRIPT_VERSION = "crim-v7"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -799,12 +799,61 @@ wrapSpringInstance = function(obj)
     return true
 end
 
+-- ============================================================
+-- SNAPSHOT PATCHING (slider changes without re-picking the gun)
+-- ============================================================
+-- The gun Client script copies Config values into locals when it loads
+-- (confirmed live: a scaled table does nothing to a gun that loaded before
+-- the change, while a freshly picked gun obeys). Those copies live on as
+-- UPVALUES of the script's closures - this layer finds them by name
+-- (Recoil / RecoilRedution) through getscriptclosure and rewrites them on
+-- every slider move, so changing the percentage behaves exactly like a
+-- drop + pickup.
+local recoilSnapshots = { list = {}, seen = {} }
+
+local function classifyRecoilUpvalue(name)
+    local ln = string.lower(tostring(name))
+    if ln == "recoil" then return "amount" end
+    if string.find(ln, "recoil", 1, true) then
+        if string.find(ln, "speed", 1, true) or string.find(ln, "damper", 1, true) then return nil end
+        if string.find(ln, "reduc", 1, true) or string.find(ln, "redut", 1, true) then return "reduction" end
+    end
+    return nil
+end
+
+local function addSnapshot(fn, idx, name, value, base)
+    local key = tostring(fn) .. "#" .. tostring(idx)
+    if recoilSnapshots.seen[key] then return false end
+    local kind = classifyRecoilUpvalue(name)
+    if not kind or type(value) ~= "number" then return false end
+    recoilSnapshots.seen[key] = true
+    local orig = (kind == "amount" and tonumber(base)) or tonumber(value) or 0
+    table.insert(recoilSnapshots.list, { fn = fn, idx = idx, kind = kind, orig = orig, name = tostring(name) })
+    return true
+end
+
+local function applySnapshotPatches()
+    local pct = tonumber(Config.Weapons.RecoilPct) or 100
+    local n = 0
+    for _, p in ipairs(recoilSnapshots.list) do
+        local want
+        if p.kind == "amount" then
+            want = p.orig * (pct / 100)
+        else
+            want = math.clamp(1 - pct / 100, 0, 1)
+        end
+        local ok = pcall(debug.setupvalue, p.fn, p.idx, want)
+        if ok then n += 1 end
+    end
+    return n
+end
+
 -- Closure scan of the equipped gun's own script: the Client LocalScript
 -- holds ITS config table (and any snapshotted numbers) as upvalues. This
 -- finds them via getscriptclosure - the table found here is the exact one
 -- the script reads, so scaling it always lands.
 local function closureScanEquipped()
-    local report = { scripts = 0, newTables = 0, numbers = {}, available = true }
+    local report = { scripts = 0, newTables = 0, numbers = {}, snapshots = 0, available = true, baseRecoil = nil }
     if type(getscriptclosure) ~= "function" then
         report.available = false
         return report
@@ -812,9 +861,18 @@ local function closureScanEquipped()
     local char = LocalPlayer.Character
     local tool = char and char:FindFirstChildOfClass("Tool")
     if not tool then return report end
+    -- base value for amount snapshots: the gun table's ORIGINAL Recoil
+    pcall(function()
+        local mod = tool:FindFirstChild("Config")
+        if not mod then return end
+        local cfg = require(mod)
+        if type(cfg) == "table" and recoilGun.tables[cfg] then
+            report.baseRecoil = recoilGun.tables[cfg].Recoil
+        end
+    end)
     local seen = {}
     local budget = 0
-    local function visit(val)
+    local function visit(fn, idx, name, val)
         if type(val) == "table" then
             if looksLikeGunConfig(val) and not recoilGun.tables[val] then
                 recoilGun.tables[val] = { Recoil = val.Recoil }
@@ -823,6 +881,9 @@ local function closureScanEquipped()
         elseif typeof(val) == "number" then
             local key = tostring(val)
             report.numbers[key] = (report.numbers[key] or 0) + 1
+        end
+        if type(name) == "string" and addSnapshot(fn, idx, name, val, report.baseRecoil) then
+            report.snapshots += 1
         end
     end
     local function walk(fn)
@@ -834,7 +895,7 @@ local function closureScanEquipped()
             while true do
                 local name, val = debug.getupvalue(fn, i)
                 if not name then break end
-                visit(val)
+                visit(fn, i, name, val)
                 i += 1
             end
         end)
@@ -897,19 +958,25 @@ end
 
 -- Scale the current gun + every gun equipped later (tools move from the
 -- backpack into the character when equipped).
+local function rescaleAndPatch()
+    pcall(applyGunRecoil)
+    pcall(function() closureScanEquipped() end)
+    pcall(applySnapshotPatches)
+end
+
 local function watchToolsForRecoil(char)
     if not char then return end
-    task.delay(0.25, function() pcall(applyGunRecoil) end)
+    task.delay(0.25, rescaleAndPatch)
     char.ChildAdded:Connect(function(child)
         if not child:IsA("Tool") then return end
-        task.delay(0.25, function() pcall(applyGunRecoil) end)
+        task.delay(0.25, rescaleAndPatch)
         pcall(function()
             local values = child:FindFirstChild("Values")
             local eq = values and values:FindFirstChild("Equipped")
             if eq then
                 eq.Changed:Connect(function()
                     if eq.Value then
-                        task.delay(0.3, function() pcall(applyGunRecoil) end)
+                        task.delay(0.3, rescaleAndPatch)
                     end
                 end)
             end
@@ -1288,8 +1355,10 @@ local function buildMenu()
             task.spawn(function()
                 local applied, blocked = applyRecoil()
                 local guns = applyGunRecoil()
-                print(("[criminality] recoil %d%% -> gun configs %d, CamShake %d, springs live-scaled%s"):format(
-                    math.floor(v + 0.5), guns, applied, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
+                pcall(function() closureScanEquipped() end)
+                local snaps = applySnapshotPatches()
+                print(("[criminality] recoil %d%% -> gun configs %d, CamShake %d, live snapshots %d%s"):format(
+                    math.floor(v + 0.5), guns, applied, snaps, blocked > 0 and (" (" .. blocked .. " locked)") or ""))
             end)
         end, 5, 0, 200)
     button(p3, "Probe recoil (console)", function()
@@ -1308,25 +1377,58 @@ local function buildMenu()
             local cfgs, springs, closure = deepScanAll()
             local guns = applyGunRecoil()
             local shake = applyRecoil()
-            notify(("Deep scan: +%d gun config(s), +%d spring(s) wrapped - shoot to test"):format(cfgs, springs))
-            print(("[criminality] deep scan: +%d configs, +%d springs wrapped, %d guns tracked, CamShake %d (pct %d%%)"):format(
-                cfgs, springs, guns, shake, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
+            local snaps = applySnapshotPatches()
+            notify(("Deep scan: +%d gun config(s), +%d spring(s), %d snapshot(s) live - shoot to test"):format(cfgs, springs, snaps))
+            print(("[criminality] deep scan: +%d configs, +%d springs wrapped, %d guns tracked, CamShake %d, snapshots %d (pct %d%%)"):format(
+                cfgs, springs, guns, shake, snaps, math.floor((tonumber(Config.Weapons.RecoilPct) or 100) + 0.5)))
             if closure then
                 local nums = {}
                 for k, v in pairs(closure.numbers) do table.insert(nums, ("%sx%d"):format(k, v)) end
                 table.sort(nums)
                 local shown = {}
                 for i = 1, math.min(#nums, 10) do table.insert(shown, nums[i]) end
-                print(("[criminality] closure scan: %s, scripts %d, +%d config tables, numbers: %s"):format(
+                print(("[criminality] closure scan: %s, scripts %d, +%d config tables, +%d snapshots, numbers: %s"):format(
                     closure.available and "ok" or "getscriptclosure missing",
-                    closure.scripts, closure.newTables, table.concat(shown, ", ")))
+                    closure.scripts, closure.newTables, closure.snapshots, table.concat(shown, ", ")))
             end
         end)
     end)
-    note(p3, "100% = the game's own recoil. Three layers: a gun's config (Recoil + RecoilRedution) is scaled the " ..
-        "moment it ARRIVES in your backpack and again on equip; every spring kick vector is live-scaled; Deep apply " ..
-        "does a one-time scan of live tables + springs + the gun script's own closure. If a gun you already hold " ..
-        "ignores the slider at 0%, it cached its values when it arrived - grab a new gun (or rejoin) and test.")
+    button(p3, "Force gun reload", function()
+        task.spawn(function()
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if not tool then
+                notify("Force reload: equip the gun first")
+                return
+            end
+            local did = false
+            for _, name in ipairs({ "Client", "PassClient" }) do
+                local scr = tool:FindFirstChild(name)
+                if scr and scr:IsA("LocalScript") then
+                    pcall(function() scr.Disabled = true end)
+                    task.wait(0.1)
+                    local was = scr.Disabled
+                    pcall(function() scr.Disabled = false end)
+                    if was then did = true end
+                    task.delay(0.6, function()
+                        if scr and scr.Parent and scr.Disabled then
+                            pcall(function() scr.Disabled = false end)
+                        end
+                    end)
+                end
+            end
+            if did then
+                task.delay(0.5, rescaleAndPatch)
+                notify("Gun reloaded - it re-read the config at the current %")
+            else
+                notify("Force reload unsupported here - drop and pick the gun up instead")
+            end
+        end)
+    end)
+    note(p3, "100% = the game's own recoil. A gun's config is scaled when it ARRIVES in your backpack, and the " ..
+        "values it copied at load (its closure upvalues) are patched LIVE on every slider move - so unlike before, " ..
+        "you can change the percentage while holding the gun. If a gun still refuses: hit Force gun reload (re-runs " ..
+        "its script), or drop & pick it up.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
