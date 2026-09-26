@@ -73,7 +73,7 @@ local function sameTeam(player)
 end
 
 -- ============================================================
--- CONFIG  (persisted to universal_hub_config.json)
+-- CONFIG  (persisted to criminality_hub_config.json)
 -- ============================================================
 local CONFIG_FILE = "criminality_hub_config.json"
 
@@ -178,7 +178,7 @@ do
         if UILib.VERSION then
             print("[criminality] uilib " .. tostring(UILib.VERSION) .. " loaded")
         else
-            warn("[universal] uilib.luau has no version marker - it is an OLD build; re-run the loader to update it")
+            warn("[criminality] uilib.luau has no version marker - it is an OLD build; re-run the loader to update it")
         end
     else
         warn("[Havoc Hub] uilib.luau not loaded (" .. tostring(res) .. ") - settings menu will be skipped")
@@ -205,7 +205,7 @@ do
         if ESPUI.VERSION then
             print("[criminality] esp " .. tostring(ESPUI.VERSION) .. " loaded")
         else
-            warn("[universal] esp.luau has no version marker - it is an OLD build; re-run the loader to update it")
+            warn("[criminality] esp.luau has no version marker - it is an OLD build; re-run the loader to update it")
         end
     else
         warn("[Havoc Hub] esp.luau not loaded (" .. tostring(res) .. ") - ESP disabled")
