@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v73"
+local SCRIPT_VERSION = "de-v74"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2583,7 +2583,7 @@ local OUTLAW_REACH = 9          -- how close to land before interacting
 local OUTLAW_CASHIN_MARGIN = 20 -- cash in the bounty when the escape timer is this close to expiring
 local OUTLAW_HOLD_MAX = 600     -- hold at most this long since wanted began
 
-local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0, fiveStarNotified = nil, evadeAt = 0, evadeToastAt = 0, promptHold = nil }
+local outlawFarm = { state = nil, target = nil, bustDoneAt = 0, tpAt = 0, lastStart = 0, jobWarnAt = 0, lastCashAt = 0, cashTries = 0, cashGraceUntil = 0, noAtmAt = 0, seatWarnAt = 0, clashAt = 0, arrestAt = 0, cooldownUntil = 0, lastCrimes = nil, skipAt = {}, siteKey = nil, sitePos = nil, siteAt = 0, siteCool = {}, wantedSince = nil, holdNotified = nil, crateToastAt = 0, fiveStarNotified = nil, evadeAt = 0, evadeToastAt = 0, promptHold = nil, scoutKey = nil, scoutPos = nil, scoutAt = 0, scoutFails = 0 }
 
 local function outlawAnchorModel(inst)
     if not inst or not inst.Parent then return nil end
@@ -2715,6 +2715,11 @@ local function outlawTick()
             hum.Sit = false
             hum:ChangeState(Enum.HumanoidStateType.GettingUp)
         end)
+        if hum.Sit then
+            -- second nudge: yanking the character up usually breaks the
+            -- seat weld client-side
+            pcall(function() char:PivotTo(char:GetPivot() + Vector3.new(0, 4, 0)) end)
+        end
         if hum.Sit then
             if now - outlawFarm.seatWarnAt > 30 then
                 outlawFarm.seatWarnAt = now
@@ -2889,10 +2894,12 @@ local function outlawTick()
     -- 4. pick the next ATM, land next to it, start the bust
     if char:GetAttribute("ATMBustDebounce") ~= nil then return end
     local target, tpos = outlawPickATM(pos)
+    if target then outlawFarm.scoutFails = 0 end
     if not target then
-        -- streaming: nothing live nearby - travel to an indexed site and
-        -- force-stream it instead of stalling (the sweeper keeps growing
-        -- the index, so the farm finds ATMs anywhere on the map)
+        -- streaming: nothing live around us. Never blind-teleport to a
+        -- spawner slot (most are empty - ATMs rotate between them): scout
+        -- the next site from where we stand, and only travel once an ATM
+        -- actually streams in (the picker grabs it on the next tick).
         local site, spos = outlawPickSite(pos, now)
         if not site then
             if now - outlawFarm.noAtmAt > 60 then
@@ -2901,23 +2908,27 @@ local function outlawTick()
             end
             return
         end
-        if (pos - spos).Magnitude > OUTLAW_REACH then
+        if outlawFarm.scoutKey ~= site then
+            outlawFarm.scoutKey = site
+            outlawFarm.scoutPos = spos
+            outlawFarm.scoutAt = now
             outlawFarm.state = nil
             outlawFarm.target = nil
-            if now - outlawFarm.tpAt > 1 then
-                outlawFarm.tpAt = now
-                outlawFarm.siteKey = site
-                outlawFarm.sitePos = spos
-                outlawFarm.siteAt = now
-                pcall(function() char:PivotTo(CFrame.new(spos + Vector3.new(0, 3, 0))) end)
-                atmSweepAsync(spos)
-            end
+            outlawFarm.siteKey, outlawFarm.sitePos = nil, nil
+            atmSweepAsync(spos)
             return
         end
-        -- on the site: give the forced stream a moment to deliver an ATM
-        if (now - (outlawFarm.siteAt or 0)) > ATM_SITE_WAIT then
-            outlawFarm.siteCool[atmKey(spos)] = now + ATM_SITE_COOLDOWN
-            outlawFarm.siteKey, outlawFarm.sitePos = nil, nil
+        if now - (outlawFarm.scoutAt or 0) < 4 then
+            -- window for the forced stream to deliver the site's ATM
+            return
+        end
+        -- empty slot - shelve it and scout somewhere else
+        outlawFarm.siteCool[atmKey(spos)] = now + ATM_SITE_COOLDOWN
+        outlawFarm.scoutKey = nil
+        outlawFarm.scoutFails = (outlawFarm.scoutFails or 0) + 1
+        if outlawFarm.scoutFails >= 3 and now - outlawFarm.noAtmAt > 90 then
+            outlawFarm.noAtmAt = now
+            notify("Outlaw farm: no ATMs out there - sweeping for new spots")
         end
         return
     end
@@ -3112,6 +3123,9 @@ local function bankTick()
             hum.Sit = false
             hum:ChangeState(Enum.HumanoidStateType.GettingUp)
         end)
+        if hum.Sit then
+            pcall(function() char:PivotTo(char:GetPivot() + Vector3.new(0, 4, 0)) end)
+        end
         if hum.Sit then
             if now - bankFarm.seatWarnAt > 30 then
                 bankFarm.seatWarnAt = now
