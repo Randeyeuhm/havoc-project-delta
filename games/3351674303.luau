@@ -36,7 +36,7 @@ local TeleportService  = game:GetService("TeleportService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer      = Players.LocalPlayer
 
-local SCRIPT_VERSION = "de-v75"
+local SCRIPT_VERSION = "de-v76"
 
 -- ONE-RUN-PER-CLIENT GUARD: the queued teleport payload checks this flag
 -- before loading the hub, and the hub itself sets it - so even if several
@@ -2411,16 +2411,27 @@ local function atmInstancePos(inst)
     return nil
 end
 
-local function atmSweep(pos)
-    if not pos or workspace.StreamingEnabled ~= true then return end
-    pcall(function() workspace:RequestStreamAroundAsync(pos, 2.5) end)
-    atmIndex.probedAt[atmKey(pos)] = os.clock()
+-- The game itself pre-loads areas by hammering
+-- LocalPlayer:RequestStreamAroundAsync(pos, 10) - a SINGLE short request
+-- quietly times out. Mirror the game: several requests per spot, longer
+-- timeout, player method first (same as the game's own replication code).
+local function atmStreamRequest(pos, timeout)
+    local ok = pcall(function() LocalPlayer:RequestStreamAroundAsync(pos, timeout) end)
+    if not ok then
+        pcall(function() workspace:RequestStreamAroundAsync(pos, timeout) end)
+    end
 end
 
 local function atmSweepAsync(pos)
     if not pos or workspace.StreamingEnabled ~= true then return end
+    if (atmIndex.sweepsActive or 0) >= 3 then return end
+    atmIndex.sweepsActive = (atmIndex.sweepsActive or 0) + 1
     task.spawn(function()
-        pcall(function() workspace:RequestStreamAroundAsync(pos, 3) end)
+        for _ = 1, 4 do
+            atmStreamRequest(pos, 4)
+            task.wait(0.6)
+        end
+        atmIndex.sweepsActive = atmIndex.sweepsActive - 1
         atmIndex.probedAt[atmKey(pos)] = os.clock()
     end)
 end
@@ -2499,7 +2510,7 @@ task.spawn(function()
             if char and char.PrimaryPart then
                 local now = os.clock()
                 local probe = atmPickProbe(char:GetPivot().Position, now)
-                if probe then atmSweep(probe) end
+                if probe then atmSweepAsync(probe) end
                 if not atmIndex.bank and (now - atmIndex.bankTryAt) > 60 then
                     atmIndex.bankTryAt = now
                     local bankPart = findPart("bank")
@@ -2547,7 +2558,7 @@ local function atmBootstrapRun()
         end
         notify(("ATM index: streaming %d spots (background)"):format(#probes))
         for _, p in ipairs(probes) do
-            atmSweep(p)
+            atmSweepAsync(p)
             task.wait(0.4)
         end
         local after = 0
