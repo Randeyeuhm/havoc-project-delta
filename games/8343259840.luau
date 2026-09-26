@@ -85,7 +85,7 @@ local DEFAULTS = {
     -- not look mechanical. TeamCheck off by default (most lobbies are solo).
     Aimbot   = { Enabled = false, Mode = "Hold RMB", FOV = 100, Smoothness = 6,
                  TeamCheck = false, VisibleOnly = true, FOVCircle = true },
-    Weapons  = { RecoilPct = 100, AutoApply = false, LiveApply = false },
+    Weapons  = { RecoilPct = 100, AutoApply = false, LiveApply = false, Suppressor = true },
     Misc     = { Fullbright = false, AntiAFK = true },
 }
 
@@ -163,7 +163,7 @@ end
 
 -- Bump on every change so the console / window subtitle prove which
 -- build is running (same scheme as the other scripts: uvN / de-vNN).
-local SCRIPT_VERSION = "crim-v27"
+local SCRIPT_VERSION = "crim-v28"
 
 local UILIB_FILE = "uilib.luau"
 local UILib
@@ -2732,6 +2732,8 @@ local function buildMenu()
         function(v) Config.Weapons.AutoApply = v end)
     toggle(p3, "Live apply (patch + Z refresh)", function() return Config.Weapons.LiveApply end,
         function(v) Config.Weapons.LiveApply = v end)
+    toggle(p3, "Suppressor (live hipfire cancel)", function() return Config.Weapons.Suppressor ~= false end,
+        function(v) Config.Weapons.Suppressor = v end)
     button(p3, "Apply LIVE now (patch + Z)", function()
         task.spawn(function()
             liveApplyNow(true)
@@ -3219,9 +3221,9 @@ local function buildMenu()
         end)
     end)
     note(p3, "Final recoil facts: AIMED-IN recoil scales INSTANTLY on the slider (in-memory patch - no drop/pick). " ..
-        "HIPFIRE re-reads only when the gun loads, so 'Auto apply' silently cycles the gun ~1s after the slider settles " ..
-        "to bring hipfire to the same %. Keep Auto apply ON: one slider move = aimed instant + hipfire moments later. " ..
-        "RCL/underbarrel buttons are diagnostics only.")
+        "HIPFIRE is cancelled at the render level by the Suppressor: shots open a 0.75s window and any small upward " ..
+        "camera drift while your mouse is still gets rotated back out ((1-%) of it) - the kick never reaches your " ..
+        "view. 'Auto apply' stays as backup: it silently cycles the gun ~1s after the slider settles. Keep both ON.")
 
     -- ---------------- Misc ----------------
     local p4 = pages[4]
@@ -3267,6 +3269,88 @@ track(RunService.RenderStepped:Connect(function()
     pcall(updateFovCircle, mouse)
 end))
 
+-- ============================================================
+-- RENDER-SIDE RECOIL SUPPRESSOR (hipfire) - crim-v28
+-- ============================================================
+-- The hipfire kick comes from a hidden client script and cannot be turned
+-- off at the source - but it is DISPLAYED through the camera, and the camera
+-- is ours to write (the aimbot has driven it all along - bullets and view
+-- both follow it). While a burst is inside its kick window (a RCL fire
+-- happened < 0.75s ago) and the mouse is basically still, any small upward
+-- camera step above a threshold IS the recoil - so we rotate (1 - pct%) of
+-- that step straight back out. The game re-writes its own camera each frame,
+-- so this cancels the visible kick frame by frame without touching any game
+-- systems. Aiming (RMB) is skipped on purpose: ADS recoil is already scaled
+-- by the in-memory patch, and this keeps the suppressor from fighting aim.
+local supp = { lastShotAt = 0, lastPitch = nil, rcl = nil, binds = 0 }
+
+local function pitchOfCFrame(cf)
+    return math.asin(math.clamp(cf.LookVector.Y, -1, 1))
+end
+
+local function updateRecoilSuppressor(cam)
+    local wcfg = Config.Weapons
+    if not wcfg or wcfg.Suppressor == false then
+        supp.lastPitch = nil
+        return
+    end
+    local pct = tonumber(wcfg.RecoilPct) or 100
+    if pct >= 100 then
+        supp.lastPitch = nil
+        return
+    end
+    local char = LocalPlayer.Character
+    if not (char and char:FindFirstChildOfClass("Tool")) then
+        supp.lastPitch = nil
+        return
+    end
+    -- aiming: ADS is the memory patch's job; never fight the aim
+    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        supp.lastPitch = nil
+        return
+    end
+    -- "Always" aimbot drives the camera on its own - stay out of its way
+    if Config.Aimbot and Config.Aimbot.Enabled and Config.Aimbot.Mode == "Always" then
+        supp.lastPitch = nil
+        return
+    end
+    local pitch = pitchOfCFrame(cam.CFrame)
+    if supp.lastPitch then
+        local dP = pitch - supp.lastPitch
+        if dP > 3.14159 then dP -= 6.28318 elseif dP < -3.14159 then dP += 6.28318 end
+        local md = UserInputService:GetMouseDelta()
+        local firing = (os.clock() - supp.lastShotAt) < 0.75
+        if firing and math.abs(md.Y) <= 3 and math.abs(md.X) <= 8
+            and dP > math.rad(0.02) and dP < math.rad(6) then
+            local cancel = dP * (1 - pct / 100)
+            cancel = math.clamp(cancel, 0, math.rad(2.5))
+            cam.CFrame = cam.CFrame * CFrame.Angles(-cancel, 0, 0)
+        end
+    end
+    supp.lastPitch = pitch
+end
+
+-- keep the shot detector attached to whatever the current RCL event is
+-- (our old swap machinery may replace the child; reconnect when it changes)
+task.spawn(function()
+    while true do
+        task.wait(1)
+        pcall(function()
+            local e2 = ReplicatedStorage:FindFirstChild("Events2")
+            local cur = e2 and e2:FindFirstChild("RCL")
+            if cur and cur ~= supp.rcl then
+                supp.rcl = cur
+                local ok = pcall(function()
+                    cur.Event:Connect(function()
+                        supp.lastShotAt = os.clock()
+                    end)
+                end)
+                if ok then supp.binds += 1 end
+            end
+        end)
+    end
+end)
+
 -- Camera aim runs at Camera priority + 1: the game's camera module rewrites
 -- Camera.CFrame every frame, so a plain RenderStepped write is overwritten
 -- before it ever renders (same reason Havoc's third person binds here).
@@ -3274,6 +3358,7 @@ RunService:BindToRenderStep("HavocHubAimbot", Enum.RenderPriority.Camera.Value +
     local cam = workspace.CurrentCamera
     if not cam then return end
     pcall(updateAimbot, cam, UserInputService:GetMouseLocation())
+    pcall(updateRecoilSuppressor, cam)
 end)
 
 -- Apply the saved state once on load.
