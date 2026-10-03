@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.45"
+local SCRIPT_VERSION = "oak-v29.46"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3613,8 +3613,13 @@ function SAFE.action(name, data, uuid)
     end
     local keyMod = SAFE.keyMod
     if type(keyMod) ~= "function" then return false end
+    -- CONVENTION (dump-verified against Backpack InformServer): the
+    -- message's Name field = hash(RAW action name, key). The
+    -- name .. key concatenated form is ONLY for remote NAMES in
+    -- CachedRemotes - using it here makes the action unrecognisable
+    -- server-side ("fired a remote" with an invalid message).
     return SAFE.fire("BackpackTellServer", {
-        Name = keyMod(name .. SAFE.key, SAFE.key),
+        Name = keyMod(name, SAFE.key),
         Data = data,
         UUID = uuid,
     })
@@ -3689,6 +3694,11 @@ local function hmStep()
     -- ever appear during real primary-action input, like a real clicker
     if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
     for _, inst in ipairs(findChopTools()) do
+        -- same guard the game's own code uses before it fires an attempt:
+        -- only send while THIS tool class says it is actively swinging
+        if rawget(inst, "ActivelySwinging") ~= true then
+            continue
+        end
         local ti = rawget(inst, "ToolIndicator")
         if type(ti) == "table" then
             local markers = rawget(ti, "HitMarkers")
