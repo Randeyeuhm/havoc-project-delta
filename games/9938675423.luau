@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.42"
+local SCRIPT_VERSION = "oak-v29.43"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3061,22 +3061,23 @@ end))
 -- ============================================================
 -- CHARACTER FLY + SPEED
 -- ============================================================
--- Fly proved the winning channel: a LinearVelocity INSTANCE with a big
--- force on the HRP (velocity PROPERTY writes alone get clawed back by
--- the mover). Speed uses BOTH: velocity injection (a chunk of the
--- target-minus-current horizontal delta is added back onto the
--- character EVERY frame - the user-visible "speed getting added") plus
--- the same LinearVelocity as a backing force drive with PerAxis limits
--- (full force on world X/Z, ZERO on Y - gravity/jumps/slopes natural).
--- No WalkSpeed / jump-state writes anywhere (that is the ban channel).
+-- Fly drives the character with our own LinearVelocity (force on the
+-- HRP - the engine mechanism the game's own Idle state uses to ride
+-- platforms). Speed is dead simple by design: set the character's
+-- horizontal velocity straight toward where it is going (the game's
+-- own Humanoid.MoveDirection) at the slider speed; nothing at all is
+-- written while no keys are held, so idling can never lock. If the
+-- game reverts those writes it is auto-detected and a position assist
+-- (pivot the extra speed-16 distance per frame along MoveDirection,
+-- forward-ray gated) takes over. No WalkSpeed / jump-state writes.
 local FLY_CAP = 150
 local flyLV = nil        -- fly drive (Vector-constrained LinearVelocity)
 local flyOwner = nil     -- the HRP it is attached to
-local spdLV = nil        -- speed drive (Vector + PerAxis force limits)
-local spdOwner = nil     -- the HRP it is attached to
 local spdShown = 0       -- last speed value printed
 local spdCheck = 0       -- one-shot actual-speed self-check time
-local spdRev = 0         -- reversion counter for the self-check
+local spdEat = 0         -- frames where velocity writes got eaten
+local spdPivot = false   -- position assist engaged (writes reverted)
+local spdRP = nil        -- cached RaycastParams for the assist gate
 
 local function findCM(ch)
     return ch and ch:FindFirstChildOfClass("ControllerManager")
@@ -3106,43 +3107,6 @@ local function releaseFlyLV(restore)
     end
 end
 
--- speed drive: same mechanism as fly, horizontal-only (Line mode)
-local function ensureSpdLV(hrp)
-    local att = hrp:FindFirstChild("RootAttachment")
-    if not att then
-        -- custom rigs may not ship a RootAttachment - make our own so
-        -- the drive can ALWAYS exist (force applies to the assembly)
-        att = hrp:FindFirstChild("HAVOC_DriveAttachment")
-        if not att then
-            att = Instance.new("Attachment")
-            att.Name = "HAVOC_DriveAttachment"
-            att.Parent = hrp
-        end
-    end
-    if spdLV and spdOwner == hrp then return spdLV end
-    if spdLV then
-        pcall(function() spdLV:Destroy() end)
-        spdLV = nil
-    end
-    local lv = Instance.new("LinearVelocity")
-    lv.MaxForce = 1e5
-    lv.RelativeTo = Enum.ActuatorRelativeTo.World
-    lv.Attachment0 = att
-    lv.Parent = hrp
-    spdLV = lv
-    spdOwner = hrp
-    return lv
-end
-
-local function releaseSpd()
-    if spdLV then pcall(function() spdLV:Destroy() end) end
-    spdLV = nil
-    spdOwner = nil
-    spdShown = 0
-    spdCheck = 0
-    spdRev = 0
-end
-
 local function charMover(dt)
     if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
     dt = tonumber(dt) or (1 / 60)
@@ -3150,7 +3114,6 @@ local function charMover(dt)
     local speeding = Config.Movement.SpeedHack == true
     if (not flying and not speeding) or genv.__HAVOC_OAKLANDS_FREECAM == true then
         if flyLV then releaseFlyLV(true) end
-        if spdLV then releaseSpd() end
         return
     end
     local char = LocalPlayer.Character
@@ -3158,11 +3121,9 @@ local function charMover(dt)
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or not hum or hum.Health <= 0 or hum.SeatPart then
         if flyLV then releaseFlyLV(true) end
-        if spdLV then releaseSpd() end
         return
     end
     if flying then
-        if spdLV then releaseSpd() end
         local cam = Workspace.CurrentCamera
         if not cam then return end
         local speed = math.clamp(tonumber(Config.Movement.FlySpeed) or 48, 0, FLY_CAP)
@@ -3196,60 +3157,57 @@ local function charMover(dt)
         pcall(function() hrp.AssemblyLinearVelocity = dir end)
     elseif speeding then
         if flyLV then releaseFlyLV(true) end
-        -- THE SPEED HACK - same channel that makes fly work: our own
-        -- LinearVelocity. Vector mode + PerAxis force limits: full
-        -- force on world X/Z, ZERO force on Y - the drive steers
-        -- freely (no rail) while gravity, jumps and slopes stay fully
-        -- natural. Release = zero target = hard stop.
-        local cam = Workspace.CurrentCamera
+        -- "give the character velocity to where it is going": every
+        -- frame set the horizontal velocity to the game's OWN movement
+        -- direction (Humanoid.MoveDirection) at the slider speed, Y
+        -- untouched, and NOTHING is written while no keys are held - so
+        -- idling can never lock you. If the game reverts those writes
+        -- (auto-detected), a position assist takes over: the extra
+        -- distance (speed - the game's own 16) is pivoted on along
+        -- MoveDirection each frame - the teleport family that is
+        -- proven to move the character here - wall-gated by a forward
+        -- ray so you never phase through anything.
         local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
-        local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
-        local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
-        local dir = nil
-        if cam and (mx ~= 0 or mz ~= 0) then
-            local fwd = Vector3.new(cam.LookVector.X, 0, cam.LookVector.Z)
-            local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z)
-            if fwd.Magnitude > 0 then fwd = fwd.Unit end
-            if right.Magnitude > 0 then right = right.Unit end
-            dir = fwd * mz + right * mx
-            if dir.Magnitude > 0 then dir = dir.Unit end
-        end
-        local lv = ensureSpdLV(hrp)
-        -- backing force drive (Vector + PerAxis: full force on world X/Z,
-        -- ZERO force on Y - it can never fight gravity or a jump)
-        if lv then
-            local ok = pcall(function()
-                lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
-                lv.ForceLimitsEnabled = true
-                lv.ForceLimitMode = Enum.ForceLimitMode.PerAxis
-                lv.MaxAxesForce = Vector3.new(1e5, 0, 1e5)
-                lv.Enabled = true
-                lv.VectorVelocity = Vector3.new(dir and dir.X * speed or 0, 0, dir and dir.Z * speed or 0)
+        local mv = hum.MoveDirection
+        local hor = Vector3.new(mv.X, 0, mv.Z)
+        if hor.Magnitude > 0.01 then
+            hor = hor.Unit
+            local v = hrp.AssemblyLinearVelocity
+            local pre = Vector3.new(v.X, 0, v.Z).Magnitude
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(hor.X * speed, v.Y, hor.Z * speed)
             end)
-            if not ok then
-                pcall(function() lv.Enabled = false end)
+            if pre < math.min(speed, 32) * 0.6 then
+                spdEat = spdEat + 1
+            else
+                spdEat = math.max(0, spdEat - 2)
             end
-        end
-        -- AND add velocity straight onto the character every frame: a
-        -- chunk of the (target - current) horizontal delta is injected,
-        -- so the run visibly accelerates and steers instantly; on
-        -- release the same ramp pulls it back to zero (quick stop).
-        local v = hrp.AssemblyLinearVelocity
-        local tx = (dir and dir.X * speed) or 0
-        local tz = (dir and dir.Z * speed) or 0
-        local gain = math.clamp(dt * 22, 0, 1)
-        local horiz = Vector3.new(v.X, 0, v.Z).Magnitude
-        pcall(function()
-            hrp.AssemblyLinearVelocity = Vector3.new(v.X + (tx - v.X) * gain, v.Y, v.Z + (tz - v.Z) * gain)
-        end)
-        if dir and horiz < 0.55 * math.min(speed, 32) then
-            spdRev = spdRev + 1   -- keys held but no speed showing: being eaten
+            if not spdPivot and spdEat > 45 then
+                spdPivot = true
+                print("[oaklands] speed: game reverts velocity writes - position assist ON")
+            end
+            if spdPivot then
+                local extra = math.max(0, speed - 16) * dt
+                if extra > 0.001 then
+                    if not spdRP then
+                        spdRP = RaycastParams.new()
+                        spdRP.FilterType = Enum.RaycastFilterType.Exclude
+                    end
+                    spdRP.FilterDescendantsInstances = { char }
+                    local hit = Workspace:Raycast(hrp.Position, hor * (extra + 0.5), spdRP)
+                    if not hit then
+                        pcall(function()
+                            char:PivotTo(char:GetPivot() + hor * extra)
+                        end)
+                    end
+                end
+            end
         end
         if speed ~= spdShown then
             spdShown = speed
             spdCheck = os.clock() + 2
-            spdRev = 0
-            print(("[oaklands] speed: drive %d studs/s (velocity injection + backing force)"):format(speed))
+            spdEat = 0
+            print(("[oaklands] speed: drive %d studs/s (velocity toward MoveDirection)"):format(speed))
         elseif spdCheck > 0 and os.clock() >= spdCheck then
             spdCheck = 0
             local v2 = hrp.AssemblyLinearVelocity
@@ -3259,8 +3217,9 @@ local function charMover(dt)
                     k = k .. string.sub(kc.Name, 1, 1)
                 end
             end
-            print(("[oaklands] speed check: actual=%.0f studs/s keys=%s reverted=%d"):format(Vector3.new(v2.X, 0, v2.Z).Magnitude, k == "" and "-" or k, spdRev))
-            spdRev = 0
+            print(("[oaklands] speed check: actual=%.0f studs/s keys=%s assist=%s"):format(
+                Vector3.new(v2.X, 0, v2.Z).Magnitude, k == "" and "-" or k, spdPivot and "on" or "off"))
+            spdEat = 0
         end
     end
 end
@@ -3291,7 +3250,6 @@ onMoverCleanup(function()
         moverConn = nil
     end
     releaseFlyLV(true)
-    releaseSpd()
 end)
 
 -- ============================================================
