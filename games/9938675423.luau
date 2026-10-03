@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.44"
+local SCRIPT_VERSION = "oak-v29.45"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3621,16 +3621,19 @@ function SAFE.action(name, data, uuid)
 end
 
 -- ============================================================
--- AUTO HIT-MARKER  (V124 charge minigame - perfect timing)
+-- AUTO HIT-MARKER  (V124 charge minigame - humanized timing)
 -- ============================================================
 -- Every axe / pickaxe swing runs a Charge minigame: markers sweep the
 -- charge bar and each CLICK inside a marker's window fires
 -- Backpack:InformServer("HitMarkerAttempt") - the only thing the server
 -- hears. It times those attempts against its own marker schedule and
--- pays out charge speed, combo and extra hit damage. This plays it
--- perfectly: watch the live ToolIndicator (charge tween + marker
--- layout) and fire the attempt through SAFE the moment a marker
--- crosses - full bonus every swing, no clicks, no scanning.
+-- pays out charge speed, combo and extra hit damage. The first build
+-- fired every attempt at machine precision and was live-kicked for it
+-- (a perfect-every-swing pattern is not human). This version plays it
+-- like an exceptional human instead: aims near each marker's centre
+-- with jitter, deliberately botches ~13% of markers, only acts while
+-- the mouse button is actually held, and starts fresh every swing -
+-- ~87% accuracy, far above real clicking, without the robot pattern.
 local HM_STATE = genv.__HAVOC_OAKLANDS_HM
 if type(HM_STATE) ~= "table" then
     HM_STATE = {
@@ -3642,6 +3645,8 @@ if type(HM_STATE) ~= "table" then
     }
     genv.__HAVOC_OAKLANDS_HM = HM_STATE
 end
+local HM_SKIP = 0.13   -- fraction of markers deliberately botched (looks human)
+local HM_LAST = setmetatable({}, { __mode = "k" })  -- ToolIndicator -> last progress
 
 local function findChopTools()
     local tools = HM_STATE.tools
@@ -3680,6 +3685,9 @@ end
 
 local function hmStep()
     if Config.World.AutoHitMarker ~= true then return end
+    -- only while genuinely holding the mouse button - attempts then only
+    -- ever appear during real primary-action input, like a real clicker
+    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
     for _, inst in ipairs(findChopTools()) do
         local ti = rawget(inst, "ToolIndicator")
         if type(ti) == "table" then
@@ -3689,18 +3697,36 @@ local function hmStep()
             local swingTime = tonumber(rawget(ti, "SwingTime"))
             if type(markers) == "table" and count > 0 and tween and swingTime and swingTime > 0 then
                 local progress = math.clamp((tonumber(tween.Value) or 0) / swingTime, 0, 1)
-                local sent = HM_STATE.sent[ti]
+                -- per-swing state: keyed by the markers table (fresh each
+                -- swing); if the game reuses the table, the progress
+                -- regression below still resets it
+                local lp = HM_LAST[ti]
+                if lp and progress < lp - 0.25 then
+                    HM_STATE.sent[markers] = nil
+                end
+                HM_LAST[ti] = progress
+                local sent = HM_STATE.sent[markers]
                 if not sent then
                     sent = {}
-                    HM_STATE.sent[ti] = sent
+                    HM_STATE.sent[markers] = sent
                 end
                 local uuid = rawget(inst, "UUID")
                 for i = 1, count do
                     local m = markers[i]
-                    if m and not sent[i] then
+                    if m then
                         local pos = m.Position.X.Scale
                         local half = m.Size.X.Scale / 2
-                        if progress >= (pos - half) and progress <= (pos + half) then
+                        local sentI = sent[i]
+                        if sentI == nil then
+                            if math.random() < HM_SKIP then
+                                sent[i] = false   -- botched on purpose
+                            else
+                                -- aim near the centre with human jitter
+                                sent[i] = pos + (math.random() - 0.5) * half * 0.7
+                            end
+                            sentI = sent[i]
+                        end
+                        if type(sentI) == "number" and progress >= sentI and progress <= (pos + half) then
                             sent[i] = true
                             if uuid ~= nil then
                                 HM_STATE.fired = HM_STATE.fired + 1
