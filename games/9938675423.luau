@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.34"
+local SCRIPT_VERSION = "oak-v29.35"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -257,6 +257,11 @@ local DEFAULTS = {
         WalkSpeed   = 16,
         JumpPower   = 50,
         SprintBoost = 1,
+        Fly         = false,
+        FlySpeed    = 48,
+        FlyVertical = 48,
+        SpeedHack   = false,
+        SpeedValue  = 40,
     },
     Drag = {
         Enhanced = false,
@@ -287,10 +292,12 @@ local DEFAULTS = {
     Hotkeys = {
         Freecam = "RightControl",
         CamTP   = "T",
+        Fly     = "F",
     },
     HotkeyOn = {
         Freecam = true,
         CamTP   = true,
+        Fly     = true,
     },
     Misc = {
         Fullbright          = false,
@@ -517,6 +524,7 @@ local HOTKEYS = {
     { Id = "Freecam",    Desc = "Freecam toggle",   Key = Enum.KeyCode.RightControl, Enabled = true },
     { Id = "CamTP",      Desc = "Cam Teleport",     Key = Enum.KeyCode.T,            Enabled = true },
     { Id = "GrabTP",     Desc = "Grab Teleport",    Key = Enum.KeyCode.Y,            Enabled = true },
+    { Id = "Fly",        Desc = "Fly (velocity)",   Key = Enum.KeyCode.F,            Enabled = true },
 }
 local HOTKEY_BY_ID = {}
 for _, entry in ipairs(HOTKEYS) do
@@ -2304,6 +2312,20 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end)
 end))
 
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
+    pcall(function()
+        if UILib and UILib.handleRebindInput and UILib.handleRebindInput(input) then return end
+        if gameProcessed then return end
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        local hk = HOTKEY_BY_ID.Fly
+        if hk.Enabled == false then return end
+        if input.KeyCode ~= hk.Key then return end
+        Config.Movement.Fly = not Config.Movement.Fly
+        notify(Config.Movement.Fly and "Fly on" or "Fly off")
+    end)
+end))
+
 -- swallow movement keys while the freecam is on so the character stays put
 pcall(function()
     local ContextActionService = game:GetService("ContextActionService")
@@ -3017,6 +3039,56 @@ track(task.spawn(function()
             pcall(applyFullbright, true)
         end
     end
+end))
+
+-- ============================================================
+-- CHARACTER FLY + SPEED  (Project Delta method: velocity, no WalkSpeed)
+-- ============================================================
+-- Same family as an external speed/fly: writes AssemblyLinearVelocity
+-- on PreSimulation so the physics step carries the character. No
+-- WalkSpeed / jump-state writes (those are the ones that get movement
+-- features banned here) and no CFrame skips - collisions always apply,
+-- the character is never forced inside geometry.
+local FLY_CAP = 150
+
+local function charMover()
+    if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
+    local flying = Config.Movement.Fly == true
+    local speeding = Config.Movement.SpeedHack == true
+    if not flying and not speeding then return end
+    if genv.__HAVOC_OAKLANDS_FREECAM == true then return end
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum or hum.Health <= 0 then return end
+    if hum.SeatPart then return end
+    if flying then
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+        local speed = math.clamp(tonumber(Config.Movement.FlySpeed) or 48, 0, FLY_CAP)
+        local vspeed = math.clamp(tonumber(Config.Movement.FlyVertical) or 48, 0, FLY_CAP)
+        local cf = cam.CFrame
+        local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
+        local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
+        local ud = (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
+        local dir = cf.LookVector * (mz * speed) + cf.RightVector * (mx * speed) + Vector3.new(0, ud * vspeed, 0)
+        if dir.Magnitude > FLY_CAP then dir = dir.Unit * FLY_CAP end
+        pcall(function() hrp.AssemblyLinearVelocity = dir end)
+    elseif speeding then
+        local target = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        local vel = hrp.AssemblyLinearVelocity
+        local horiz = Vector3.new(vel.X, 0, vel.Z)
+        if horiz.Magnitude > 2 then
+            local push = horiz.Unit * target
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(push.X, hrp.AssemblyLinearVelocity.Y, push.Z)
+            end)
+        end
+    end
+end
+
+track(RunService.PreSimulation:Connect(function()
+    pcall(charMover)
 end))
 
 -- ============================================================
@@ -3793,6 +3865,32 @@ local function buildMenu()
     slider(pmv, "Cam Speed",
         function() return Config.Camera.Speed end,
         function(v) Config.Camera.Speed = v end, 5, 25, 500,
+        function(v) return ("%d studs/s"):format(v) end)
+    section(pmv, "Character")
+    toggle(pmv, "Fly (velocity)",
+        function() return Config.Movement.Fly end,
+        function(v)
+            Config.Movement.Fly = v
+            notify(v and ("Fly on - WASD flies along the camera, Space / Ctrl up and down (" .. HOTKEY_BY_ID.Fly.Key.Name .. " toggles)") or "Fly off")
+        end, HOTKEY_BY_ID.Fly)
+    keybindRow(pmv, HOTKEY_BY_ID.Fly)
+    slider(pmv, "Fly speed",
+        function() return Config.Movement.FlySpeed end,
+        function(v) Config.Movement.FlySpeed = v end, 2, 10, 150,
+        function(v) return ("%d studs/s"):format(v) end)
+    slider(pmv, "Fly vertical",
+        function() return Config.Movement.FlyVertical end,
+        function(v) Config.Movement.FlyVertical = v end, 2, 10, 150,
+        function(v) return ("%d studs/s"):format(v) end)
+    toggle(pmv, "Speed hack",
+        function() return Config.Movement.SpeedHack end,
+        function(v)
+            Config.Movement.SpeedHack = v
+            notify(v and "Speed hack on - run and it goes fast" or "Speed back to vanilla")
+        end)
+    slider(pmv, "Speed",
+        function() return Config.Movement.SpeedValue end,
+        function(v) Config.Movement.SpeedValue = v end, 2, 16, 150,
         function(v) return ("%d studs/s"):format(v) end)
     -- ---------------- Misc ----------------
     section(pmi, "Menu")
