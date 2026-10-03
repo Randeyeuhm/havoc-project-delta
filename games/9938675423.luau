@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.33"
+local SCRIPT_VERSION = "oak-v29.34"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -240,6 +240,7 @@ local DEFAULTS = {
         ItemMaxDist    = 250,
         EnemyESP       = false,
         EnemyMaxDist   = 500,
+        AutoHitMarker  = false, -- plays the V124 charge minigame perfectly (chopping power)
     },
     Players = {
         Enable    = false,
@@ -3357,6 +3358,132 @@ function SAFE.ask(name, data)
     return res
 end
 
+-- SAFE.action: the tool envelope (InformServer) without the scanner -
+-- BackpackTellServer {Name = hash(action), Data, UUID = tool UUID}
+function SAFE.action(name, data, uuid)
+    safeDeps()
+    if type(SAFE.key) ~= "string" then
+        safeWatchInf()
+        if type(SAFE.key) ~= "string" then
+            local inf = ReplicatedStorage:FindFirstChild("INF")
+            if inf then pcall(function() inf:FireServer("Req") end) end
+            return false
+        end
+    end
+    local keyMod = SAFE.keyMod
+    if type(keyMod) ~= "function" then return false end
+    return SAFE.fire("BackpackTellServer", {
+        Name = keyMod(name .. SAFE.key, SAFE.key),
+        Data = data,
+        UUID = uuid,
+    })
+end
+
+-- ============================================================
+-- AUTO HIT-MARKER  (V124 charge minigame - perfect timing)
+-- ============================================================
+-- Every axe / pickaxe swing runs a Charge minigame: markers sweep the
+-- charge bar and each CLICK inside a marker's window fires
+-- Backpack:InformServer("HitMarkerAttempt") - the only thing the server
+-- hears. It times those attempts against its own marker schedule and
+-- pays out charge speed, combo and extra hit damage. This plays it
+-- perfectly: watch the live ToolIndicator (charge tween + marker
+-- layout) and fire the attempt through SAFE the moment a marker
+-- crosses - full bonus every swing, no clicks, no scanning.
+local HM_STATE = genv.__HAVOC_OAKLANDS_HM
+if type(HM_STATE) ~= "table" then
+    HM_STATE = {
+        tools = nil,
+        nextScan = 0,
+        sent = setmetatable({}, { __mode = "k" }),
+        warnAt = 0,
+        fired = 0,
+    }
+    genv.__HAVOC_OAKLANDS_HM = HM_STATE
+end
+
+local function findChopTools()
+    local tools = HM_STATE.tools
+    if tools then
+        local alive = false
+        for _, t in ipairs(tools) do
+            if rawget(t, "HitMarkerCombo") ~= nil and rawget(t, "MaxSwingTime") ~= nil then
+                alive = true
+                break
+            end
+        end
+        if alive and os.clock() < (HM_STATE.nextScan or 0) then return tools end
+    end
+    HM_STATE.nextScan = os.clock() + 5
+    local fn = getgc
+    if type(fn) ~= "function" then return tools or {} end
+    local heaps = {}
+    local ok1, g1 = pcall(fn, true)
+    if ok1 and type(g1) == "table" then table.insert(heaps, g1) end
+    local ok2, g2 = pcall(fn)
+    if ok2 and type(g2) == "table" and g2 ~= g1 then table.insert(heaps, g2) end
+    local out = {}
+    for _, heap in ipairs(heaps) do
+        for _, v in ipairs(heap) do
+            if type(v) == "table"
+                and rawget(v, "HitMarkerCombo") ~= nil
+                and rawget(v, "MaxSwingTime") ~= nil
+                and (rawget(v, "AxePower") ~= nil or rawget(v, "PickaxePower") ~= nil) then
+                out[#out + 1] = v
+            end
+        end
+    end
+    HM_STATE.tools = out
+    return out
+end
+
+local function hmStep()
+    if Config.World.AutoHitMarker ~= true then return end
+    for _, inst in ipairs(findChopTools()) do
+        local ti = rawget(inst, "ToolIndicator")
+        if type(ti) == "table" then
+            local markers = rawget(ti, "HitMarkers")
+            local count = tonumber(rawget(ti, "HitMarkerCount")) or 0
+            local tween = rawget(ti, "ChargeTween")
+            local swingTime = tonumber(rawget(ti, "SwingTime"))
+            if type(markers) == "table" and count > 0 and tween and swingTime and swingTime > 0 then
+                local progress = math.clamp((tonumber(tween.Value) or 0) / swingTime, 0, 1)
+                local sent = HM_STATE.sent[ti]
+                if not sent then
+                    sent = {}
+                    HM_STATE.sent[ti] = sent
+                end
+                local uuid = rawget(inst, "UUID")
+                for i = 1, count do
+                    local m = markers[i]
+                    if m and not sent[i] then
+                        local pos = m.Position.X.Scale
+                        local half = m.Size.X.Scale / 2
+                        if progress >= (pos - half) and progress <= (pos + half) then
+                            sent[i] = true
+                            if uuid ~= nil then
+                                HM_STATE.fired = HM_STATE.fired + 1
+                                local ok = SAFE.action("HitMarkerAttempt", {}, uuid)
+                                if not ok and os.clock() - HM_STATE.warnAt > 3 then
+                                    HM_STATE.warnAt = os.clock()
+                                    print("[oaklands] hit-marker: SAFE key not ready yet - attempt skipped")
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+track(task.spawn(function()
+    while genv.__HAVOC_OAKLANDS_GEN == MY_GEN do
+        task.wait(0.02)
+        pcall(hmStep)
+    end
+end))
+
 -- ============================================================
 -- MENU
 -- ============================================================
@@ -3522,6 +3649,14 @@ local function buildMenu()
         function() return Config.World.EnemyMaxDist end,
         function(v) Config.World.EnemyMaxDist = v end, 25, 50, 2000,
         function(v) return ("%dm"):format(v) end)
+
+    section(pw, "Chopping")
+    toggle(pw, "Auto hit-marker (chopping power)",
+        function() return Config.World.AutoHitMarker end,
+        function(v)
+            Config.World.AutoHitMarker = v
+            notify(v and "Auto hit-marker on - perfect swings pay full bonus" or "Auto hit-marker off")
+        end)
 
     -- ---------------- Players ----------------
     section(pp, "Player ESP")
