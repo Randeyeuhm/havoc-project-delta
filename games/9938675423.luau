@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.43"
+local SCRIPT_VERSION = "oak-v29.44"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3069,8 +3069,11 @@ end))
 -- written while no keys are held, so idling can never lock. If the
 -- game reverts those writes it is auto-detected and a position assist
 -- (pivot the extra speed-16 distance per frame along MoveDirection,
--- forward-ray gated) takes over. No WalkSpeed / jump-state writes.
-local FLY_CAP = 150
+-- forward-ray gated) takes over. Speeds cap at 500 studs/s; holding
+-- LeftShift sprints (x1.5) on both fly and speed. No WalkSpeed /
+-- jump-state writes.
+local FLY_CAP = 500
+local SPRINT_MULT = 1.5  -- hold LeftShift: 1.5x for fly and speed hack
 local flyLV = nil        -- fly drive (Vector-constrained LinearVelocity)
 local flyOwner = nil     -- the HRP it is attached to
 local spdShown = 0       -- last speed value printed
@@ -3126,8 +3129,9 @@ local function charMover(dt)
     if flying then
         local cam = Workspace.CurrentCamera
         if not cam then return end
-        local speed = math.clamp(tonumber(Config.Movement.FlySpeed) or 48, 0, FLY_CAP)
-        local vspeed = math.clamp(tonumber(Config.Movement.FlyVertical) or 48, 0, FLY_CAP)
+        local mult = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and SPRINT_MULT or 1
+        local speed = math.min(math.clamp(tonumber(Config.Movement.FlySpeed) or 48, 0, FLY_CAP) * mult, FLY_CAP)
+        local vspeed = math.min(math.clamp(tonumber(Config.Movement.FlyVertical) or 48, 0, FLY_CAP) * mult, FLY_CAP)
         local cf = cam.CFrame
         local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
         local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
@@ -3167,7 +3171,11 @@ local function charMover(dt)
         -- MoveDirection each frame - the teleport family that is
         -- proven to move the character here - wall-gated by a forward
         -- ray so you never phase through anything.
-        local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        local baseSpeed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        local speed = baseSpeed
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+            speed = math.min(speed * SPRINT_MULT, FLY_CAP)
+        end
         local mv = hum.MoveDirection
         local hor = Vector3.new(mv.X, 0, mv.Z)
         if hor.Magnitude > 0.01 then
@@ -3203,11 +3211,11 @@ local function charMover(dt)
                 end
             end
         end
-        if speed ~= spdShown then
-            spdShown = speed
+        if baseSpeed ~= spdShown then
+            spdShown = baseSpeed
             spdCheck = os.clock() + 2
             spdEat = 0
-            print(("[oaklands] speed: drive %d studs/s (velocity toward MoveDirection)"):format(speed))
+            print(("[oaklands] speed: drive %d studs/s - hold Shift to sprint (velocity toward MoveDirection)"):format(baseSpeed))
         elseif spdCheck > 0 and os.clock() >= spdCheck then
             spdCheck = 0
             local v2 = hrp.AssemblyLinearVelocity
@@ -4033,26 +4041,26 @@ local function buildMenu()
         function(v)
             Config.Movement.Fly = v
             if not v then releaseFlyLV(true) end
-            notify(v and ("Fly on - WASD flies along the camera, Space / Ctrl up and down (" .. HOTKEY_BY_ID.Fly.Key.Name .. " toggles)") or "Fly off")
+            notify(v and ("Fly on - WASD flies along the camera, Space / Ctrl up and down, Shift sprints (" .. HOTKEY_BY_ID.Fly.Key.Name .. " toggles)") or "Fly off")
         end, HOTKEY_BY_ID.Fly)
     keybindRow(pmv, HOTKEY_BY_ID.Fly)
     slider(pmv, "Fly speed",
         function() return Config.Movement.FlySpeed end,
-        function(v) Config.Movement.FlySpeed = v end, 2, 10, 150,
+        function(v) Config.Movement.FlySpeed = v end, 2, 10, 500,
         function(v) return ("%d studs/s"):format(v) end)
     slider(pmv, "Fly vertical",
         function() return Config.Movement.FlyVertical end,
-        function(v) Config.Movement.FlyVertical = v end, 2, 10, 150,
+        function(v) Config.Movement.FlyVertical = v end, 2, 10, 500,
         function(v) return ("%d studs/s"):format(v) end)
     toggle(pmv, "Speed hack",
         function() return Config.Movement.SpeedHack end,
         function(v)
             Config.Movement.SpeedHack = v
-            notify(v and "Speed hack on - run and it goes fast" or "Speed back to vanilla")
+            notify(v and "Speed hack on - run and it goes fast - hold Shift to sprint" or "Speed back to vanilla")
         end)
     slider(pmv, "Speed",
         function() return Config.Movement.SpeedValue end,
-        function(v) Config.Movement.SpeedValue = v end, 2, 16, 150,
+        function(v) Config.Movement.SpeedValue = v end, 2, 16, 500,
         function(v) return ("%d studs/s"):format(v) end)
     -- ---------------- Misc ----------------
     section(pmi, "Menu")
