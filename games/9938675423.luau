@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.35"
+local SCRIPT_VERSION = "oak-v29.36"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3075,15 +3075,37 @@ local function charMover()
         if dir.Magnitude > FLY_CAP then dir = dir.Unit * FLY_CAP end
         pcall(function() hrp.AssemblyLinearVelocity = dir end)
     elseif speeding then
-        local target = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+        -- direction = live key input along the camera, rewritten every
+        -- frame: turning redirects instantly and releasing the keys stops
+        -- the push, so the game's own braking brings you to a stop (the
+        -- old velocity-amplifying version kept boosting the residual
+        -- momentum - that was the "keeps going / can't steer" bug)
+        local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
+        local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
         local vel = hrp.AssemblyLinearVelocity
-        local horiz = Vector3.new(vel.X, 0, vel.Z)
-        if horiz.Magnitude > 2 then
-            local push = horiz.Unit * target
-            pcall(function()
-                hrp.AssemblyLinearVelocity = Vector3.new(push.X, hrp.AssemblyLinearVelocity.Y, push.Z)
-            end)
+        if mx == 0 and mz == 0 then
+            -- nothing held: bleed off excess speed so stopping feels instant
+            local horiz = Vector3.new(vel.X, 0, vel.Z)
+            if horiz.Magnitude > 30 then
+                pcall(function()
+                    hrp.AssemblyLinearVelocity = Vector3.new(vel.X * 0.9, vel.Y, vel.Z * 0.9)
+                end)
+            end
+            return
         end
+        local target = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        local fwd = Vector3.new(cam.LookVector.X, 0, cam.LookVector.Z)
+        local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z)
+        if fwd.Magnitude > 0 then fwd = fwd.Unit end
+        if right.Magnitude > 0 then right = right.Unit end
+        local dir = fwd * mz + right * mx
+        if dir.Magnitude <= 0 then return end
+        dir = dir.Unit
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.new(dir.X * target, vel.Y, dir.Z * target)
+        end)
     end
 end
 
