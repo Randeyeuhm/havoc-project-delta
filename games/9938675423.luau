@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.37"
+local SCRIPT_VERSION = "oak-v29.38"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3053,13 +3053,17 @@ end))
 -- steps into geometry. No WalkSpeed / jump-state writes anywhere
 -- (that is the channel this game bans for).
 local FLY_CAP = 150
+local lastBMS = 0
 
 local function charMover(dt)
     if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
     dt = tonumber(dt) or (1 / 60)
     local flying = Config.Movement.Fly == true
     local speeding = Config.Movement.SpeedHack == true
-    if not flying and not speeding then return end
+    if not flying and not speeding then
+        lastBMS = 0
+        return
+    end
     if genv.__HAVOC_OAKLANDS_FREECAM == true then return end
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -3079,58 +3083,22 @@ local function charMover(dt)
         if dir.Magnitude > FLY_CAP then dir = dir.Unit * FLY_CAP end
         pcall(function() hrp.AssemblyLinearVelocity = dir end)
     elseif speeding then
-        local cam = Workspace.CurrentCamera
-        if not cam then return end
-        local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
-        local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
-        local vel = hrp.AssemblyLinearVelocity
-        if mx == 0 and mz == 0 then
-            -- released: kill the horizontal glide instantly
-            if math.abs(vel.X) + math.abs(vel.Z) > 0.5 then
-                pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, vel.Y, 0) end)
-            end
-            return
-        end
-        -- position-stepped speed: velocity writes lose the fight against
-        -- the game's own mover while keys are held, but CFrame steps are
-        -- the family PROVEN to move the character here (teleports). Each
-        -- step is probe-checked so the character can never end up inside
-        -- geometry - walls block, ledges get a step-up, nothing phases.
+        -- THE REAL LEVER (dump-decoded): Oaklands moves the character with
+        -- the ENGINE's ControllerManager / GroundController - there is no
+        -- WalkSpeed mover to fight. The game's own LuauHumanoid syncs
+        -- `cm.BaseMoveSpeed = Humanoid.WalkSpeed` every Stepped; we write
+        -- BaseMoveSpeed right before each physics step instead, so the
+        -- engine itself moves you at the slider speed: full animations,
+        -- real collisions and slopes, instant steering, instant stops.
+        -- No WalkSpeed write, no velocity wars, no CFrame skips.
+        local cm = char:FindFirstChild("ControllerManager")
+        if not cm then return end
         local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
-        local fwd = Vector3.new(cam.LookVector.X, 0, cam.LookVector.Z)
-        local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z)
-        if fwd.Magnitude > 0 then fwd = fwd.Unit end
-        if right.Magnitude > 0 then right = right.Unit end
-        local dir = fwd * mz + right * mx
-        if dir.Magnitude <= 0 then return end
-        dir = dir.Unit
-        local step = math.min(speed * dt, 2.5)
-        local from = hrp.Position
-        local params = OverlapParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { char }
-        local function spotClear(p)
-            local ok, hits = pcall(function() return Workspace:GetPartBoundsInRadius(p, 1.4, params) end)
-            if not ok or type(hits) ~= "table" then return false end
-            for _, h in ipairs(hits) do
-                if h.CanCollide ~= false and not h:IsDescendantOf(char) then
-                    return false
-                end
-            end
-            return true
+        if speed ~= lastBMS then
+            lastBMS = speed
+            print(("[oaklands] speed: engine move speed -> %d (ControllerManager.BaseMoveSpeed)"):format(speed))
         end
-        local land = from + dir * step
-        if not spotClear(land) then
-            land = from + dir * step + Vector3.new(0, 1.5, 0)  -- low ledge / slope: climb it
-            if not spotClear(land) then
-                land = from + dir * (step * 0.35)               -- tight spot: crawl
-                if not spotClear(land) then return end
-            end
-        end
-        pcall(function()
-            hrp.CFrame = CFrame.new(land, land + hrp.CFrame.LookVector)
-            hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
-        end)
+        pcall(function() cm.BaseMoveSpeed = speed end)
     end
 end
 
