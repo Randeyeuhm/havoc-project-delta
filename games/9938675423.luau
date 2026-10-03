@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.40"
+local SCRIPT_VERSION = "oak-v29.41"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3063,20 +3063,20 @@ end))
 -- ============================================================
 -- Velocity PROPERTY writes get re-servoed away by the game's mover
 -- every physics step (that is why every earlier velocity/cframe speed
--- attempt felt dead) - but a LinearVelocity INSTANCE with a huge
--- MaxForce applies a FORCE the mover cannot take back. Fly proved the
--- channel works. Speed now uses the exact same recipe: a second
--- LinearVelocity, Line-constrained so only the horizontal axis is
--- driven - you run at the slider speed along the camera, while jumps,
--- falls and slopes keep their natural Y; release = hard stop.
+-- attempt felt dead) - but a LinearVelocity INSTANCE with a big force
+-- applies a FORCE the mover cannot take back. Fly proved the channel
+-- works. Speed uses the same recipe with PerAxis force limits: full
+-- force on the world X/Z axes, ZERO force on Y - the drive pushes you
+-- along the camera at the slider speed and steers freely, while the
+-- game's own gravity, jumps, falls and slopes stay fully natural.
 -- No WalkSpeed / jump-state writes anywhere (that is the ban channel).
 local FLY_CAP = 150
 local flyLV = nil        -- fly drive (Vector-constrained LinearVelocity)
 local flyOwner = nil     -- the HRP it is attached to
-local spdLV = nil        -- speed drive (Line-constrained LinearVelocity)
+local spdLV = nil        -- speed drive (Vector + PerAxis force limits)
 local spdOwner = nil     -- the HRP it is attached to
-local spdDir = Vector3.new(1, 0, 0)  -- last drive direction
 local spdShown = 0       -- last speed value printed
+local spdCheck = 0       -- one-shot actual-speed self-check time
 
 local function findCM(ch)
     return ch and ch:FindFirstChildOfClass("ControllerManager")
@@ -3130,6 +3130,7 @@ local function releaseSpd()
     spdLV = nil
     spdOwner = nil
     spdShown = 0
+    spdCheck = 0
 end
 
 local function charMover(dt)
@@ -3186,10 +3187,10 @@ local function charMover(dt)
     elseif speeding then
         if flyLV then releaseFlyLV(true) end
         -- THE SPEED HACK - same channel that makes fly work: our own
-        -- LinearVelocity (huge MaxForce = a force the mover cannot
-        -- take back). Line-constrained: only the horizontal axis is
-        -- driven, so the game's own jumps / falls / slopes keep their
-        -- natural Y. Release = LineVelocity 0 = hard stop.
+        -- LinearVelocity. Vector mode + PerAxis force limits: full
+        -- force on world X/Z, ZERO force on Y - the drive steers
+        -- freely (no rail) while gravity, jumps and slopes stay fully
+        -- natural. Release = zero target = hard stop.
         local cam = Workspace.CurrentCamera
         local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
         local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
@@ -3203,17 +3204,21 @@ local function charMover(dt)
             dir = fwd * mz + right * mx
             if dir.Magnitude > 0 then dir = dir.Unit end
         end
-        if dir then spdDir = dir end
         local lv = ensureSpdLV(hrp)
         if not lv then return end
+        -- Vector + PerAxis: X/Z full force, Y zero force. RelativeTo is
+        -- World so the axes are world X/Y/Z; the Y limit of 0 means the
+        -- constraint can never push against gravity or a jump.
         local ok = pcall(function()
-            lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Line
+            lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+            lv.ForceLimitsEnabled = true
+            lv.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+            lv.MaxAxesForce = Vector3.new(1e5, 0, 1e5)
             lv.Enabled = true
-            lv.LineDirection = spdDir
-            lv.LineVelocity = dir and speed or 0
+            lv.VectorVelocity = Vector3.new(dir and dir.X * speed or 0, 0, dir and dir.Z * speed or 0)
         end)
         if not ok then
-            -- executor/version without Line mode: degrade to plain feel
+            -- executor without PerAxis limits: degrade to plain feel
             local vy = hrp.AssemblyLinearVelocity.Y
             pcall(function()
                 hrp.AssemblyLinearVelocity = Vector3.new(dir and dir.X * speed or 0, vy, dir and dir.Z * speed or 0)
@@ -3221,7 +3226,18 @@ local function charMover(dt)
         end
         if speed ~= spdShown then
             spdShown = speed
+            spdCheck = os.clock() + 2
             print(("[oaklands] speed: LinearVelocity drive %d studs/s - hold WASD to run along the camera"):format(speed))
+        elseif spdCheck > 0 and os.clock() >= spdCheck then
+            spdCheck = 0
+            local v = hrp.AssemblyLinearVelocity
+            local k = ""
+            for _, kc in ipairs({ Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D }) do
+                if UserInputService:IsKeyDown(kc) then
+                    k = k .. string.sub(kc.Name, 1, 1)
+                end
+            end
+            print(("[oaklands] speed check: actual=%.0f studs/s keys=%s"):format(Vector3.new(v.X, 0, v.Z).Magnitude, k == "" and "-" or k))
         end
     end
 end
