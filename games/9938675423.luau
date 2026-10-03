@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.39"
+local SCRIPT_VERSION = "oak-v29.40"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3061,31 +3061,22 @@ end))
 -- ============================================================
 -- CHARACTER FLY + SPEED
 -- ============================================================
--- ============================================================
--- CHARACTER FLY + SPEED
--- ============================================================
--- Movement system (dump-decoded, V124): the character is moved by the
--- ENGINE's ControllerManager (children = GroundController / AirController
--- + sensors). The game's own LuauHumanoid re-writes
--- `cm.BaseMoveSpeed = Humanoid.WalkSpeed` inside its Stepped handler
--- EVERY frame - and Stepped == PreSimulation (same signal, handlers fire
--- in registration order, the LAST write before the physics step wins).
---   SPEED = keep our BaseMoveSpeed write registered AFTER the game's
---   (rebound one frame after every spawn - it re-registers per life),
---   then the engine itself runs you at the slider speed: full
---   animations, real collisions/slopes, instant steering and stops.
---   FLY   = take the game's controller offline while flying and drive
---   the character with our own LinearVelocity on the RootAttachment -
---   the same engine mechanism the game's own Idle state uses to ride
---   platforms - so the mover cannot re-servo the velocity away.
+-- Velocity PROPERTY writes get re-servoed away by the game's mover
+-- every physics step (that is why every earlier velocity/cframe speed
+-- attempt felt dead) - but a LinearVelocity INSTANCE with a huge
+-- MaxForce applies a FORCE the mover cannot take back. Fly proved the
+-- channel works. Speed now uses the exact same recipe: a second
+-- LinearVelocity, Line-constrained so only the horizontal axis is
+-- driven - you run at the slider speed along the camera, while jumps,
+-- falls and slopes keep their natural Y; release = hard stop.
 -- No WalkSpeed / jump-state writes anywhere (that is the ban channel).
 local FLY_CAP = 150
-local lastBMS = 0        -- last confirmed BaseMoveSpeed value
-local noCMWarn = 0       -- throttle for "no ControllerManager" prints
-local teleNext = 0       -- next 1s speed self-check print
-local teleUntil = 0      -- stop self-checks this long after a change
-local flyLV = nil        -- our LinearVelocity while flying
+local flyLV = nil        -- fly drive (Vector-constrained LinearVelocity)
 local flyOwner = nil     -- the HRP it is attached to
+local spdLV = nil        -- speed drive (Line-constrained LinearVelocity)
+local spdOwner = nil     -- the HRP it is attached to
+local spdDir = Vector3.new(1, 0, 0)  -- last drive direction
+local spdShown = 0       -- last speed value printed
 
 local function findCM(ch)
     return ch and ch:FindFirstChildOfClass("ControllerManager")
@@ -3115,14 +3106,40 @@ local function releaseFlyLV(restore)
     end
 end
 
+-- speed drive: same mechanism as fly, horizontal-only (Line mode)
+local function ensureSpdLV(hrp)
+    local att = hrp:FindFirstChild("RootAttachment")
+    if not att then return nil end
+    if spdLV and spdOwner == hrp then return spdLV end
+    if spdLV then
+        pcall(function() spdLV:Destroy() end)
+        spdLV = nil
+    end
+    local lv = Instance.new("LinearVelocity")
+    lv.MaxForce = 1e5
+    lv.RelativeTo = Enum.ActuatorRelativeTo.World
+    lv.Attachment0 = att
+    lv.Parent = hrp
+    spdLV = lv
+    spdOwner = hrp
+    return lv
+end
+
+local function releaseSpd()
+    if spdLV then pcall(function() spdLV:Destroy() end) end
+    spdLV = nil
+    spdOwner = nil
+    spdShown = 0
+end
+
 local function charMover(dt)
     if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
     dt = tonumber(dt) or (1 / 60)
     local flying = Config.Movement.Fly == true
     local speeding = Config.Movement.SpeedHack == true
     if (not flying and not speeding) or genv.__HAVOC_OAKLANDS_FREECAM == true then
-        lastBMS = 0
         if flyLV then releaseFlyLV(true) end
+        if spdLV then releaseSpd() end
         return
     end
     local char = LocalPlayer.Character
@@ -3130,9 +3147,11 @@ local function charMover(dt)
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not hrp or not hum or hum.Health <= 0 or hum.SeatPart then
         if flyLV then releaseFlyLV(true) end
+        if spdLV then releaseSpd() end
         return
     end
     if flying then
+        if spdLV then releaseSpd() end
         local cam = Workspace.CurrentCamera
         if not cam then return end
         local speed = math.clamp(tonumber(Config.Movement.FlySpeed) or 48, 0, FLY_CAP)
@@ -3166,50 +3185,52 @@ local function charMover(dt)
         pcall(function() hrp.AssemblyLinearVelocity = dir end)
     elseif speeding then
         if flyLV then releaseFlyLV(true) end
-        -- THE REAL LEVER: the engine's own mover reads BaseMoveSpeed, and
-        -- the game re-syncs it from WalkSpeed every Stepped frame. Our
-        -- write is registered AFTER the game's (rebound each spawn - see
-        -- below), so the engine runs you at the slider speed. No
-        -- WalkSpeed write, no velocity wars, no CFrame skips.
-        local cm = findCM(char)
-        if not cm then
-            if os.clock() >= noCMWarn then
-                noCMWarn = os.clock() + 2
-                print("[oaklands] speed: ControllerManager not on character...")
-            end
-            return
-        end
+        -- THE SPEED HACK - same channel that makes fly work: our own
+        -- LinearVelocity (huge MaxForce = a force the mover cannot
+        -- take back). Line-constrained: only the horizontal axis is
+        -- driven, so the game's own jumps / falls / slopes keep their
+        -- natural Y. Release = LineVelocity 0 = hard stop.
+        local cam = Workspace.CurrentCamera
         local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
-        pcall(function() cm.BaseMoveSpeed = speed end)
-        if speed ~= lastBMS then
-            lastBMS = speed
-            teleNext = os.clock() + 1
-            teleUntil = os.clock() + 12
-            local ok, rb = pcall(function() return cm.BaseMoveSpeed end)
-            print(("[oaklands] speed: BaseMoveSpeed -> %d (readback %s)"):format(speed, ok and tostring(rb) or "err"))
+        local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
+        local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
+        local dir = nil
+        if cam and (mx ~= 0 or mz ~= 0) then
+            local fwd = Vector3.new(cam.LookVector.X, 0, cam.LookVector.Z)
+            local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z)
+            if fwd.Magnitude > 0 then fwd = fwd.Unit end
+            if right.Magnitude > 0 then right = right.Unit end
+            dir = fwd * mz + right * mx
+            if dir.Magnitude > 0 then dir = dir.Unit end
         end
-        -- self-check: for the first seconds after a change, print the
-        -- ACTUAL horizontal speed so "is it working" is provable
-        if os.clock() >= teleNext and os.clock() <= teleUntil then
-            teleNext = os.clock() + 1
-            local v = hrp.AssemblyLinearVelocity
-            local h = Vector3.new(v.X, 0, v.Z).Magnitude
-            local k = ""
-            for _, kc in ipairs({ Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D }) do
-                if UserInputService:IsKeyDown(kc) then
-                    k = k .. string.sub(kc.Name, 1, 1)
-                end
-            end
-            print(("[oaklands] speed check: base=%d actual=%.0f studs/s keys=%s"):format(speed, h, k == "" and "-" or k))
+        if dir then spdDir = dir end
+        local lv = ensureSpdLV(hrp)
+        if not lv then return end
+        local ok = pcall(function()
+            lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Line
+            lv.Enabled = true
+            lv.LineDirection = spdDir
+            lv.LineVelocity = dir and speed or 0
+        end)
+        if not ok then
+            -- executor/version without Line mode: degrade to plain feel
+            local vy = hrp.AssemblyLinearVelocity.Y
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.new(dir and dir.X * speed or 0, vy, dir and dir.Z * speed or 0)
+            end)
+        end
+        if speed ~= spdShown then
+            spdShown = speed
+            print(("[oaklands] speed: LinearVelocity drive %d studs/s - hold WASD to run along the camera"):format(speed))
         end
     end
 end
 
 -- Stepped and PreSimulation are the same signal: handlers fire in
 -- registration order and the last write before the physics step wins.
--- LuauHumanoid re-registers its own Stepped connection on every spawn,
--- so ours must be (re)created a frame after every spawn to stay AFTER
--- the game's per-frame BaseMoveSpeed sync in the firing order.
+-- The game re-registers its per-frame handlers on every spawn, so ours
+-- is (re)created a frame after every spawn to stay last in that order
+-- (keeps our per-frame writes winning wherever ordering matters).
 local moverConn = nil
 local function rebindMover()
     if moverConn then
@@ -3231,6 +3252,7 @@ onMoverCleanup(function()
         moverConn = nil
     end
     releaseFlyLV(true)
+    releaseSpd()
 end)
 
 -- ============================================================
