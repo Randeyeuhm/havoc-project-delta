@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.38"
+local SCRIPT_VERSION = "oak-v29.39"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -218,6 +218,23 @@ genv.__HAVOC_OAKLANDS_DISCONNECT = DISCONNECT
 local function track(conn)
     DISCONNECT[#DISCONNECT + 1] = conn
     return conn
+end
+
+-- function-style cleanup for things that are not connections (e.g. the
+-- fly LinearVelocity must be destroyed on re-exec and on Unload, or the
+-- character would keep being driven with no script running)
+local OLD_MOVER_CLEANUP = genv.__HAVOC_OAKLANDS_MOVER_CLEANUP
+if type(OLD_MOVER_CLEANUP) == "table" then
+    for _, fn in ipairs(OLD_MOVER_CLEANUP) do
+        pcall(fn)
+    end
+    table.clear(OLD_MOVER_CLEANUP)
+end
+local MOVER_CLEANUP = {}
+genv.__HAVOC_OAKLANDS_MOVER_CLEANUP = MOVER_CLEANUP
+local function onMoverCleanup(fn)
+    MOVER_CLEANUP[#MOVER_CLEANUP + 1] = fn
+    return fn
 end
 
 -- ============================================================
@@ -3044,32 +3061,77 @@ end))
 -- ============================================================
 -- CHARACTER FLY + SPEED
 -- ============================================================
--- FLY = velocity writes on PreSimulation (Project Delta method).
--- SPEED = probe-checked position steps: the velocity-write version
--- lost the fight against the game's own mover while keys were held
--- (it only survived as glide on release), so v2 moves the character
--- by tiny CFrame steps with a collision probe - the teleport family
--- that is PROVEN to move the character in this game - and never
--- steps into geometry. No WalkSpeed / jump-state writes anywhere
--- (that is the channel this game bans for).
+-- ============================================================
+-- CHARACTER FLY + SPEED
+-- ============================================================
+-- Movement system (dump-decoded, V124): the character is moved by the
+-- ENGINE's ControllerManager (children = GroundController / AirController
+-- + sensors). The game's own LuauHumanoid re-writes
+-- `cm.BaseMoveSpeed = Humanoid.WalkSpeed` inside its Stepped handler
+-- EVERY frame - and Stepped == PreSimulation (same signal, handlers fire
+-- in registration order, the LAST write before the physics step wins).
+--   SPEED = keep our BaseMoveSpeed write registered AFTER the game's
+--   (rebound one frame after every spawn - it re-registers per life),
+--   then the engine itself runs you at the slider speed: full
+--   animations, real collisions/slopes, instant steering and stops.
+--   FLY   = take the game's controller offline while flying and drive
+--   the character with our own LinearVelocity on the RootAttachment -
+--   the same engine mechanism the game's own Idle state uses to ride
+--   platforms - so the mover cannot re-servo the velocity away.
+-- No WalkSpeed / jump-state writes anywhere (that is the ban channel).
 local FLY_CAP = 150
-local lastBMS = 0
+local lastBMS = 0        -- last confirmed BaseMoveSpeed value
+local noCMWarn = 0       -- throttle for "no ControllerManager" prints
+local teleNext = 0       -- next 1s speed self-check print
+local teleUntil = 0      -- stop self-checks this long after a change
+local flyLV = nil        -- our LinearVelocity while flying
+local flyOwner = nil     -- the HRP it is attached to
+
+local function findCM(ch)
+    return ch and ch:FindFirstChildOfClass("ControllerManager")
+end
+
+-- stop the fly drive; optionally hand the character back to the game's
+-- controller (ground or air, matching where the character ended up)
+local function releaseFlyLV(restore)
+    local had = flyLV ~= nil
+    if flyLV then
+        pcall(function() flyLV:Destroy() end)
+        flyLV = nil
+    end
+    if restore and flyOwner then
+        local ch = flyOwner.Parent
+        local cm = findCM(ch)
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if cm then
+            local airborne = hum and hum.FloorMaterial == Enum.Material.Air
+            local want = airborne and cm:FindFirstChild("AirController") or cm:FindFirstChild("GroundController")
+            pcall(function() cm.ActiveController = want end)
+        end
+    end
+    flyOwner = nil
+    if had then
+        print("[oaklands] fly: drive off")
+    end
+end
 
 local function charMover(dt)
     if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
     dt = tonumber(dt) or (1 / 60)
     local flying = Config.Movement.Fly == true
     local speeding = Config.Movement.SpeedHack == true
-    if not flying and not speeding then
+    if (not flying and not speeding) or genv.__HAVOC_OAKLANDS_FREECAM == true then
         lastBMS = 0
+        if flyLV then releaseFlyLV(true) end
         return
     end
-    if genv.__HAVOC_OAKLANDS_FREECAM == true then return end
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum or hum.Health <= 0 then return end
-    if hum.SeatPart then return end
+    if not hrp or not hum or hum.Health <= 0 or hum.SeatPart then
+        if flyLV then releaseFlyLV(true) end
+        return
+    end
     if flying then
         local cam = Workspace.CurrentCamera
         if not cam then return end
@@ -3081,30 +3143,95 @@ local function charMover(dt)
         local ud = (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) and 1 or 0)
         local dir = cf.LookVector * (mz * speed) + cf.RightVector * (mx * speed) + Vector3.new(0, ud * vspeed, 0)
         if dir.Magnitude > FLY_CAP then dir = dir.Unit * FLY_CAP end
+        -- release the game's mover while we fly - while it is active it
+        -- re-servos our velocity back every physics step (that is why
+        -- velocity-only fly was dead). It gets re-armed by the state
+        -- machine on its next state transition, so keep clearing it.
+        local cm = findCM(char)
+        if cm then pcall(function() cm.ActiveController = nil end) end
+        local att = hrp:FindFirstChild("RootAttachment")
+        if att then
+            if not flyLV or flyOwner ~= hrp then
+                if flyLV then pcall(function() flyLV:Destroy() end) end
+                flyLV = Instance.new("LinearVelocity")
+                flyLV.MaxForce = 1e5
+                flyLV.RelativeTo = Enum.ActuatorRelativeTo.World
+                flyLV.Attachment0 = att
+                flyLV.Parent = hrp
+                flyOwner = hrp
+                print("[oaklands] fly: LinearVelocity drive on (mover released)")
+            end
+            flyLV.VectorVelocity = dir
+        end
         pcall(function() hrp.AssemblyLinearVelocity = dir end)
     elseif speeding then
-        -- THE REAL LEVER (dump-decoded): Oaklands moves the character with
-        -- the ENGINE's ControllerManager / GroundController - there is no
-        -- WalkSpeed mover to fight. The game's own LuauHumanoid syncs
-        -- `cm.BaseMoveSpeed = Humanoid.WalkSpeed` every Stepped; we write
-        -- BaseMoveSpeed right before each physics step instead, so the
-        -- engine itself moves you at the slider speed: full animations,
-        -- real collisions and slopes, instant steering, instant stops.
-        -- No WalkSpeed write, no velocity wars, no CFrame skips.
-        local cm = char:FindFirstChild("ControllerManager")
-        if not cm then return end
+        if flyLV then releaseFlyLV(true) end
+        -- THE REAL LEVER: the engine's own mover reads BaseMoveSpeed, and
+        -- the game re-syncs it from WalkSpeed every Stepped frame. Our
+        -- write is registered AFTER the game's (rebound each spawn - see
+        -- below), so the engine runs you at the slider speed. No
+        -- WalkSpeed write, no velocity wars, no CFrame skips.
+        local cm = findCM(char)
+        if not cm then
+            if os.clock() >= noCMWarn then
+                noCMWarn = os.clock() + 2
+                print("[oaklands] speed: ControllerManager not on character...")
+            end
+            return
+        end
         local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        pcall(function() cm.BaseMoveSpeed = speed end)
         if speed ~= lastBMS then
             lastBMS = speed
-            print(("[oaklands] speed: engine move speed -> %d (ControllerManager.BaseMoveSpeed)"):format(speed))
+            teleNext = os.clock() + 1
+            teleUntil = os.clock() + 12
+            local ok, rb = pcall(function() return cm.BaseMoveSpeed end)
+            print(("[oaklands] speed: BaseMoveSpeed -> %d (readback %s)"):format(speed, ok and tostring(rb) or "err"))
         end
-        pcall(function() cm.BaseMoveSpeed = speed end)
+        -- self-check: for the first seconds after a change, print the
+        -- ACTUAL horizontal speed so "is it working" is provable
+        if os.clock() >= teleNext and os.clock() <= teleUntil then
+            teleNext = os.clock() + 1
+            local v = hrp.AssemblyLinearVelocity
+            local h = Vector3.new(v.X, 0, v.Z).Magnitude
+            local k = ""
+            for _, kc in ipairs({ Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D }) do
+                if UserInputService:IsKeyDown(kc) then
+                    k = k .. string.sub(kc.Name, 1, 1)
+                end
+            end
+            print(("[oaklands] speed check: base=%d actual=%.0f studs/s keys=%s"):format(speed, h, k == "" and "-" or k))
+        end
     end
 end
 
-track(RunService.PreSimulation:Connect(function(dt)
-    pcall(charMover, dt)
+-- Stepped and PreSimulation are the same signal: handlers fire in
+-- registration order and the last write before the physics step wins.
+-- LuauHumanoid re-registers its own Stepped connection on every spawn,
+-- so ours must be (re)created a frame after every spawn to stay AFTER
+-- the game's per-frame BaseMoveSpeed sync in the firing order.
+local moverConn = nil
+local function rebindMover()
+    if moverConn then
+        pcall(function() moverConn:Disconnect() end)
+        moverConn = nil
+    end
+    moverConn = track(RunService.PreSimulation:Connect(function(dt)
+        pcall(charMover, dt)
+    end))
+end
+rebindMover()
+track(LocalPlayer.CharacterAdded:Connect(function()
+    task.wait()
+    rebindMover()
 end))
+onMoverCleanup(function()
+    if moverConn then
+        pcall(function() moverConn:Disconnect() end)
+        moverConn = nil
+    end
+    releaseFlyLV(true)
+end)
 
 -- ============================================================
 -- TELEPORTS
@@ -3882,10 +4009,11 @@ local function buildMenu()
         function(v) Config.Camera.Speed = v end, 5, 25, 500,
         function(v) return ("%d studs/s"):format(v) end)
     section(pmv, "Character")
-    toggle(pmv, "Fly (velocity)",
+    toggle(pmv, "Fly",
         function() return Config.Movement.Fly end,
         function(v)
             Config.Movement.Fly = v
+            if not v then releaseFlyLV(true) end
             notify(v and ("Fly on - WASD flies along the camera, Space / Ctrl up and down (" .. HOTKEY_BY_ID.Fly.Key.Name .. " toggles)") or "Fly off")
         end, HOTKEY_BY_ID.Fly)
     keybindRow(pmv, HOTKEY_BY_ID.Fly)
@@ -3962,6 +4090,12 @@ local function buildMenu()
                 pcall(function() c:Disconnect() end)
             end
             table.clear(genv.__HAVOC_OAKLANDS_DISCONNECT)
+        end
+        if type(genv.__HAVOC_OAKLANDS_MOVER_CLEANUP) == "table" then
+            for _, fn in ipairs(genv.__HAVOC_OAKLANDS_MOVER_CLEANUP) do
+                pcall(fn)
+            end
+            table.clear(genv.__HAVOC_OAKLANDS_MOVER_CLEANUP)
         end
         pcall(function() RunService:UnbindFromRenderStep(FREE_BIND) end)
         genv.__HAVOC_OAKLANDS_FREECAM = nil
