@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.36"
+local SCRIPT_VERSION = "oak-v29.37"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3042,17 +3042,21 @@ track(task.spawn(function()
 end))
 
 -- ============================================================
--- CHARACTER FLY + SPEED  (Project Delta method: velocity, no WalkSpeed)
+-- CHARACTER FLY + SPEED
 -- ============================================================
--- Same family as an external speed/fly: writes AssemblyLinearVelocity
--- on PreSimulation so the physics step carries the character. No
--- WalkSpeed / jump-state writes (those are the ones that get movement
--- features banned here) and no CFrame skips - collisions always apply,
--- the character is never forced inside geometry.
+-- FLY = velocity writes on PreSimulation (Project Delta method).
+-- SPEED = probe-checked position steps: the velocity-write version
+-- lost the fight against the game's own mover while keys were held
+-- (it only survived as glide on release), so v2 moves the character
+-- by tiny CFrame steps with a collision probe - the teleport family
+-- that is PROVEN to move the character in this game - and never
+-- steps into geometry. No WalkSpeed / jump-state writes anywhere
+-- (that is the channel this game bans for).
 local FLY_CAP = 150
 
-local function charMover()
+local function charMover(dt)
     if genv.__HAVOC_OAKLANDS_GEN ~= MY_GEN then return end
+    dt = tonumber(dt) or (1 / 60)
     local flying = Config.Movement.Fly == true
     local speeding = Config.Movement.SpeedHack == true
     if not flying and not speeding then return end
@@ -3077,25 +3081,22 @@ local function charMover()
     elseif speeding then
         local cam = Workspace.CurrentCamera
         if not cam then return end
-        -- direction = live key input along the camera, rewritten every
-        -- frame: turning redirects instantly and releasing the keys stops
-        -- the push, so the game's own braking brings you to a stop (the
-        -- old velocity-amplifying version kept boosting the residual
-        -- momentum - that was the "keeps going / can't steer" bug)
         local mx = (UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0)
         local mz = (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0)
         local vel = hrp.AssemblyLinearVelocity
         if mx == 0 and mz == 0 then
-            -- nothing held: bleed off excess speed so stopping feels instant
-            local horiz = Vector3.new(vel.X, 0, vel.Z)
-            if horiz.Magnitude > 30 then
-                pcall(function()
-                    hrp.AssemblyLinearVelocity = Vector3.new(vel.X * 0.9, vel.Y, vel.Z * 0.9)
-                end)
+            -- released: kill the horizontal glide instantly
+            if math.abs(vel.X) + math.abs(vel.Z) > 0.5 then
+                pcall(function() hrp.AssemblyLinearVelocity = Vector3.new(0, vel.Y, 0) end)
             end
             return
         end
-        local target = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
+        -- position-stepped speed: velocity writes lose the fight against
+        -- the game's own mover while keys are held, but CFrame steps are
+        -- the family PROVEN to move the character here (teleports). Each
+        -- step is probe-checked so the character can never end up inside
+        -- geometry - walls block, ledges get a step-up, nothing phases.
+        local speed = math.clamp(tonumber(Config.Movement.SpeedValue) or 40, 16, FLY_CAP)
         local fwd = Vector3.new(cam.LookVector.X, 0, cam.LookVector.Z)
         local right = Vector3.new(cam.RightVector.X, 0, cam.RightVector.Z)
         if fwd.Magnitude > 0 then fwd = fwd.Unit end
@@ -3103,14 +3104,38 @@ local function charMover()
         local dir = fwd * mz + right * mx
         if dir.Magnitude <= 0 then return end
         dir = dir.Unit
+        local step = math.min(speed * dt, 2.5)
+        local from = hrp.Position
+        local params = OverlapParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { char }
+        local function spotClear(p)
+            local ok, hits = pcall(function() return Workspace:GetPartBoundsInRadius(p, 1.4, params) end)
+            if not ok or type(hits) ~= "table" then return false end
+            for _, h in ipairs(hits) do
+                if h.CanCollide ~= false and not h:IsDescendantOf(char) then
+                    return false
+                end
+            end
+            return true
+        end
+        local land = from + dir * step
+        if not spotClear(land) then
+            land = from + dir * step + Vector3.new(0, 1.5, 0)  -- low ledge / slope: climb it
+            if not spotClear(land) then
+                land = from + dir * (step * 0.35)               -- tight spot: crawl
+                if not spotClear(land) then return end
+            end
+        end
         pcall(function()
-            hrp.AssemblyLinearVelocity = Vector3.new(dir.X * target, vel.Y, dir.Z * target)
+            hrp.CFrame = CFrame.new(land, land + hrp.CFrame.LookVector)
+            hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
         end)
     end
 end
 
-track(RunService.PreSimulation:Connect(function()
-    pcall(charMover)
+track(RunService.PreSimulation:Connect(function(dt)
+    pcall(charMover, dt)
 end))
 
 -- ============================================================
