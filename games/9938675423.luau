@@ -211,7 +211,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.31"
+local SCRIPT_VERSION = "oak-v29.32"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3114,6 +3114,32 @@ local function staticLocations()
     return out
 end
 
+local ARCADE_NAME = "Lumberjack Sim"
+local arcadeCache, arcadeNext = nil, 0
+
+-- the "Gift of Golden Times" placeable (AltName = ArcadeMachine) houses
+-- the lumberjack sim; it lives wherever a player placed it
+-- (Workspace.World.Structures), so this entry only shows up while one
+-- is loaded in the server
+local function findArcadeGift()
+    if arcadeCache and arcadeCache.Parent then return arcadeCache end
+    local now = os.clock()
+    if now < arcadeNext then return nil end
+    arcadeNext = now + 2
+    arcadeCache = nil
+    local world = Workspace:FindFirstChild("World")
+    local structures = world and world:FindFirstChild("Structures")
+    if not structures then return nil end
+    for _, m in ipairs(structures:GetChildren()) do
+        if m:IsA("Model")
+            and (m.Name == "GiftOfGoldenTimes" or m:GetAttribute("AltName") == "ArcadeMachine") then
+            arcadeCache = m
+            return m
+        end
+    end
+    return nil
+end
+
 local function getStores()
     local seen, out = {}, {}
     local world = Workspace:FindFirstChild("World")
@@ -3135,11 +3161,25 @@ local function getStores()
             out[#out + 1] = loc.name
         end
     end
+    if findArcadeGift() and not seen[ARCADE_NAME] then
+        seen[ARCADE_NAME] = true
+        out[#out + 1] = ARCADE_NAME
+    end
     table.sort(out)
     return out
 end
 
 local function storePos(name)
+    if name == ARCADE_NAME then
+        local m = findArcadeGift()
+        if m then
+            local ok, pivot = pcall(function() return m:GetPivot().Position end)
+            if ok and pivot then return pivot end
+            local root = m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart")
+            if root then return root.Position end
+        end
+        return nil
+    end
     local world = Workspace:FindFirstChild("World")
     local regions = world and world:FindFirstChild("Regions")
     local stores = regions and regions:FindFirstChild("Stores")
