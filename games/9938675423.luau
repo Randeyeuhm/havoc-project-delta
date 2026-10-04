@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.49"
+local SCRIPT_VERSION = "oak-v29.50"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3563,25 +3563,41 @@ end
 -- only if it reproduces a hash that actually exists in CachedRemotes.
 local function safeStealKey()
     local client, keyMod = SAFE.client, SAFE.keyMod
-    if type(client) ~= "table" or type(keyMod) ~= "function" then return nil end
-    local fn = client.CreateKeyHash
-    if type(fn) ~= "function" or type(debug) ~= "table" or type(debug.getupvalue) ~= "function" then
+    if type(client) ~= "table" or type(keyMod) ~= "function" or type(debug) ~= "table" then
         return nil
     end
-    for i = 1, 12 do
-        local ok, name, val = pcall(debug.getupvalue, fn, i)
-        if not ok or name == nil then break end
-        if type(val) == "string" and #val >= 6 and #val <= 128 then
-            local ok2, hit = pcall(function()
-                local h = keyMod("BackpackTellServer" .. val, val)
-                return type(h) == "string" and h ~= "" and client.CachedRemotes[h] ~= nil
-            end)
-            if ok2 and hit then
-                return val
-            end
+    local okc, fn = pcall(function() return client.CreateKeyHash end)
+    if not okc or type(fn) ~= "function" then return nil end
+    local found = nil
+    -- a candidate is accepted only if it reproduces a hash that exists
+    -- in CachedRemotes - a wrong string can never be accepted
+    local function probe(v)
+        if found or type(v) ~= "string" or #v < 6 or #v > 128 then return end
+        local ok2, hit = pcall(function()
+            local h = keyMod("BackpackTellServer" .. v, v)
+            return type(h) == "string" and h ~= "" and client.CachedRemotes[h] ~= nil
+        end)
+        if ok2 and hit then found = v end
+    end
+    -- fast path: executors that expose debug.getupvalues (plural)
+    if type(debug.getupvalues) == "function" then
+        local ok, ups = pcall(debug.getupvalues, fn)
+        if ok and type(ups) == "table" then
+            for _, v in pairs(ups) do probe(v) end
         end
     end
-    return nil
+    -- standard path: debug.getupvalue returns (name, value) on Luau but
+    -- some executor builds return only the value - accept every shape
+    if not found and type(debug.getupvalue) == "function" then
+        for i = 1, 16 do
+            local ok, a, b = pcall(debug.getupvalue, fn, i)
+            if not ok then break end
+            if a == nil and b == nil then break end
+            probe(b)
+            probe(a)
+        end
+    end
+    return found
 end
 
 -- make sure SAFE.key is usable: INF broadcast, else recover from the
