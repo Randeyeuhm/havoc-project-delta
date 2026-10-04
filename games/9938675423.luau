@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.48"
+local SCRIPT_VERSION = "oak-v29.49"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3557,18 +3557,61 @@ local function safeDeps()
     return SAFE.client, SAFE.keyMod
 end
 
+-- recover the LIVE server key from the game's own module when the INF
+-- join broadcast was missed (script executed after load). The Client's
+-- CreateKeyHash carries the key as an upvalue; a candidate is accepted
+-- only if it reproduces a hash that actually exists in CachedRemotes.
+local function safeStealKey()
+    local client, keyMod = SAFE.client, SAFE.keyMod
+    if type(client) ~= "table" or type(keyMod) ~= "function" then return nil end
+    local fn = client.CreateKeyHash
+    if type(fn) ~= "function" or type(debug) ~= "table" or type(debug.getupvalue) ~= "function" then
+        return nil
+    end
+    for i = 1, 12 do
+        local ok, name, val = pcall(debug.getupvalue, fn, i)
+        if not ok or name == nil then break end
+        if type(val) == "string" and #val >= 6 and #val <= 128 then
+            local ok2, hit = pcall(function()
+                local h = keyMod("BackpackTellServer" .. val, val)
+                return type(h) == "string" and h ~= "" and client.CachedRemotes[h] ~= nil
+            end)
+            if ok2 and hit then
+                return val
+            end
+        end
+    end
+    return nil
+end
+
+-- make sure SAFE.key is usable: INF broadcast, else recover from the
+-- running game, else ask the server ONCE every 30s (spamming that
+-- request on every failed attempt is what got accounts kicked)
+local function safeNeedKey()
+    if type(SAFE.key) == "string" then return true end
+    safeWatchInf()
+    if type(SAFE.key) == "string" then return true end
+    local stolen = safeStealKey()
+    if stolen then
+        SAFE.key = stolen
+        print("[oaklands] anti-cheat: remote key recovered from the live client - SAFE ready")
+        return true
+    end
+    if os.clock() - (SAFE.reqAt or 0) > 30 then
+        SAFE.reqAt = os.clock()
+        local inf = ReplicatedStorage:FindFirstChild("INF")
+        if inf then pcall(function() inf:FireServer("Req") end) end
+    end
+    return false
+end
+
 local function safeResolve(name)
     local client, keyMod = safeDeps()
     if type(client) ~= "table" or type(keyMod) ~= "function" then
         return nil, "client dependencies not reachable"
     end
-    if type(SAFE.key) ~= "string" then
-        safeWatchInf()
-        if type(SAFE.key) ~= "string" then
-            local inf = ReplicatedStorage:FindFirstChild("INF")
-            if inf then pcall(function() inf:FireServer("Req") end) end
-            return nil, "server key not learned yet - requested it, retry in a second"
-        end
+    if not safeNeedKey() then
+        return nil, "server key not learned yet - retrying soon"
     end
     local hash = keyMod(name .. SAFE.key, SAFE.key)
     local child = client.CachedRemotes and client.CachedRemotes[hash]
@@ -3626,14 +3669,7 @@ end
 -- BackpackTellServer {Name = hash(action), Data, UUID = tool UUID}
 function SAFE.action(name, data, uuid)
     safeDeps()
-    if type(SAFE.key) ~= "string" then
-        safeWatchInf()
-        if type(SAFE.key) ~= "string" then
-            local inf = ReplicatedStorage:FindFirstChild("INF")
-            if inf then pcall(function() inf:FireServer("Req") end) end
-            return false
-        end
-    end
+    if not safeNeedKey() then return false end
     local keyMod = SAFE.keyMod
     if type(keyMod) ~= "function" then return false end
     -- CONVENTION (dump-verified against Backpack InformServer): the
