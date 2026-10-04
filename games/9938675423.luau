@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.47"
+local SCRIPT_VERSION = "oak-v29.48"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3434,6 +3434,10 @@ local function shieldNote(msg)
     end
 end
 
+-- set right after the SAFE helpers exist: classifies captured envelope
+-- hashes (see the namecall hook) against the known action names
+local captureEnvelope = nil
+
 local function installHaxShield()
     if type(getrawmetatable) ~= "function" or type(setreadonly) ~= "function"
         or type(getnamecallmethod) ~= "function" then
@@ -3453,6 +3457,15 @@ local function installHaxShield()
         mt.__namecall = function(self, ...)
             if getnamecallmethod() == "FireServer" then
                 local first = ...
+                -- diagnostics: classify the game's own envelope hashes
+                -- (our own SAFE sends are skipped via the SELF flag)
+                if captureEnvelope and not genv.__HAVOC_OAKLANDS_SELF and type(first) == "table" then
+                    local pn = rawget(first, "Name")
+                    local pu = rawget(first, "UUID")
+                    if type(pn) == "string" and #pn >= 16 and pu ~= nil then
+                        pcall(captureEnvelope, pn, pu)
+                    end
+                end
                 local isHax = typeof(self) == "Instance" and self.Name == "HAX"
                 -- the _Types tripwire fires HAX:FireServer(11291) + a
                 -- {<runtime-decrypted key> = 11291} beacon at a random
@@ -3573,12 +3586,22 @@ end
 function SAFE.fire(name, data)
     local inst, err = safeResolve(name)
     if not inst then
+        SAFE.lastErr = tostring(err)
         print("[oaklands] anti-cheat safe: " .. tostring(err))
         return false
     end
-    local ok, res = pcall(function() return inst:FireServer(data) end)
+    local ok, res = pcall(function()
+        genv.__HAVOC_OAKLANDS_SELF = true
+        local r = inst:FireServer(data)
+        genv.__HAVOC_OAKLANDS_SELF = nil
+        return r
+    end)
+    genv.__HAVOC_OAKLANDS_SELF = nil
     if not ok then
+        SAFE.lastErr = tostring(res)
         print(("[oaklands] anti-cheat safe: send '%s' failed - %s"):format(tostring(name), tostring(res)))
+    else
+        SAFE.lastErr = nil
     end
     return ok
 end
@@ -3626,6 +3649,49 @@ function SAFE.action(name, data, uuid)
 end
 
 -- ============================================================
+-- PACKET CAPTURE  (diagnostics)
+-- ============================================================
+-- The namecall hook hands us every envelope the GAME itself fires
+-- (BackpackTellServer {Name hash, Data, UUID}). This classifies each
+-- new hash against the known action names under BOTH possible
+-- conventions (raw name vs name .. key), so a wrong convention is
+-- provable from the console - and records the last UUID the game
+-- sent, so we can compare ours against it.
+captureEnvelope = function(nameHash, uuid)
+    local CAP = genv.__HAVOC_OAKLANDS_CAP
+    if type(CAP) ~= "table" then
+        CAP = { seen = {}, prints = 0 }
+        genv.__HAVOC_OAKLANDS_CAP = CAP
+    end
+    CAP.uuid = uuid
+    if CAP.seen[nameHash] then return end
+    CAP.seen[nameHash] = true
+    if (CAP.prints or 0) >= 12 then return end
+    local key, km = SAFE.key, SAFE.keyMod
+    if type(key) ~= "string" or type(km) ~= "function" then
+        print("[oaklands] capture: envelope arrived but the key is not learned yet")
+        return
+    end
+    for _, act in ipairs({ "Swing", "SwingStartAttempt", "SwingStopAttempt", "AttemptChop", "AttemptMine", "HitMarkerAttempt", "AttemptRockSplit", "RockSplitStartAttempt", "GetStats" }) do
+        local okA, a = pcall(km, act, key)
+        local okB, b = pcall(km, act .. key, key)
+        if okA and a == nameHash then
+            CAP.prints = CAP.prints + 1
+            print(("[oaklands] capture: '%s' = hash(RAW name)"):format(act))
+            if act == "HitMarkerAttempt" then CAP.hm = "raw" end
+            return
+        elseif okB and b == nameHash then
+            CAP.prints = CAP.prints + 1
+            print(("[oaklands] capture: '%s' = hash(name .. key)"):format(act))
+            if act == "HitMarkerAttempt" then CAP.hm = "concat" end
+            return
+        end
+    end
+    CAP.prints = CAP.prints + 1
+    print(("[oaklands] capture: unmatched envelope hash %s..."):format(string.sub(nameHash, 1, 12)))
+end
+
+-- ============================================================
 -- AUTO HIT-MARKER  (V124 charge minigame - humanized timing)
 -- ============================================================
 -- Every axe / pickaxe swing runs a Charge minigame: markers sweep the
@@ -3651,9 +3717,14 @@ if type(HM_STATE) ~= "table" then
         sent = setmetatable({}, { __mode = "k" }),
         warnAt = 0,
         fired = 0,
+        sentOK = 0,
+        statAt = 0,
+        lastUUID = nil,
     }
     genv.__HAVOC_OAKLANDS_HM = HM_STATE
 end
+HM_STATE.sentOK = HM_STATE.sentOK or 0
+HM_STATE.statAt = HM_STATE.statAt or 0
 local HM_SKIP = 0.17   -- fraction of markers deliberately botched (looks human)
 local HM_LAST = setmetatable({}, { __mode = "k" })  -- ToolIndicator -> last progress
 
@@ -3718,6 +3789,22 @@ local function hmStep()
     -- only while genuinely holding the mouse button - attempts then only
     -- ever appear during real primary-action input, like a real clicker
     if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
+    -- periodic self-report: attempts vs actually-sent, what convention
+    -- the captured game packets use, and whether our UUID matches theirs
+    if (HM_STATE.fired or 0) > 0 and os.clock() >= (HM_STATE.statAt or 0) then
+        HM_STATE.statAt = os.clock() + 15
+        local cap = genv.__HAVOC_OAKLANDS_CAP
+        local conv = (cap and cap.hm) or "no-game-packet-yet"
+        local um = "-"
+        if cap and cap.uuid ~= nil and HM_STATE.lastUUID ~= nil then
+            um = (tostring(cap.uuid) == tostring(HM_STATE.lastUUID)) and "yes" or "NO"
+        end
+        print(("[oaklands] hit-marker: attempts=%d sentOk=%d | game-conv=%s uuid-match=%s"):format(
+            HM_STATE.fired, HM_STATE.sentOK or 0, conv, um))
+        if SAFE.lastErr then
+            print("[oaklands] hit-marker: lastErr=" .. tostring(SAFE.lastErr))
+        end
+    end
     for _, inst in ipairs(findChopTools()) do
         -- same guard the game's own code uses before it fires an attempt:
         -- only send while THIS tool class says it is actively swinging
@@ -3770,10 +3857,13 @@ local function hmStep()
                             sent[i] = true
                             if uuid ~= nil then
                                 HM_STATE.fired = HM_STATE.fired + 1
+                                HM_STATE.lastUUID = uuid
                                 local ok = SAFE.action("HitMarkerAttempt", {}, uuid)
-                                if not ok and os.clock() - HM_STATE.warnAt > 3 then
+                                if ok then
+                                    HM_STATE.sentOK = (HM_STATE.sentOK or 0) + 1
+                                elseif os.clock() - HM_STATE.warnAt > 3 then
                                     HM_STATE.warnAt = os.clock()
-                                    print("[oaklands] hit-marker: SAFE key not ready yet - attempt skipped")
+                                    print("[oaklands] hit-marker: attempt not sent - " .. tostring(SAFE.lastErr or "SAFE key not ready yet"))
                                 end
                             end
                         end
