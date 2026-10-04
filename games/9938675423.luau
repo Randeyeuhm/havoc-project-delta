@@ -186,7 +186,7 @@
     old ESP labels are cleaned up on boot.
 ]]
 
-local SCRIPT_VERSION = "oak-v29.46"
+local SCRIPT_VERSION = "oak-v29.47"
 
 -- ============================================================
 -- SERVICES / GLOBALS
@@ -3635,10 +3635,14 @@ end
 -- pays out charge speed, combo and extra hit damage. The first build
 -- fired every attempt at machine precision and was live-kicked for it
 -- (a perfect-every-swing pattern is not human). This version plays it
--- like an exceptional human instead: aims near each marker's centre
--- with jitter, deliberately botches ~13% of markers, only acts while
--- the mouse button is actually held, and starts fresh every swing -
--- ~87% accuracy, far above real clicking, without the robot pattern.
+-- like an exceptional human instead: aims slightly LATE of each
+-- marker's centre with jitter (real players react to the sweep - they
+-- do not click the instant a window opens), botches ~17% of markers
+-- and the odd whole swing, sends the exact UUID the game itself would
+-- send (EquippedTool.Class.UUID, taken from the live inventory), only
+-- acts while the tool is actively swinging and the mouse button is
+-- held, and starts fresh every swing - ~83% accuracy, above real
+-- clicking, without the robot pattern.
 local HM_STATE = genv.__HAVOC_OAKLANDS_HM
 if type(HM_STATE) ~= "table" then
     HM_STATE = {
@@ -3650,7 +3654,7 @@ if type(HM_STATE) ~= "table" then
     }
     genv.__HAVOC_OAKLANDS_HM = HM_STATE
 end
-local HM_SKIP = 0.13   -- fraction of markers deliberately botched (looks human)
+local HM_SKIP = 0.17   -- fraction of markers deliberately botched (looks human)
 local HM_LAST = setmetatable({}, { __mode = "k" })  -- ToolIndicator -> last progress
 
 local function findChopTools()
@@ -3688,6 +3692,27 @@ local function findChopTools()
     return out
 end
 
+-- the UUID the server expects is the equipped tool's class UUID (exactly
+-- what the game's own InformServer sends). The found tool class carries
+-- the live inventory - read the equipped tool's class UUID from it, and
+-- refuse to fire for a class that is not the currently equipped one.
+-- Falls back to the class's own UUID if the inventory is not reachable.
+local function hmUUID(inst)
+    local ok, uuid, cls = pcall(function()
+        local inv = inst.Inventory
+        local eq = inv and inv.EquippedTool
+        local c = eq and eq.Class
+        return c and c.UUID, c
+    end)
+    if ok and uuid ~= nil then
+        if cls == inst then
+            return uuid
+        end
+        return nil
+    end
+    return rawget(inst, "UUID")
+end
+
 local function hmStep()
     if Config.World.AutoHitMarker ~= true then return end
     -- only while genuinely holding the mouse button - attempts then only
@@ -3718,9 +3743,12 @@ local function hmStep()
                 local sent = HM_STATE.sent[markers]
                 if not sent then
                     sent = {}
+                    if math.random() < 0.10 then
+                        sent.__miss = true   -- deliberately blow this whole swing
+                    end
                     HM_STATE.sent[markers] = sent
                 end
-                local uuid = rawget(inst, "UUID")
+                local uuid = hmUUID(inst)
                 for i = 1, count do
                     local m = markers[i]
                     if m then
@@ -3728,11 +3756,13 @@ local function hmStep()
                         local half = m.Size.X.Scale / 2
                         local sentI = sent[i]
                         if sentI == nil then
-                            if math.random() < HM_SKIP then
+                            if sent.__miss or math.random() < HM_SKIP then
                                 sent[i] = false   -- botched on purpose
                             else
-                                -- aim near the centre with human jitter
-                                sent[i] = pos + (math.random() - 0.5) * half * 0.7
+                                -- human-like: aim LATE of centre with jitter
+                                -- (players react to the sweep instead of
+                                -- clicking the instant a window opens)
+                                sent[i] = pos + (math.random() - 0.15) * half * 0.7
                             end
                             sentI = sent[i]
                         end
